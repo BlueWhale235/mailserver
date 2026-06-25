@@ -1,0 +1,96 @@
+name: Build release packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Platform package to build
+        required: true
+        type: choice
+        default: all
+        options:
+          - all
+          - win-x64
+          - linux-x64
+          - linux-arm64
+      version:
+        description: Version label used in package filenames
+        required: true
+        type: string
+        default: manual
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  package:
+    name: Package ${{ gitea.event.inputs.platform }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    env:
+      SELECTED_PLATFORM: ${{ gitea.event.inputs.platform }}
+      REQUESTED_VERSION: ${{ gitea.event.inputs.version }}
+
+    steps:
+      - name: Check out repository
+        uses: https://github.com/actions/checkout@v4
+
+      - name: Install .NET SDK
+        uses: https://github.com/actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.301
+          cache: true
+          cache-dependency-path: Directory.Packages.props
+
+      - name: Select runtimes
+        shell: bash
+        run: |
+          set -eu
+          case "$SELECTED_PLATFORM" in
+            all) RUNTIMES="win-x64 linux-x64 linux-arm64" ;;
+            win-x64|linux-x64|linux-arm64) RUNTIMES="$SELECTED_PLATFORM" ;;
+            *) echo "Unsupported platform: $SELECTED_PLATFORM" >&2; exit 1 ;;
+          esac
+
+          VERSION="$(printf '%s' "$REQUESTED_VERSION" | tr -c 'A-Za-z0-9._-' '-')"
+          VERSION="${VERSION#-}"
+          VERSION="${VERSION%-}"
+          if [ -z "$VERSION" ]; then
+            VERSION="manual"
+          fi
+
+          echo "RUNTIMES=$RUNTIMES" >> "$GITEA_ENV"
+          echo "PACKAGE_VERSION=$VERSION" >> "$GITEA_ENV"
+
+      - name: Publish complete deployment directories
+        shell: bash
+        run: |
+          set -eu
+          chmod +x scripts/publish-portable.sh
+          ./scripts/publish-portable.sh $RUNTIMES
+
+      - name: Create release archives
+        shell: bash
+        run: |
+          set -eu
+          mkdir -p builds/release-packages
+
+          for RID in $RUNTIMES; do
+            PACKAGE="mailserver-${PACKAGE_VERSION}-${RID}.tar.gz"
+            tar -C builds/publish -czf "builds/release-packages/$PACKAGE" "$RID"
+          done
+
+          (
+            cd builds/release-packages
+            sha256sum ./*.tar.gz > SHA256SUMS
+          )
+
+      - name: Upload release packages
+        uses: https://github.com/actions/upload-artifact@v3
+        with:
+          name: mailserver-${{ gitea.event.inputs.platform }}-release-packages
+          path: builds/release-packages/*
+          if-no-files-found: error
+          retention-days: 30
