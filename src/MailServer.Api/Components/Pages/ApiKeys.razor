@@ -1,0 +1,41 @@
+@page "/admin/api-keys"
+@attribute [Authorize]
+@inject AdminApplicationService Administration
+@inject AuthenticationStateProvider Authentication
+
+<PageTitle>API Key</PageTitle>
+<h1>API Key</h1>
+<div class="toolbar"><input @bind="_name" placeholder="自动化任务" /><button @onclick="CreateAsync">创建</button></div>
+@if (_created is not null)
+{
+    <div class="secret"><strong>请立即保存，此密钥只显示一次：</strong><code>@_created</code></div>
+}
+<table>
+    <thead><tr><th>名称</th><th>前缀</th><th>权限</th><th>状态</th><th></th></tr></thead>
+    <tbody>
+    @foreach (var key in _keys)
+    {
+        <tr><td>@key.Name</td><td>@key.Prefix</td><td>@key.Scopes</td><td>@(key.RevokedAt is null ? "有效" : "已撤销")</td>
+            <td><button class="danger" disabled="@(key.RevokedAt is not null)" @onclick="() => RevokeAsync(key.Id)">撤销</button></td></tr>
+    }
+    </tbody>
+</table>
+
+@code {
+    private IReadOnlyList<ApiKeyView> _keys = [];
+    private string _name = string.Empty;
+    private string? _created;
+    protected override Task OnInitializedAsync() => ReloadAsync();
+    private async Task ReloadAsync() => _keys = await Administration.GetApiKeysAsync(CancellationToken.None);
+    private async Task<string> ActorAsync() => (await Authentication.GetAuthenticationStateAsync()).User.Identity?.Name ?? "admin-ui";
+    private async Task CreateAsync()
+    {
+        var key = await Administration.CreateApiKeyAsync(_name, ["admin"], null, await ActorAsync(), CancellationToken.None);
+        _created = key.Value; _name = string.Empty; await ReloadAsync();
+    }
+    private async Task RevokeAsync(Guid id)
+    {
+        await Administration.RevokeApiKeyAsync(id, await ActorAsync(), CancellationToken.None);
+        await ReloadAsync();
+    }
+}

@@ -1,0 +1,32 @@
+@page "/admin"
+@attribute [Authorize]
+@inject AdminApplicationService Administration
+
+<PageTitle>MailServer 仪表盘</PageTitle>
+<h1>仪表盘</h1>
+@if (_dashboard is null)
+{
+    <p>正在加载…</p>
+}
+else
+{
+    <div class="cards">
+        <section><strong>@_dashboard.Domains</strong><span>域名</span></section>
+        <section><strong>@_dashboard.Accounts</strong><span>账号</span></section>
+        <section><strong>@_dashboard.Aliases</strong><span>别名</span></section>
+        <section><strong>@_dashboard.PendingDeliveries</strong><span>待投递</span></section>
+        <section><strong>@_dashboard.FailedDeliveries</strong><span>失败</span></section>
+        <section><strong>@FormatBytes(_dashboard.StoredBytes)</strong><span>邮件存储</span></section>
+    </div>
+}
+
+@code {
+    private AdminDashboard? _dashboard;
+    protected override async Task OnInitializedAsync() =>
+        _dashboard = await Administration.GetDashboardAsync(CancellationToken.None);
+
+    private static string FormatBytes(long value) =>
+        value >= 1_073_741_824 ? $"{value / 1_073_741_824d:F1} GiB" :
+        value >= 1_048_576 ? $"{value / 1_048_576d:F1} MiB" :
+        value >= 1024 ? $"{value / 1024d:F1} KiB" : $"{value} B";
+}

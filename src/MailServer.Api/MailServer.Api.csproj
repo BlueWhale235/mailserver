@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <Platforms>AnyCPU;x64</Platforms>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../MailServer.Domain/MailServer.Domain.csproj" />
+    <ProjectReference Include="../MailServer.Imap/MailServer.Imap.csproj" />
+    <ProjectReference Include="../MailServer.Infrastructure/MailServer.Infrastructure.csproj" />
+    <ProjectReference Include="../MailServer.Migrations.MySql/MailServer.Migrations.MySql.csproj" />
+    <ProjectReference Include="../MailServer.Migrations.PostgreSql/MailServer.Migrations.PostgreSql.csproj" />
+    <ProjectReference Include="../MailServer.Migrations.Sqlite/MailServer.Migrations.Sqlite.csproj" />
+    <ProjectReference Include="../MailServer.Smtp/MailServer.Smtp.csproj" />
+    <ProjectReference Include="../MailServer.Worker/MailServer.Worker.csproj" />
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" />
+    <PackageReference Include="Microsoft.AspNetCore.App.Internal.Assets" GeneratePathProperty="true" PrivateAssets="all" />
+  </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="$(PkgMicrosoft_AspNetCore_App_Internal_Assets)/_framework/blazor.web.js" LogicalName="MailServer.Api.blazor.web.js" />
+  </ItemGroup>
+</Project>

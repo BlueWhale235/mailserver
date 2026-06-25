@@ -1,0 +1,31 @@
+@page "/admin/security"
+@attribute [Authorize]
+@inject AdminApplicationService Administration
+@inject AuthenticationStateProvider Authentication
+
+<PageTitle>安全设置</PageTitle>
+<h1>安全设置</h1>
+<div class="panel form-grid">
+    <label>当前密码<input @bind="_current" type="password" /></label>
+    <label>新密码<input @bind="_next" type="password" /></label>
+    <button @onclick="ChangeAsync">修改管理员密码</button>
+    <p class="@(_success ? "success" : "error")">@_message</p>
+</div>
+
+@code {
+    private string _current = string.Empty;
+    private string _next = string.Empty;
+    private string? _message;
+    private bool _success;
+    private async Task ChangeAsync()
+    {
+        try
+        {
+            var state = await Authentication.GetAuthenticationStateAsync();
+            var id = Guid.Parse(state.User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+            await Administration.ChangeAdminPasswordAsync(id, _current, _next, true, state.User.Identity?.Name ?? "admin-ui", CancellationToken.None);
+            _current = _next = string.Empty; _success = true; _message = "密码已更新。";
+        }
+        catch (Exception exception) { _success = false; _message = exception.Message; }
+    }
+}

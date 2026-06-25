@@ -1,0 +1,24 @@
+@page "/admin/dns"
+@attribute [Authorize]
+@inject AdminApplicationService Administration
+
+<PageTitle>DNS 诊断</PageTitle>
+<h1>DNS 诊断</h1>
+<div class="toolbar"><input @bind="_domain" placeholder="example.com" /><input @bind="_selector" placeholder="DKIM selector" /><button @onclick="InspectAsync">检查</button></div>
+@if (_result is not null)
+{
+    <section class="panel">
+        <h2>@_result.Domain</h2>
+        <p><strong>MX：</strong>@string.Join(", ", _result.Mx)</p>
+        <p><strong>SPF：</strong>@string.Join(", ", _result.Spf)</p>
+        <p><strong>DMARC：</strong>@string.Join(", ", _result.Dmarc)</p>
+        <p><strong>DKIM：</strong>@string.Join(", ", _result.Dkim)</p>
+        @foreach (var warning in _result.Warnings) { <p class="warning">@warning</p> }
+    </section>
+}
+@code {
+    private string _domain = string.Empty;
+    private string _selector = string.Empty;
+    private DnsDiagnosticResult? _result;
+    private async Task InspectAsync() => _result = await Administration.DiagnoseDnsAsync(_domain, _selector, CancellationToken.None);
+}

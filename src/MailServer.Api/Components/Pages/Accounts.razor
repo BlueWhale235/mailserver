@@ -1,0 +1,81 @@
+@page "/admin/accounts"
+@attribute [Authorize]
+@inject AdminApplicationService Administration
+@inject AuthenticationStateProvider Authentication
+
+<PageTitle>账号管理</PageTitle>
+<h1>账号</h1>
+<div class="toolbar">
+    <input @bind="_address" placeholder="alice@example.com" />
+    <input @bind="_password" type="password" placeholder="至少 12 位密码" />
+    <button @onclick="CreateAsync">创建账号</button>
+</div>
+<div class="toolbar">
+    <input @bind="_targetAddress" placeholder="要修改的账号地址" />
+    <input @bind="_newPassword" type="password" placeholder="新密码" />
+    <button class="secondary" @onclick="ChangePasswordAsync">修改密码</button>
+    <input @bind="_quotaMiB" type="number" min="1" placeholder="配额 MiB" />
+    <button class="secondary" @onclick="ChangeQuotaAsync">修改配额</button>
+</div>
+<p class="error">@_error</p>
+<table>
+    <thead><tr><th>地址</th><th>状态</th><th>配额</th><th>创建时间</th><th></th></tr></thead>
+    <tbody>
+    @foreach (var account in _accounts)
+    {
+        <tr>
+            <td>@account.Address</td><td>@(account.IsEnabled ? "启用" : "停用")</td><td>@(account.QuotaBytes / 1_048_576) MiB</td>
+            <td>@account.CreatedAt.LocalDateTime</td>
+            <td><button class="secondary" @onclick="() => ToggleAsync(account)">@((account.IsEnabled ? "停用" : "启用"))</button></td>
+        </tr>
+    }
+    </tbody>
+</table>
+
+@code {
+    private IReadOnlyList<AccountView> _accounts = [];
+    private string _address = string.Empty;
+    private string _password = string.Empty;
+    private string _targetAddress = string.Empty;
+    private string _newPassword = string.Empty;
+    private long _quotaMiB = 1024;
+    private string? _error;
+    protected override Task OnInitializedAsync() => ReloadAsync();
+    private async Task ReloadAsync() => _accounts = await Administration.GetAccountsAsync(CancellationToken.None);
+    private async Task<string> ActorAsync() => (await Authentication.GetAuthenticationStateAsync()).User.Identity?.Name ?? "admin-ui";
+    private async Task CreateAsync()
+    {
+        try
+        {
+            await Administration.CreateAccountAsync(_address, _password, null, await ActorAsync(), CancellationToken.None);
+            _address = _password = string.Empty; _error = null; await ReloadAsync();
+        }
+        catch (Exception exception) { _error = exception.Message; }
+    }
+    private async Task ToggleAsync(AccountView account)
+    {
+        await Administration.UpdateAccountAsync(account.Id, !account.IsEnabled, null, await ActorAsync(), CancellationToken.None);
+        await ReloadAsync();
+    }
+    private AccountView FindTarget() =>
+        _accounts.SingleOrDefault(x => x.Address.Equals(_targetAddress, StringComparison.OrdinalIgnoreCase))
+        ?? throw new InvalidOperationException("未找到目标账号。");
+    private async Task ChangePasswordAsync()
+    {
+        try
+        {
+            await Administration.SetAccountPasswordAsync(FindTarget().Id, _newPassword, await ActorAsync(), CancellationToken.None);
+            _newPassword = string.Empty; _error = null;
+        }
+        catch (Exception exception) { _error = exception.Message; }
+    }
+    private async Task ChangeQuotaAsync()
+    {
+        try
+        {
+            await Administration.UpdateAccountAsync(FindTarget().Id, null, checked(_quotaMiB * 1_048_576), await ActorAsync(), CancellationToken.None);
+            _error = null; await ReloadAsync();
+        }
+        catch (Exception exception) { _error = exception.Message; }
+    }
+}

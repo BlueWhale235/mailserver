@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>mailserver</AssemblyName>
+    <ErrorOnDuplicatePublishOutputFiles>false</ErrorOnDuplicatePublishOutputFiles>
+    <Platforms>AnyCPU;x64</Platforms>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../MailServer.Api/MailServer.Api.csproj"
+                      GlobalPropertiesToRemove="RuntimeIdentifier;SelfContained;PublishSingleFile" />
+    <ProjectReference Include="../MailServer.Imap/MailServer.Imap.csproj"
+                      GlobalPropertiesToRemove="RuntimeIdentifier;SelfContained;PublishSingleFile" />
+    <ProjectReference Include="../MailServer.Infrastructure/MailServer.Infrastructure.csproj" />
+    <ProjectReference Include="../MailServer.Migrations.MySql/MailServer.Migrations.MySql.csproj" />
+    <ProjectReference Include="../MailServer.Migrations.PostgreSql/MailServer.Migrations.PostgreSql.csproj" />
+    <ProjectReference Include="../MailServer.Migrations.Sqlite/MailServer.Migrations.Sqlite.csproj" />
+    <ProjectReference Include="../MailServer.Smtp/MailServer.Smtp.csproj"
+                      GlobalPropertiesToRemove="RuntimeIdentifier;SelfContained;PublishSingleFile" />
+    <ProjectReference Include="../MailServer.Worker/MailServer.Worker.csproj"
+                      GlobalPropertiesToRemove="RuntimeIdentifier;SelfContained;PublishSingleFile" />
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+  <Target Name="RemoveReferencedHostPublishFiles" AfterTargets="ComputeFilesToPublish">
+    <ItemGroup>
+      <ResolvedFileToPublish Remove="@(ResolvedFileToPublish)" Condition="'%(ResolvedFileToPublish.RelativePath)' == 'appsettings.json'&#xA;                               Or $([System.String]::Copy('%(ResolvedFileToPublish.RelativePath)').EndsWith('.runtimeconfig.json'))" />
+    </ItemGroup>
+  </Target>
+</Project>

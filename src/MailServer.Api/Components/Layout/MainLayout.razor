@@ -1,0 +1,42 @@
+@inherits LayoutComponentBase
+@inject IAntiforgery Antiforgery
+@inject IHttpContextAccessor Http
+
+<div class="shell">
+    <aside>
+        <a class="brand" href="/admin">MailServer</a>
+        <AuthorizeView>
+            <Authorized>
+                <nav>
+                    <NavLink href="/admin" Match="NavLinkMatch.All">仪表盘</NavLink>
+                    <NavLink href="/admin/domains">域名</NavLink>
+                    <NavLink href="/admin/accounts">账号</NavLink>
+                    <NavLink href="/admin/aliases">别名</NavLink>
+                    <NavLink href="/admin/api-keys">API Key</NavLink>
+                    <NavLink href="/admin/queue">投递队列</NavLink>
+                    <NavLink href="/admin/dns">DNS 诊断</NavLink>
+                    <NavLink href="/admin/security">安全设置</NavLink>
+                </nav>
+                <form method="post" action="/admin/logout">
+                    <input type="hidden" name="__RequestVerificationToken" value="@Token" />
+                    <button class="link-button" type="submit">退出登录</button>
+                </form>
+            </Authorized>
+        </AuthorizeView>
+    </aside>
+    <main>
+        @if (Http.HttpContext is { Request.IsHttps: false, Connection.RemoteIpAddress: { } remote }
+             && !System.Net.IPAddress.IsLoopback(remote))
+        {
+            <div class="warning">后台正在通过非回环 HTTP 提供服务，请在生产环境启用 PEM HTTPS。</div>
+        }
+        @Body
+    </main>
+</div>
+
+@code {
+    private string Token =>
+        Http.HttpContext is null
+            ? string.Empty
+            : Antiforgery.GetAndStoreTokens(Http.HttpContext).RequestToken ?? string.Empty;
+}

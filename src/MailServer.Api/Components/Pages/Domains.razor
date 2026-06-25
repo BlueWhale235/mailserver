@@ -1,0 +1,63 @@
+@page "/admin/domains"
+@attribute [Authorize]
+@inject AdminApplicationService Administration
+@inject AuthenticationStateProvider Authentication
+
+<PageTitle>域名管理</PageTitle>
+<h1>域名</h1>
+<div class="toolbar">
+    <input @bind="_name" placeholder="example.com" />
+    <select @bind="_mode"><option value="@OutboundMode.Relay">Relay</option><option value="@OutboundMode.DirectMx">Direct MX</option></select>
+    <input @bind="_selector" placeholder="DKIM selector（可选）" />
+    <input @bind="_dkimPath" placeholder="DKIM 私钥路径（可选）" />
+    <button @onclick="CreateAsync">添加域名</button>
+</div>
+<p class="error">@_error</p>
+<table>
+    <thead><tr><th>域名</th><th>状态</th><th>外发</th><th>DKIM</th><th></th></tr></thead>
+    <tbody>
+    @foreach (var domain in _domains)
+    {
+        <tr>
+            <td>@domain.Name</td><td>@(domain.IsActive ? "启用" : "停用")</td><td>@domain.OutboundMode</td>
+            <td>@(domain.DkimSelector ?? "未配置")</td>
+            <td>
+                <button class="secondary" @onclick="() => ToggleRouteAsync(domain)">切换外发</button>
+                <button class="secondary" @onclick="() => ToggleAsync(domain)">@((domain.IsActive ? "停用" : "启用"))</button>
+            </td>
+        </tr>
+    }
+    </tbody>
+</table>
+
+@code {
+    private IReadOnlyList<MailDomain> _domains = [];
+    private string _name = string.Empty;
+    private string _selector = string.Empty;
+    private string _dkimPath = string.Empty;
+    private OutboundMode _mode = OutboundMode.Relay;
+    private string? _error;
+    protected override Task OnInitializedAsync() => ReloadAsync();
+    private async Task ReloadAsync() => _domains = await Administration.GetDomainsAsync(CancellationToken.None);
+    private async Task<string> ActorAsync() => (await Authentication.GetAuthenticationStateAsync()).User.Identity?.Name ?? "admin-ui";
+    private async Task CreateAsync()
+    {
+        try
+        {
+            await Administration.CreateDomainAsync(_name, _mode, _selector, _dkimPath, await ActorAsync(), CancellationToken.None);
+            _name = _selector = _dkimPath = string.Empty; _error = null; await ReloadAsync();
+        }
+        catch (Exception exception) { _error = exception.Message; }
+    }
+    private async Task ToggleAsync(MailDomain domain)
+    {
+        await Administration.UpdateDomainAsync(domain.Id, !domain.IsActive, null, null, null, await ActorAsync(), CancellationToken.None);
+        await ReloadAsync();
+    }
+    private async Task ToggleRouteAsync(MailDomain domain)
+    {
+        var mode = domain.OutboundMode == OutboundMode.Relay ? OutboundMode.DirectMx : OutboundMode.Relay;
+        await Administration.UpdateDomainAsync(domain.Id, null, mode, null, null, await ActorAsync(), CancellationToken.None);
+        await ReloadAsync();
+    }
+}

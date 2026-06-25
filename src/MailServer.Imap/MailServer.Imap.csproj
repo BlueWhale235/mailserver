@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk.Worker">
+  <PropertyGroup>
+    <Platforms>AnyCPU;x64</Platforms>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../MailServer.Domain/MailServer.Domain.csproj" />
+    <ProjectReference Include="../MailServer.Infrastructure/MailServer.Infrastructure.csproj" />
+    <ProjectReference Include="../MailServer.Migrations.MySql/MailServer.Migrations.MySql.csproj" />
+    <ProjectReference Include="../MailServer.Migrations.PostgreSql/MailServer.Migrations.PostgreSql.csproj" />
+    <ProjectReference Include="../MailServer.Migrations.Sqlite/MailServer.Migrations.Sqlite.csproj" />
+    <ProjectReference Include="../MailServer.PluginSdk/MailServer.PluginSdk.csproj" />
+  </ItemGroup>
+</Project>
