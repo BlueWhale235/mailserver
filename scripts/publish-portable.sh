@@ -7,27 +7,30 @@ OUTPUT="${OUTPUT:-$ROOT/builds/publish}"
 copy_deployment_assets() {
   TARGET="$1"
 
-  cp "$ROOT/docker-compose.yml" "$TARGET/docker-compose.yml"
-  cp "$ROOT/Dockerfile" "$TARGET/Dockerfile"
   cp "$ROOT/.env.example" "$TARGET/.env.example"
   cp "$ROOT/.env.example" "$TARGET/.env"
   cp "$ROOT/mailserver.example.json" "$TARGET/mailserver.example.json"
   cp "$ROOT/mailserver.example.json" "$TARGET/mailserver.json"
   cp "$ROOT/README.md" "$TARGET/README.md"
 
-  mkdir -p "$TARGET/certificates" "$TARGET/plugins" "$TARGET/scripts"
+  mkdir -p "$TARGET/certificates" "$TARGET/plugins" "$TARGET/security-assets" "$TARGET/wwwroot" "$TARGET/logs"
   cp "$ROOT/certificates/README.md" "$TARGET/certificates/README.md"
   cp "$ROOT/plugins/.gitkeep" "$TARGET/plugins/.gitkeep"
-  cp "$ROOT/scripts/"*.ps1 "$ROOT/scripts/"*.sh "$TARGET/scripts/"
+  cp "$ROOT/security-assets/README.md" "$TARGET/security-assets/README.md"
+  cp -R "$ROOT/src/MailServer.Api/wwwroot/." "$TARGET/wwwroot/"
+}
 
-  # Dockerfile builds the individual services from source, so include its
-  # complete build context in every deployment package.
-  cp "$ROOT/global.json" "$TARGET/global.json"
-  cp "$ROOT/Directory.Build.props" "$TARGET/Directory.Build.props"
-  cp "$ROOT/Directory.Packages.props" "$TARGET/Directory.Packages.props"
-  cp "$ROOT/MailServer.slnx" "$TARGET/MailServer.slnx"
-  mkdir -p "$TARGET/src"
-  cp -R "$ROOT/src/." "$TARGET/src/"
+remove_referenced_host_publish_files() {
+  TARGET="$1"
+  rm -f "$TARGET/appsettings.json"
+  for PREFIX in MailServer.Api MailServer.Smtp MailServer.Imap MailServer.Worker; do
+    rm -f "$TARGET/$PREFIX.exe" \
+          "$TARGET/$PREFIX.deps.json" \
+          "$TARGET/$PREFIX.runtimeconfig.json" \
+          "$TARGET/$PREFIX.pdb" \
+          "$TARGET/$PREFIX.dll"
+    find "$TARGET" -maxdepth 1 -type f -name "$PREFIX.staticwebassets.*.json" -delete
+  done
 }
 
 if [ "$#" -gt 0 ]; then
@@ -43,11 +46,17 @@ fi
 for RID in $RUNTIMES; do
   mkdir -p "$OUTPUT/$RID"
   TEMP_ARTIFACTS="$(mktemp -d "${TMPDIR:-/tmp}/mailserver-publish-$RID.XXXXXX")"
+  PLATFORM_ARGS=""
+  case "$RID" in
+    *-x64) PLATFORM_ARGS="-p:Platform=x64" ;;
+  esac
   trap 'rm -rf "$TEMP_ARTIFACTS"' EXIT INT TERM
+  # shellcheck disable=SC2086
   dotnet publish "$ROOT/src/MailServer.Cli/MailServer.Cli.csproj" \
       -c Release \
       -r "$RID" \
       --self-contained true \
+      $PLATFORM_ARGS \
       -p:ArtifactsPath="$TEMP_ARTIFACTS" \
       -p:PublishSingleFile=true \
       -p:IncludeNativeLibrariesForSelfExtract=true \
@@ -56,7 +65,22 @@ for RID in $RUNTIMES; do
       -p:DebugSymbols=false \
       -o "$OUTPUT/$RID"
   find "$OUTPUT/$RID" -maxdepth 1 -type f -name '*.pdb' -delete
+  remove_referenced_host_publish_files "$OUTPUT/$RID"
   copy_deployment_assets "$OUTPUT/$RID"
+  # shellcheck disable=SC2086
+  dotnet publish "$ROOT/plugins/MailServer.MimePlugin/MailServer.MimePlugin.csproj" \
+      -c Release \
+      -r "$RID" \
+      --self-contained false \
+      $PLATFORM_ARGS \
+      -o "$OUTPUT/$RID/plugins/MailServer.MimePlugin"
+  # shellcheck disable=SC2086
+  dotnet publish "$ROOT/plugins/MailServer.GreylistingPlugin/MailServer.GreylistingPlugin.csproj" \
+      -c Release \
+      -r "$RID" \
+      --self-contained false \
+      $PLATFORM_ARGS \
+      -o "$OUTPUT/$RID/plugins/MailServer.GreylistingPlugin"
   rm -rf "$TEMP_ARTIFACTS"
   trap - EXIT INT TERM
 done

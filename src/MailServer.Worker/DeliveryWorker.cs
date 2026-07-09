@@ -13,10 +13,9 @@ public sealed class DeliveryWorker(
     IEnumerable<IOutboundTransport> transports,
     PluginPipeline pipeline,
     BounceService bounceService,
-    IOptions<DeliveryOptions> options,
+    SystemSettingsService settings,
     ILogger<DeliveryWorker> logger) : BackgroundService
 {
-    private readonly DeliveryOptions _options = options.Value;
     private readonly Dictionary<OutboundMode, IOutboundTransport> _transports = transports.ToDictionary(x => x.Mode);
     private readonly string _owner = $"{Environment.MachineName}:{Environment.ProcessId}:{Guid.NewGuid():N}";
 
@@ -24,51 +23,74 @@ public sealed class DeliveryWorker(
     {
         while (!stoppingToken.IsCancellationRequested)
         {
+            var options = await settings.GetDeliveryOptionsAsync(stoppingToken);
             IReadOnlyList<DeliveryJob> jobs;
             try
             {
                 jobs = await queue.LeaseAsync(
                     _owner,
-                    _options.BatchSize,
-                    TimeSpan.FromSeconds(_options.LeaseSeconds),
+                    options.BatchSize,
+                    TimeSpan.FromSeconds(options.LeaseSeconds),
                     stoppingToken);
             }
             catch (Exception exception) when (exception is not OperationCanceledException)
             {
                 logger.LogError(exception, "Unable to lease delivery jobs.");
-                await Task.Delay(TimeSpan.FromSeconds(_options.PollIntervalSeconds), stoppingToken);
+                await Task.Delay(TimeSpan.FromSeconds(options.PollIntervalSeconds), stoppingToken);
                 continue;
             }
 
             if (jobs.Count == 0)
             {
-                await Task.Delay(TimeSpan.FromSeconds(_options.PollIntervalSeconds), stoppingToken);
+                await Task.Delay(TimeSpan.FromSeconds(options.PollIntervalSeconds), stoppingToken);
                 continue;
             }
 
+            logger.LogInformation(
+                "Delivery worker leased {Count} job(s).",
+                jobs.Count);
             await Parallel.ForEachAsync(
                 jobs,
-                new ParallelOptions { MaxDegreeOfParallelism = Math.Min(_options.BatchSize, 8), CancellationToken = stoppingToken },
-                ProcessAsync);
+                new ParallelOptions { MaxDegreeOfParallelism = Math.Min(options.BatchSize, 8), CancellationToken = stoppingToken },
+                (job, cancellationToken) => ProcessAsync(job, options, cancellationToken));
         }
     }
 
-    private async ValueTask ProcessAsync(DeliveryJob job, CancellationToken cancellationToken)
+    private async ValueTask ProcessAsync(
+        DeliveryJob job,
+        DeliveryOptions options,
+        CancellationToken cancellationToken)
     {
         DeliveryResult result;
         try
         {
+            logger.LogInformation(
+                "Delivery job {JobId} started: sender={Sender}, recipient={Recipient}, routeMode={RouteMode}, attempt={Attempt}.",
+                job.Id,
+                job.Sender,
+                job.Recipient,
+                job.RouteMode,
+                job.Attempts);
             var decision = await pipeline.OnDeliveryAsync(
                 new DeliveryContext(job.Id, job.Sender, job.Recipient, job.Attempts),
                 cancellationToken);
             if (decision.Kind != PluginDecisionKind.Continue)
             {
+                logger.LogInformation(
+                    "Delivery job {JobId} was handled by plugin policy: decision={Decision}, message={Message}.",
+                    job.Id,
+                    decision.Kind,
+                    decision.Message ?? string.Empty);
                 result = decision.Kind == PluginDecisionKind.Defer
                     ? DeliveryResult.Temporary(decision.Message ?? "Deferred by delivery policy.")
                     : DeliveryResult.Permanent(decision.Message ?? "Rejected by delivery policy.");
             }
             else if (!_transports.TryGetValue(job.RouteMode, out var transport))
             {
+                logger.LogWarning(
+                    "Delivery job {JobId} has no outbound transport for routeMode={RouteMode}.",
+                    job.Id,
+                    job.RouteMode);
                 result = DeliveryResult.Permanent($"No outbound transport for {job.RouteMode}.");
             }
             else
@@ -84,19 +106,59 @@ public sealed class DeliveryWorker(
         }
 
         await queue.CompleteAsync(job.Id, result, cancellationToken);
-        if (!result.Succeeded && (result.PermanentFailure || job.Attempts >= _options.MaximumAttempts))
+        await pipeline.OnDeliveryCompletedAsync(
+            new DeliveryCompletedContext(
+                job.Id,
+                job.Sender,
+                job.Recipient,
+                job.Attempts,
+                result.Succeeded,
+                result.PermanentFailure,
+                result.Response,
+                result.RemoteHost),
+            cancellationToken);
+        if (result.Succeeded)
         {
-            await bounceService.CreateAsync(job, result.Response, cancellationToken);
+            logger.LogInformation(
+                "Delivery job {JobId} succeeded: recipient={Recipient}, remoteHost={RemoteHost}, response={Response}.",
+                job.Id,
+                job.Recipient,
+                result.RemoteHost ?? string.Empty,
+                result.Response);
+        }
+        else
+        {
+            logger.LogInformation(
+                "Delivery job {JobId} did not succeed: recipient={Recipient}, permanentFailure={PermanentFailure}, response={Response}.",
+                job.Id,
+                job.Recipient,
+                result.PermanentFailure,
+                result.Response);
+        }
+
+        if (!result.Succeeded && (result.PermanentFailure || job.Attempts >= options.MaximumAttempts))
+        {
+            logger.LogWarning(
+                "Delivery job {JobId} reached final failure state; creating bounce for sender={Sender}, recipient={Recipient}.",
+                job.Id,
+                job.Sender,
+                job.Recipient);
+            await bounceService.CreateAsync(job, result.Response, result.PermanentFailure, cancellationToken);
         }
     }
 }
 
 public sealed class BounceService(
     IInboundMessageService inbound,
+    SystemSettingsService settings,
     IConfiguration configuration,
     ILogger<BounceService> logger)
 {
-    public async Task CreateAsync(DeliveryJob failedJob, string reason, CancellationToken cancellationToken)
+    public async Task CreateAsync(
+        DeliveryJob failedJob,
+        string reason,
+        bool permanentFailure,
+        CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(failedJob.Sender))
         {
@@ -104,27 +166,34 @@ public sealed class BounceService(
         }
 
         var hostName = configuration["Worker:HostName"] ?? "mail.localhost";
+        var templates = await settings.GetMessageTemplateSettingsAsync(cancellationToken);
+        var variables = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["recipient"] = failedJob.Recipient,
+            ["reason"] = reason,
+            ["queueId"] = failedJob.Id.ToString("N"),
+            ["attempts"] = failedJob.Attempts.ToString()
+        };
+        var bodyTemplate = permanentFailure
+            ? templates.PermanentFailureBody
+            : templates.RetryExhaustedBody;
+        var subjectTemplate = permanentFailure
+            ? templates.PermanentFailureSubject
+            : templates.RetryExhaustedSubject;
+        var htmlBody = SystemSettingsService.RenderHtmlTemplate(bodyTemplate, variables);
         var message = new MimeMessage
         {
-            Sender = new MailboxAddress("Mail Delivery Subsystem", $"postmaster@{hostName}"),
-            From = { new MailboxAddress("Mail Delivery Subsystem", $"postmaster@{hostName}") },
+            Sender = new MailboxAddress(templates.SenderDisplayName, $"postmaster@{hostName}"),
+            From = { new MailboxAddress(templates.SenderDisplayName, $"postmaster@{hostName}") },
             To = { MailboxAddress.Parse(failedJob.Sender) },
-            Subject = "Delivery Status Notification (Failure)",
+            Subject = SystemSettingsService.RenderTemplate(subjectTemplate, variables),
             MessageId = MimeUtils.GenerateMessageId(hostName),
             Date = DateTimeOffset.UtcNow,
-            Body = new TextPart("plain")
+            Body = new BodyBuilder
             {
-                Text = $"""
-                    This is an automatically generated delivery status notification.
-
-                    Delivery to {failedJob.Recipient} failed permanently.
-
-                    Remote response:
-                    {reason}
-
-                    Original queue id: {failedJob.Id:N}
-                    """
-            }
+                TextBody = SystemSettingsService.HtmlToPlainText(htmlBody),
+                HtmlBody = htmlBody
+            }.ToMessageBody()
         };
 
         await using var memory = new MemoryStream();

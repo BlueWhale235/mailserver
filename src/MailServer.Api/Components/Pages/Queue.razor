@@ -1,32 +1,8 @@
 @page "/admin/queue"
 @attribute [Authorize]
-@inject AdminApplicationService Administration
 
 <PageTitle>投递队列</PageTitle>
-<h1>投递队列</h1>
-<div class="toolbar">
-    <select @bind="_status"><option value="">全部</option>@foreach (var status in Enum.GetValues<DeliveryStatus>()) { <option value="@status">@status</option> }</select>
-    <button @onclick="ReloadAsync">刷新</button>
-</div>
-<table>
-    <thead><tr><th>收件人</th><th>状态</th><th>次数</th><th>下次尝试</th><th>错误</th><th></th></tr></thead>
-    <tbody>
-    @foreach (var job in _jobs)
-    {
-        <tr><td>@job.Recipient</td><td>@job.Status</td><td>@job.Attempts</td><td>@job.NextAttemptAt.LocalDateTime</td><td>@job.LastError</td>
-            <td><button class="secondary" @onclick="() => RetryAsync(job.Id)">立即重试</button></td></tr>
-    }
-    </tbody>
-</table>
 
-@code {
-    private IReadOnlyList<DeliveryJob> _jobs = [];
-    private string _status = string.Empty;
-    protected override Task OnInitializedAsync() => ReloadAsync();
-    private async Task ReloadAsync()
-    {
-        DeliveryStatus? status = Enum.TryParse<DeliveryStatus>(_status, out var value) ? value : null;
-        _jobs = await Administration.GetDeliveryJobsAsync(status, CancellationToken.None);
-    }
-    private async Task RetryAsync(Guid id) { await Administration.RetryDeliveryAsync(id, "admin-ui", CancellationToken.None); await ReloadAsync(); }
-}
+<AdminPageHeader Title="投递队列" Description="查看全部域名的外发邮件状态，必要时立即重试或清理任务。" />
+
+<DeliveryQueuePanel />

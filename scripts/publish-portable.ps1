@@ -13,15 +13,9 @@ function Copy-DeploymentAssets {
     param([Parameter(Mandatory)][string]$Target)
 
     foreach ($file in @(
-        "docker-compose.yml",
-        "Dockerfile",
         ".env.example",
         "mailserver.example.json",
-        "README.md",
-        "global.json",
-        "Directory.Build.props",
-        "Directory.Packages.props",
-        "MailServer.slnx"
+        "README.md"
     )) {
         Copy-Item -LiteralPath (Join-Path $root $file) -Destination (Join-Path $Target $file) -Force
     }
@@ -29,18 +23,39 @@ function Copy-DeploymentAssets {
     Copy-Item -LiteralPath (Join-Path $root ".env.example") -Destination (Join-Path $Target ".env") -Force
     Copy-Item -LiteralPath (Join-Path $root "mailserver.example.json") -Destination (Join-Path $Target "mailserver.json") -Force
 
-    foreach ($directory in @("certificates", "plugins", "scripts")) {
+    foreach ($directory in @("certificates", "plugins", "security-assets", "wwwroot", "logs")) {
         New-Item -ItemType Directory -Path (Join-Path $Target $directory) -Force | Out-Null
     }
     Copy-Item -LiteralPath (Join-Path $root "certificates\README.md") -Destination (Join-Path $Target "certificates\README.md") -Force
     Copy-Item -LiteralPath (Join-Path $root "plugins\.gitkeep") -Destination (Join-Path $Target "plugins\.gitkeep") -Force
-    Copy-Item -Path (Join-Path $root "scripts\*.ps1"), (Join-Path $root "scripts\*.sh") -Destination (Join-Path $Target "scripts") -Force
+    Copy-Item -LiteralPath (Join-Path $root "security-assets\README.md") -Destination (Join-Path $Target "security-assets\README.md") -Force
+    Copy-Item -Path (Join-Path $root "src\MailServer.Api\wwwroot\*") -Destination (Join-Path $Target "wwwroot") -Recurse -Force
+}
 
-    # Dockerfile builds the individual services from source, so include its
-    # complete build context in every deployment package.
-    $sourceTarget = Join-Path $Target "src"
-    New-Item -ItemType Directory -Path $sourceTarget -Force | Out-Null
-    Copy-Item -Path (Join-Path $root "src\*") -Destination $sourceTarget -Recurse -Force
+function Remove-ReferencedHostPublishFiles {
+    param(
+        [Parameter(Mandatory)][string]$Target,
+        [switch]$SingleFile
+    )
+
+    Remove-Item -LiteralPath (Join-Path $Target "appsettings.json") -Force -ErrorAction SilentlyContinue
+    foreach ($prefix in @("MailServer.Api", "MailServer.Smtp", "MailServer.Imap", "MailServer.Worker")) {
+        foreach ($name in @(
+            "$prefix.exe",
+            "$prefix.deps.json",
+            "$prefix.runtimeconfig.json",
+            "$prefix.pdb"
+        )) {
+            Remove-Item -LiteralPath (Join-Path $Target $name) -Force -ErrorAction SilentlyContinue
+        }
+
+        Get-ChildItem -LiteralPath $Target -Filter "$prefix.staticwebassets.*.json" -File -ErrorAction SilentlyContinue |
+            Remove-Item -Force
+
+        if ($SingleFile) {
+            Remove-Item -LiteralPath (Join-Path $Target "$prefix.dll") -Force -ErrorAction SilentlyContinue
+        }
+    }
 }
 
 if ($Runtime.Count -eq 0) {
@@ -58,11 +73,13 @@ foreach ($rid in $Runtime) {
     $target = Join-Path $PSScriptRoot "..\$Output\$rid"
     New-Item -ItemType Directory -Path $target -Force | Out-Null
     $temporaryArtifacts = Join-Path ([System.IO.Path]::GetTempPath()) "mailserver-publish-$rid-$([guid]::NewGuid().ToString('N'))"
+    $platformArgs = if ($rid.EndsWith("-x64", [StringComparison]::OrdinalIgnoreCase)) { @("-p:Platform=x64") } else { @() }
     try {
         dotnet publish $project `
             -c Release `
             -r $rid `
             --self-contained true `
+            $platformArgs `
             -p:ArtifactsPath=$temporaryArtifacts `
             -p:PublishSingleFile=true `
             -p:IncludeNativeLibrariesForSelfExtract=true `
@@ -70,10 +87,42 @@ foreach ($rid in $Runtime) {
             -p:DebugType=None `
             -p:DebugSymbols=false `
             -o $target
+        if ($LASTEXITCODE -ne 0) {
+            throw "dotnet publish failed for '$rid' with exit code $LASTEXITCODE."
+        }
 
         Get-ChildItem -LiteralPath $target -Filter *.pdb -File -ErrorAction SilentlyContinue |
             Remove-Item -Force
+        Remove-ReferencedHostPublishFiles -Target $target -SingleFile
         Copy-DeploymentAssets -Target $target
+        $pluginTarget = Join-Path $target "plugins\MailServer.MimePlugin"
+        dotnet publish (Join-Path $root "plugins\MailServer.MimePlugin\MailServer.MimePlugin.csproj") `
+            -c Release `
+            -r $rid `
+            --self-contained false `
+            $platformArgs `
+            -o $pluginTarget
+        if ($LASTEXITCODE -ne 0) {
+            throw "MIME plugin publish failed for '$rid' with exit code $LASTEXITCODE."
+        }
+        $greylistingTarget = Join-Path $target "plugins\MailServer.GreylistingPlugin"
+        dotnet publish (Join-Path $root "plugins\MailServer.GreylistingPlugin\MailServer.GreylistingPlugin.csproj") `
+            -c Release `
+            -r $rid `
+            --self-contained false `
+            $platformArgs `
+            -o $greylistingTarget
+        if ($LASTEXITCODE -ne 0) {
+            throw "Greylisting plugin publish failed for '$rid' with exit code $LASTEXITCODE."
+        }
+
+        $executableName = if ($rid.StartsWith("win-")) { "mailserver.exe" } else { "mailserver" }
+        $executablePath = Join-Path $target $executableName
+        if (-not (Test-Path -LiteralPath $executablePath -PathType Leaf)) {
+            throw "Publish for '$rid' completed without expected executable '$executablePath'."
+        }
+
+        Write-Host "Deployment package: $([System.IO.Path]::GetFullPath($target))"
     }
     finally {
         if (Test-Path -LiteralPath $temporaryArtifacts) {

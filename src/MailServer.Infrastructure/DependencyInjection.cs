@@ -1,8 +1,11 @@
 using DnsClient;
 using MailServer.Domain;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.AspNetCore.DataProtection;
+using MailServer.PluginSdk;
 
 namespace MailServer.Infrastructure;
 
@@ -21,9 +24,14 @@ public static class DependencyInjection
         services.Configure<StorageOptions>(configuration.GetSection(StorageOptions.SectionName));
         services.Configure<RelayOptions>(configuration.GetSection(RelayOptions.SectionName));
         services.Configure<DeliveryOptions>(configuration.GetSection(DeliveryOptions.SectionName));
+        services.Configure<MailboxDefaultsOptions>(configuration.GetSection(MailboxDefaultsOptions.SectionName));
+        services.Configure<MailRulesOptions>(configuration.GetSection(MailRulesOptions.SectionName));
+        services.Configure<ForwardingOptions>(configuration.GetSection(ForwardingOptions.SectionName));
         services.Configure<PluginOptions>(configuration.GetSection(PluginOptions.SectionName));
+        services.Configure<SecurityAssetsOptions>(configuration.GetSection(SecurityAssetsOptions.SectionName));
         services.Configure<CertificatesOptions>(configuration.GetSection(CertificatesOptions.SectionName));
         services.Configure<AdminServerOptions>(configuration.GetSection(AdminServerOptions.SectionName));
+        services.Configure<TransportSecurityOptions>(configuration.GetSection(TransportSecurityOptions.SectionName));
         services.AddPooledDbContextFactory<MailDbContext>(options =>
         {
             var migrationsAssembly = database.Provider.MigrationsAssemblyName();
@@ -38,6 +46,8 @@ public static class DependencyInjection
                         Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
                     }
                     options.UseSqlite(connectionString, x => x.MigrationsAssembly(migrationsAssembly));
+                    options.ConfigureWarnings(warnings =>
+                        warnings.Ignore(RelationalEventId.NonTransactionalMigrationOperationWarning));
                     break;
                 case DatabaseProvider.PostgreSql:
                     options.UseNpgsql(connectionString, x => x.MigrationsAssembly(migrationsAssembly));
@@ -49,14 +59,34 @@ public static class DependencyInjection
                     throw new ArgumentOutOfRangeException(nameof(database.Provider), database.Provider, null);
             }
         });
+        var securityRoot = Path.GetFullPath(
+            configuration[$"{SecurityAssetsOptions.SectionName}:RootPath"] ?? "security-assets");
+        var pluginKeyDirectory = new DirectoryInfo(securityRoot);
+        Directory.CreateDirectory(pluginKeyDirectory.FullName);
+        services.AddDataProtection()
+            .SetApplicationName("MailServer")
+            .PersistKeysToFileSystem(pluginKeyDirectory);
         services.AddSingleton<IMessageContentStore, FileMessageContentStore>();
         services.AddSingleton<ICredentialService, CredentialService>();
         services.AddSingleton<IAccountAuthenticator, AccountAuthenticator>();
+        services.AddSingleton<ISmtpSenderAuthorizer, SmtpSenderAuthorizer>();
         services.AddSingleton<IInboundMessageService, InboundMessageService>();
         services.AddSingleton<IDeliveryQueue, DeliveryQueue>();
         services.AddSingleton<IMailboxService, MailboxService>();
         services.AddSingleton(new LookupClient(new LookupClientOptions { Timeout = TimeSpan.FromSeconds(5), Retries = 2 }));
         services.AddSingleton<DnsDiagnosticService>();
+        services.AddSingleton<SystemSettingsService>();
+        services.AddSingleton<PermissionService>();
+        services.AddSingleton<DomainCertificateProvider>();
+        services.AddSingleton<DomainCertificateService>();
+        services.AddSingleton<DomainDnsService>();
+        services.AddSingleton<MailRuleService>();
+        services.AddSingleton<SrsService>();
+        services.AddSingleton<SentCopyService>();
+        services.AddSingleton<IpFirewallService>();
+        services.AddSingleton<TransportSecurityPolicyService>();
+        services.AddSingleton<PluginSettingsService>();
+        services.AddSingleton<IPluginSettingsProvider>(provider => provider.GetRequiredService<PluginSettingsService>());
         services.AddSingleton<AdminApplicationService>();
         services.AddSingleton<IOutboundTransport, RelaySmtpTransport>();
         services.AddSingleton<IOutboundTransport, DirectMxTransport>();

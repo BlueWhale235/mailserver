@@ -2,40 +2,400 @@
 @attribute [Authorize]
 @inject AdminApplicationService Administration
 @inject AuthenticationStateProvider Authentication
+@inject AdminToastService Toasts
+@inject PermissionService Permissions
 
-<PageTitle>API Key</PageTitle>
-<h1>API Key</h1>
-<div class="toolbar"><input @bind="_name" placeholder="自动化任务" /><button @onclick="CreateAsync">创建</button></div>
-@if (_created is not null)
+<PageTitle>API 管理</PageTitle>
+
+<AdminPageHeader Title="API 管理" Description="为自动化脚本或外部系统创建后台访问凭据。">
+    <Actions>
+        @if (Can(PermissionCodes.ApiKeyList))
+        {
+            <button class="btn btn-outline-primary admin-btn" type="button" @onclick="ReloadGridAsync">
+                <i class="bi bi-arrow-clockwise"></i>
+                刷新
+            </button>
+        }
+    </Actions>
+</AdminPageHeader>
+
+@if (!_loaded)
 {
-    <div class="secret"><strong>请立即保存，此密钥只显示一次：</strong><code>@_created</code></div>
+    <p>正在加载...</p>
 }
-<table>
-    <thead><tr><th>名称</th><th>前缀</th><th>权限</th><th>状态</th><th></th></tr></thead>
-    <tbody>
-    @foreach (var key in _keys)
-    {
-        <tr><td>@key.Name</td><td>@key.Prefix</td><td>@key.Scopes</td><td>@(key.RevokedAt is null ? "有效" : "已撤销")</td>
-            <td><button class="danger" disabled="@(key.RevokedAt is not null)" @onclick="() => RevokeAsync(key.Id)">撤销</button></td></tr>
-    }
-    </tbody>
-</table>
+else if (_accessDenied)
+{
+    <AccessDeniedPanel />
+}
+else
+{
+@if (CanCreateKey)
+{
+<section class="panel">
+    <div class="panel-header">
+        <div>
+            <h2>创建密钥</h2>
+            <p>密钥只会在创建后显示一次，请立即保存。</p>
+        </div>
+    </div>
+    <div class="inline-form-row">
+        <input class="form-control" @bind="_name" @bind:event="oninput" @onkeydown="CreateKeyDownAsync" placeholder="例如：自动化任务" />
+        <button class="btn btn-primary admin-btn" type="button" @onclick="CreateAsync">
+            <i class="bi bi-plus-lg"></i>
+            创建密钥
+        </button>
+    </div>
+</section>
+}
+
+@if (Can(PermissionCodes.ApiKeyList))
+{
+<section class="panel">
+    <div class="panel-header">
+        <div>
+            <h2>已创建密钥</h2>
+            <p>刷新会重新生成密钥值；删除会彻底移除该凭据。</p>
+        </div>
+    </div>
+    <ServerDataGrid @ref="_grid" TItem="ApiKeyView" LoadData="LoadApiKeysAsync"
+                    SearchPlaceholder="搜索名称、创建者或前缀" EmptyText="没有符合条件的 API 密钥"
+                    ColumnCount="6" InitialPageSize="10">
+        <ToolbarTemplate>
+            <SelectDropdown TValue="ApiKeyStatusFilter" @bind-Value="_status" Options="StatusOptions"
+                            AriaLabel="API Key 状态" CssClass="compact-select" />
+            <button class="btn btn-primary admin-btn" type="button" @onclick="ReloadGridFirstPageAsync">
+                <i class="bi bi-search"></i>
+                搜索
+            </button>
+        </ToolbarTemplate>
+        <HeaderTemplate>
+            <th>名称</th>
+            <th>创建者</th>
+            <th>创建时间</th>
+            <th>最后一次使用时间</th>
+            <th>状态</th>
+            <th class="actions-cell">操作</th>
+        </HeaderTemplate>
+        <RowTemplate Context="key">
+            <td>
+                <strong>@key.Name</strong>
+                <span class="row-hint">前缀：@key.Prefix</span>
+            </td>
+            <td>@(string.IsNullOrWhiteSpace(key.CreatedBy) ? "未知" : key.CreatedBy)</td>
+            <td>@FormatTime(key.CreatedAt)</td>
+            <td>@FormatNullableTime(key.LastUsedAt)</td>
+            <td><span class="status-pill @ApiKeyStatusClass(key)">@ApiKeyStatusText(key)</span></td>
+            <td>
+                <div class="actions">
+                    @if (Can(PermissionCodes.IamManage))
+                    {
+                        <button class="btn btn-outline-primary admin-btn compact-action" type="button" @onclick="() => OpenGrantEditorAsync(key)">
+                            <i class="bi bi-shield-check"></i>
+                            授权
+                        </button>
+                    }
+                    @if (Can(PermissionCodes.ApiKeyRefresh))
+                    {
+                        <button class="btn btn-outline-primary admin-btn compact-action" type="button" @onclick="() => RefreshKeyAsync(key)">
+                            <i class="bi bi-arrow-repeat"></i>
+                            刷新
+                        </button>
+                    }
+                    @if (Can(PermissionCodes.ApiKeyDelete))
+                    {
+                        <button class="btn btn-danger admin-btn compact-action" type="button" @onclick="() => RequestDelete(key)">
+                            <i class="bi bi-trash"></i>
+                            删除
+                        </button>
+                    }
+                </div>
+            </td>
+        </RowTemplate>
+    </ServerDataGrid>
+</section>
+}
+else
+{
+    <AccessDeniedPanel Message="当前账号可以创建或管理授权，但没有查看 API Key 列表的权限。" />
+}
+}
+
+@if (_pendingDelete is not null)
+{
+    <ConfirmationDialog Title="删除 API Key"
+                        Message="@($"确定删除 API Key“{_pendingDelete.Name}”吗？")"
+                        Warning="使用该密钥的程序会立即失去访问权限，此操作无法撤销。"
+                        ConfirmText="确认删除"
+                        OnConfirm="ConfirmDeleteAsync"
+                        OnCancel="CancelDelete" />
+}
+
+@if (_keyModalOpen)
+{
+    <div class="modal-backdrop" @onclick="CloseKeyModal">
+        <div class="modal-panel key-secret-modal" @onclick:stopPropagation>
+            <div class="modal-header">
+                <div>
+                    <h2>@_modalTitle</h2>
+                    <p>密钥只显示一次，关闭后无法再次查看完整值。</p>
+                </div>
+                <button class="icon-button" type="button" title="关闭" @onclick="CloseKeyModal"><i class="bi bi-x-lg"></i></button>
+            </div>
+            <div class="definition-grid">
+                <strong>名称</strong><span>@_modalName</span>
+                <strong>API 密钥</strong><code>@_modalKey</code>
+                <strong>提示</strong><span>请更新调用方保存的密钥值，旧值会立即失效。</span>
+            </div>
+            <div class="modal-actions">
+                <button class="btn btn-primary admin-btn" type="button" @onclick="CloseKeyModal">我已保存</button>
+            </div>
+        </div>
+    </div>
+}
+
+@if (_grantEditorOpen)
+{
+    <PermissionGrantEditor Title="@_grantEditorTitle"
+                           SubjectName="@_grantEditorSubject"
+                           InitialGrants="@_grantEditorGrants"
+                           OnSave="SaveGrantsAsync"
+                           OnCancel="CloseGrantEditor" />
+}
 
 @code {
-    private IReadOnlyList<ApiKeyView> _keys = [];
+    private ServerDataGrid<ApiKeyView>? _grid;
     private string _name = string.Empty;
-    private string? _created;
-    protected override Task OnInitializedAsync() => ReloadAsync();
-    private async Task ReloadAsync() => _keys = await Administration.GetApiKeysAsync(CancellationToken.None);
-    private async Task<string> ActorAsync() => (await Authentication.GetAuthenticationStateAsync()).User.Identity?.Name ?? "admin-ui";
-    private async Task CreateAsync()
+    private ApiKeyStatusFilter _status = ApiKeyStatusFilter.Any;
+    private static readonly IReadOnlyList<AdminSelectOption<ApiKeyStatusFilter>> StatusOptions =
+    [
+        new(ApiKeyStatusFilter.Any, "全部状态"),
+        new(ApiKeyStatusFilter.Active, "有效"),
+        new(ApiKeyStatusFilter.Revoked, "已撤销"),
+        new(ApiKeyStatusFilter.Expired, "已过期")
+    ];
+    private bool _keyModalOpen;
+    private string _modalTitle = string.Empty;
+    private string _modalName = string.Empty;
+    private string _modalKey = string.Empty;
+    private bool _grantEditorOpen;
+    private Guid? _grantEditorApiKeyId;
+    private string _grantEditorTitle = string.Empty;
+    private string _grantEditorSubject = string.Empty;
+    private IReadOnlyList<PermissionGrantInput> _grantEditorGrants = [];
+    private bool _loaded;
+    private bool _accessDenied;
+    private PermissionSnapshot _permissions = new();
+    private ApiKeyView? _pendingDelete;
+
+    private bool CanCreateKey => Can(PermissionCodes.ApiKeyCreate) && Can(PermissionCodes.IamManage);
+
+    protected override async Task OnInitializedAsync()
     {
-        var key = await Administration.CreateApiKeyAsync(_name, ["admin"], null, await ActorAsync(), CancellationToken.None);
-        _created = key.Value; _name = string.Empty; await ReloadAsync();
+        var user = (await Authentication.GetAuthenticationStateAsync()).User;
+        _permissions = await Permissions.GetSnapshotAsync(user, CancellationToken.None);
+        _accessDenied = !Can(PermissionCodes.IamManage)
+                        && !CanAny(
+                            PermissionCodes.ApiKeyList,
+                            PermissionCodes.ApiKeyCreate,
+                            PermissionCodes.ApiKeyUpdate,
+                            PermissionCodes.ApiKeyDelete,
+                            PermissionCodes.ApiKeyRefresh);
+        _loaded = true;
     }
-    private async Task RevokeAsync(Guid id)
+
+    private Task<PagedResult<ApiKeyView>> LoadApiKeysAsync(string search, int page, int pageSize) =>
+        Can(PermissionCodes.ApiKeyList)
+            ? Administration.SearchApiKeysAsync(search, _status, page, pageSize, CancellationToken.None)
+            : Task.FromResult(new PagedResult<ApiKeyView>([], page, pageSize, 0));
+
+    private async Task ReloadGridAsync()
     {
-        await Administration.RevokeApiKeyAsync(id, await ActorAsync(), CancellationToken.None);
-        await ReloadAsync();
+        if (_grid is not null) await _grid.RefreshAsync();
     }
+
+    private async Task ReloadGridFirstPageAsync()
+    {
+        if (_grid is not null) await _grid.ReloadFromFirstPageAsync();
+    }
+
+    private async Task<string> ActorAsync() =>
+        (await Authentication.GetAuthenticationStateAsync()).User.Identity?.Name ?? "admin-ui";
+
+    private async Task CreateKeyDownAsync(KeyboardEventArgs args)
+    {
+        if (args.Key == "Enter") await CreateAsync();
+    }
+
+    private Task CreateAsync()
+    {
+        if (!CanCreateKey)
+        {
+            Toasts.Error("当前账号没有创建 API Key 或分配授权的权限。");
+            return Task.CompletedTask;
+        }
+
+        if (string.IsNullOrWhiteSpace(_name))
+        {
+            Toasts.Error("API Key 名称不能为空。");
+            return Task.CompletedTask;
+        }
+
+        _grantEditorApiKeyId = null;
+        _grantEditorTitle = "创建 API Key 授权";
+        _grantEditorSubject = _name.Trim();
+        _grantEditorGrants = [];
+        _grantEditorOpen = true;
+        return Task.CompletedTask;
+    }
+
+    private async Task OpenGrantEditorAsync(ApiKeyView key)
+    {
+        if (!Can(PermissionCodes.IamManage))
+        {
+            Toasts.Error("当前账号没有授权管理权限。");
+            return;
+        }
+
+        try
+        {
+            var grants = await Permissions.GetGrantsAsync(PermissionSubjectType.ApiKey, key.Id, CancellationToken.None);
+            _grantEditorApiKeyId = key.Id;
+            _grantEditorTitle = "编辑 API Key 授权";
+            _grantEditorSubject = key.Name;
+            _grantEditorGrants = grants.Select(x => new PermissionGrantInput(x.PermissionCode, x.ResourceType, x.ResourceKey)).ToArray();
+            _grantEditorOpen = true;
+        }
+        catch (Exception exception)
+        {
+            Toasts.Error(exception.Message);
+        }
+    }
+
+    private async Task SaveGrantsAsync(IReadOnlyList<PermissionGrantInput> grants)
+    {
+        try
+        {
+            if (_grantEditorApiKeyId is null)
+            {
+                if (!CanCreateKey)
+                {
+                    Toasts.Error("当前账号没有创建 API Key 或分配授权的权限。");
+                    return;
+                }
+
+                var name = _name.Trim();
+                var key = await Administration.CreateApiKeyAsync(name, grants, null, await ActorAsync(), CancellationToken.None);
+                ShowKeyModal("API 密钥已创建", name, key.Value);
+                _name = string.Empty;
+                Toasts.Success("API Key 已创建，请保存密钥。");
+                await ReloadGridFirstPageAsync();
+            }
+            else
+            {
+                if (!Can(PermissionCodes.IamManage))
+                {
+                    Toasts.Error("当前账号没有授权管理权限。");
+                    return;
+                }
+
+                await Permissions.ReplaceGrantsAsync(
+                    PermissionSubjectType.ApiKey,
+                    _grantEditorApiKeyId.Value,
+                    grants,
+                    await ActorAsync(),
+                    CancellationToken.None);
+                Toasts.Success("API Key 授权已保存。");
+            }
+
+            CloseGrantEditor();
+        }
+        catch (Exception exception)
+        {
+            Toasts.Error(exception.Message);
+        }
+    }
+
+    private async Task RefreshKeyAsync(ApiKeyView key)
+    {
+        if (!Can(PermissionCodes.ApiKeyRefresh))
+        {
+            Toasts.Error("当前账号没有刷新 API Key 的权限。");
+            return;
+        }
+
+        try
+        {
+            var refreshed = await Administration.RefreshApiKeyAsync(key.Id, await ActorAsync(), CancellationToken.None);
+            Toasts.Success("API 密钥已刷新，请保存新密钥。");
+            ShowKeyModal("API 密钥已刷新", key.Name, refreshed.Value);
+            await ReloadGridAsync();
+        }
+        catch (Exception exception)
+        {
+            Toasts.Error(exception.Message);
+        }
+    }
+
+    private void RequestDelete(ApiKeyView key) => _pendingDelete = key;
+
+    private void CancelDelete() => _pendingDelete = null;
+
+    private async Task ConfirmDeleteAsync()
+    {
+        if (!Can(PermissionCodes.ApiKeyDelete))
+        {
+            Toasts.Error("当前账号没有删除 API Key 的权限。");
+            return;
+        }
+
+        if (_pendingDelete is null) return;
+        var id = _pendingDelete.Id;
+        try
+        {
+            await Administration.DeleteApiKeyAsync(id, await ActorAsync(), CancellationToken.None);
+            _pendingDelete = null;
+            Toasts.Success("API 密钥已删除。");
+            await ReloadGridAsync();
+        }
+        catch (Exception exception)
+        {
+            Toasts.Error(exception.Message);
+        }
+    }
+
+    private void ShowKeyModal(string title, string name, string value)
+    {
+        _modalTitle = title;
+        _modalName = string.IsNullOrWhiteSpace(name) ? "未命名密钥" : name;
+        _modalKey = value;
+        _keyModalOpen = true;
+    }
+
+    private void CloseKeyModal() => _keyModalOpen = false;
+
+    private void CloseGrantEditor()
+    {
+        _grantEditorOpen = false;
+        _grantEditorApiKeyId = null;
+        _grantEditorGrants = [];
+    }
+
+    private static string FormatTime(DateTimeOffset value) => value.LocalDateTime.ToString("yyyy-MM-dd HH:mm");
+    private static string FormatNullableTime(DateTimeOffset? value) => value is null ? "从未使用" : FormatTime(value.Value);
+    private static string ApiKeyStatusText(ApiKeyView key)
+    {
+        if (key.RevokedAt is not null) return "已撤销";
+        if (key.ExpiresAt is { } expiresAt && expiresAt <= DateTimeOffset.UtcNow) return "已过期";
+        return "有效";
+    }
+
+    private static string ApiKeyStatusClass(ApiKeyView key)
+    {
+        if (key.RevokedAt is not null) return "status-disabled";
+        if (key.ExpiresAt is { } expiresAt && expiresAt <= DateTimeOffset.UtcNow) return "status-warning";
+        return "status-enabled";
+    }
+
+    private bool Can(string code) => _permissions.Has(code);
+    private bool CanAny(params string[] codes) => _permissions.HasAny(codes);
 }

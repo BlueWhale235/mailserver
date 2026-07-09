@@ -13,8 +13,15 @@
     <ProjectReference Include="../MailServer.Worker/MailServer.Worker.csproj" />
     <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" />
     <PackageReference Include="Microsoft.AspNetCore.App.Internal.Assets" GeneratePathProperty="true" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.Web.LibraryManager.Build" PrivateAssets="all" />
+    <PackageReference Include="Swashbuckle.AspNetCore" />
   </ItemGroup>
   <ItemGroup>
     <EmbeddedResource Include="$(PkgMicrosoft_AspNetCore_App_Internal_Assets)/_framework/blazor.web.js" LogicalName="MailServer.Api.blazor.web.js" />
+    <EmbeddedResource Include="wwwroot/admin.css" LogicalName="MailServer.Api.admin.css" />
+    <EmbeddedResource Include="wwwroot/**">
+      <LogicalName>MailServer.Api.StaticWebAssets/wwwroot/%(RecursiveDir)%(Filename)%(Extension)</LogicalName>
+    </EmbeddedResource>
   </ItemGroup>
 </Project>

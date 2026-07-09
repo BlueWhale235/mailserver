@@ -33,6 +33,16 @@ public sealed class AccountAuthenticator(
 
         return account.Id;
     }
+
+    public async Task<Guid?> ResolveMailboxIdentityAsync(string address, CancellationToken cancellationToken)
+    {
+        if (!AddressParser.TrySplit(address, out var localPart, out var domain)) return null;
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+        return await db.Accounts
+            .Where(x => x.LocalPart == localPart && x.Domain.Name == domain && x.IsEnabled && x.Domain.IsActive)
+            .Select(x => (Guid?)x.Id)
+            .SingleOrDefaultAsync(cancellationToken);
+    }
 }
 
 internal static class AddressParser

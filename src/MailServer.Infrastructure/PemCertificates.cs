@@ -7,7 +7,8 @@ namespace MailServer.Infrastructure;
 public sealed class CertificatesOptions
 {
     public const string SectionName = "Certificates";
-    public PemCertificateOptions Mail { get; set; } = new();
+    public string? DefaultMailHostName { get; set; }
+    public bool AllowSingleCertificateFallback { get; set; } = true;
     public PemCertificateOptions Admin { get; set; } = new();
 }
 
@@ -125,7 +126,15 @@ public static class PemCertificateLoader
 
         try
         {
-            var context = SslStreamCertificateContext.Create(leaf, intermediates, offline: true);
+            SslStreamCertificateContext context;
+            try
+            {
+                context = SslStreamCertificateContext.Create(leaf, intermediates, offline: false);
+            }
+            catch (CryptographicException) when (intermediates.Count > 0)
+            {
+                context = SslStreamCertificateContext.Create(leaf, additionalCertificates: null, offline: false);
+            }
             return new LoadedPemCertificate(leaf, intermediates, context);
         }
         catch

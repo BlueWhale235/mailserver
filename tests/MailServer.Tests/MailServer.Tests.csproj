@@ -12,7 +12,9 @@
     <ProjectReference Include="../../src/MailServer.Migrations.PostgreSql/MailServer.Migrations.PostgreSql.csproj" />
     <ProjectReference Include="../../src/MailServer.Migrations.Sqlite/MailServer.Migrations.Sqlite.csproj" />
     <ProjectReference Include="../../src/MailServer.Smtp/MailServer.Smtp.csproj" />
-    <ProjectReference Include="../../samples/MailServer.SamplePlugin/MailServer.SamplePlugin.csproj" />
+    <ProjectReference Include="../../plugins/MailServer.SamplePlugin/MailServer.SamplePlugin.csproj" />
+    <ProjectReference Include="../../plugins/MailServer.MimePlugin/MailServer.MimePlugin.csproj" />
+    <ProjectReference Include="../../plugins/MailServer.GreylistingPlugin/MailServer.GreylistingPlugin.csproj" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.InMemory" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
     <PackageReference Include="xunit" />

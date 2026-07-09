@@ -1,0 +1,55 @@
+<div class="modal-backdrop" @onclick="CancelAsync">
+    <div class="modal-panel confirmation-modal" role="alertdialog" aria-modal="true" aria-labelledby="confirmation-title" @onclick:stopPropagation>
+        <div class="modal-header">
+            <div>
+                <h2 id="confirmation-title">@Title</h2>
+                <p>@Message</p>
+            </div>
+            <button class="icon-button" type="button" title="关闭" disabled="@_busy" @onclick="CancelAsync"><i class="bi bi-x-lg"></i></button>
+        </div>
+        <div class="confirmation-warning">
+            <i class="bi bi-exclamation-triangle"></i>
+            <span>@Warning</span>
+        </div>
+        <div class="modal-actions">
+            <button class="btn btn-outline-secondary admin-btn" type="button" disabled="@_busy" @onclick="CancelAsync">取消</button>
+            <button class="btn btn-danger admin-btn" type="button" disabled="@_busy" @onclick="ConfirmAsync">
+                @if (_busy)
+                {
+                    <span class="spinner-border spinner-border-sm" aria-hidden="true"></span>
+                }
+                @ConfirmText
+            </button>
+        </div>
+    </div>
+</div>
+
+@code {
+    [Parameter] public string Title { get; set; } = "确认删除";
+    [Parameter] public string Message { get; set; } = string.Empty;
+    [Parameter] public string Warning { get; set; } = "删除后无法恢复。";
+    [Parameter] public string ConfirmText { get; set; } = "确认删除";
+    [Parameter] public EventCallback OnConfirm { get; set; }
+    [Parameter] public EventCallback OnCancel { get; set; }
+
+    private bool _busy;
+
+    private async Task ConfirmAsync()
+    {
+        if (_busy) return;
+        _busy = true;
+        try
+        {
+            await OnConfirm.InvokeAsync();
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private async Task CancelAsync()
+    {
+        if (!_busy) await OnCancel.InvokeAsync();
+    }
+}

@@ -1,0 +1,375 @@
+@page "/admin/settings"
+@attribute [Authorize]
+@inject AdminApplicationService Administration
+@inject AuthenticationStateProvider Authentication
+@inject AdminToastService Toasts
+@inject PermissionService Permissions
+
+<PageTitle>系统设置</PageTitle>
+
+<AdminPageHeader Title="系统设置" Description="这些设置保存到数据库中，服务会在下一次相关操作时读取。">
+    <Actions>
+        @if (Can(PermissionCodes.SettingsDetail))
+        {
+            <button class="btn btn-outline-primary admin-btn" type="button" disabled="@_busy" @onclick="ReloadFromButtonAsync">
+                <i class="bi bi-arrow-clockwise"></i>
+                刷新
+            </button>
+        }
+    </Actions>
+</AdminPageHeader>
+
+@if (!_permissionLoaded || !_loaded)
+{
+    <div class="loading-row"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span> 正在加载</div>
+}
+else if (!Can(PermissionCodes.SettingsDetail))
+{
+    <AccessDeniedPanel />
+}
+else
+{
+    <section class="panel">
+        <PanelLoadingOverlay Visible="@ShowDeliveryBusy" Text="正在处理设置" />
+        <div class="panel-header">
+            <div>
+                <h2>投递默认值</h2>
+                <p>控制后台投递任务的领取、重试和轮询节奏。</p>
+            </div>
+        </div>
+        <div class="form-grid two-column">
+            <label class="form-field">
+                <span class="delivery-setting-help" title="每个投递工作线程单次最多领取的任务数。数值越大吞吐量越高，但数据库瞬时负载也会增加。">批量领取数量</span>
+                <input class="form-control" type="number" min="1" max="200" @bind="_batchSize" />
+            </label>
+            <label class="form-field">
+                <span class="delivery-setting-help" title="任务被工作线程领取后的独占锁定时间，用于避免多个线程重复投递同一任务。">租约秒数</span>
+                <input class="form-control" type="number" min="10" max="3600" @bind="_leaseSeconds" />
+            </label>
+            <label class="form-field">
+                <span class="delivery-setting-help" title="临时失败任务允许重试的最大次数，超过后标记为失败并触发相应通知。">最大投递尝试次数</span>
+                <input class="form-control" type="number" min="1" max="100" @bind="_maximumAttempts" />
+            </label>
+            <label class="form-field">
+                <span class="delivery-setting-help" title="队列为空时再次检查新任务前等待的时间。数值越小响应越快，但查询频率更高。">空队列轮询间隔秒数</span>
+                <input class="form-control" type="number" min="1" max="300" @bind="_pollIntervalSeconds" />
+            </label>
+        </div>
+        @if (Can(PermissionCodes.SettingsUpdate))
+        {
+            <div class="panel-actions">
+                <button class="btn btn-primary admin-btn" type="button" disabled="@_busy" @onclick="SaveDeliveryAsync">保存投递设置</button>
+            </div>
+        }
+    </section>
+
+    <section class="panel">
+        <PanelLoadingOverlay Visible="@ShowSmtpBusy" Text="正在处理设置" />
+        <div class="panel-header">
+            <div>
+                <h2>SMTP 连接保护</h2>
+                <p>控制 SMTP 客户端每条命令或 DATA 行的最大等待时间，用于清理慢速或半开的连接。</p>
+            </div>
+        </div>
+        <div class="form-grid two-column">
+            <label class="form-field">
+                <span class="delivery-setting-help" title="客户端在该秒数内没有发完整命令或 DATA 行时，服务器会关闭连接。默认 300 秒。">SMTP 读取超时秒数</span>
+                <input class="form-control" type="number" min="5" max="3600" @bind="_smtpCommandTimeoutSeconds" />
+            </label>
+        </div>
+        @if (Can(PermissionCodes.SettingsUpdate))
+        {
+            <div class="panel-actions">
+                <button class="btn btn-primary admin-btn" type="button" disabled="@_busy" @onclick="SaveSmtpAsync">保存 SMTP 设置</button>
+            </div>
+        }
+    </section>
+
+    <section class="panel">
+        <PanelLoadingOverlay Visible="@ShowMailboxBusy" Text="正在处理设置" />
+        <div class="panel-header">
+            <div>
+                <h2>IMAP 默认文件夹</h2>
+                <p>新账号创建时写入，已有账号下次 IMAP 登录时自动补齐。INBOX 会始终保留在第一位。</p>
+            </div>
+        </div>
+        <label class="form-field">
+            <span>默认文件夹，一行一个</span>
+            <textarea class="form-control" rows="7" @bind="_defaultFoldersText"></textarea>
+        </label>
+        @if (Can(PermissionCodes.SettingsUpdate))
+        {
+            <div class="panel-actions">
+                <button class="btn btn-primary admin-btn" type="button" disabled="@_busy" @onclick="SaveMailboxSettingsAsync">保存文件夹</button>
+            </div>
+        }
+    </section>
+
+    <section class="panel">
+        <PanelLoadingOverlay Visible="@ShowCertificateBusy" Text="正在处理设置" />
+        <div class="panel-header">
+            <div>
+                <h2>TLS 证书选择</h2>
+                <p>用于 SMTP/IMAP 客户端不带 SNI 时选择默认证书。</p>
+            </div>
+        </div>
+        <div class="form-grid two-column">
+            <label class="form-field">
+                <span>默认邮件主机名</span>
+                <input class="form-control" list="mail-host-options" @bind="_defaultMailHostName" placeholder="mail.example.com" />
+                <datalist id="mail-host-options">
+                    @foreach (var host in _availableMailHostNames)
+                    {
+                        <option value="@host"></option>
+                    }
+                </datalist>
+            </label>
+            <label class="checkbox">
+                <input type="checkbox" @bind="_allowSingleCertificateFallback" />
+                无 SNI 且只有一张可用证书时允许自动兜底
+            </label>
+        </div>
+        <div class="definition-grid">
+            <strong>可用证书主机</strong>
+            <span>@(_availableMailHostNames.Count == 0 ? "暂无已启用域名证书" : string.Join(", ", _availableMailHostNames))</span>
+            <strong>实际默认主机</strong>
+            <span>@(_effectiveDefaultMailHostName ?? "当前无可用默认主机")</span>
+        </div>
+        @if (Can(PermissionCodes.SettingsUpdate))
+        {
+            <div class="panel-actions">
+                <button class="btn btn-primary admin-btn" type="button" disabled="@_busy" @onclick="SaveCertificateSettingsAsync">保存 TLS 设置</button>
+            </div>
+        }
+    </section>
+}
+
+@code {
+    private bool _loaded;
+    private int _batchSize;
+    private int _leaseSeconds;
+    private int _maximumAttempts;
+    private int _pollIntervalSeconds;
+    private int _smtpCommandTimeoutSeconds;
+    private string _defaultFoldersText = string.Empty;
+    private string? _defaultMailHostName;
+    private bool _allowSingleCertificateFallback = true;
+    private IReadOnlyList<string> _availableMailHostNames = [];
+    private string? _effectiveDefaultMailHostName;
+    private bool _permissionLoaded;
+    private PermissionSnapshot _permissions = new();
+    private bool _busy;
+    private string? _busyPanel;
+
+    protected override async Task OnInitializedAsync()
+    {
+        var user = (await Authentication.GetAuthenticationStateAsync()).User;
+        _permissions = await Permissions.GetSnapshotAsync(user, CancellationToken.None);
+        _permissionLoaded = true;
+        if (Can(PermissionCodes.SettingsDetail))
+        {
+            await ReloadAsync();
+        }
+        else
+        {
+            _loaded = true;
+        }
+    }
+
+    private async Task ReloadAsync()
+    {
+        if (!Can(PermissionCodes.SettingsDetail)) return;
+
+        var delivery = await Administration.GetDeliverySettingsAsync(CancellationToken.None);
+        _batchSize = delivery.BatchSize;
+        _leaseSeconds = delivery.LeaseSeconds;
+        _maximumAttempts = delivery.MaximumAttempts;
+        _pollIntervalSeconds = delivery.PollIntervalSeconds;
+
+        var smtp = await Administration.GetSmtpSettingsAsync(CancellationToken.None);
+        _smtpCommandTimeoutSeconds = smtp.CommandTimeoutSeconds;
+
+        var mailboxSettings = await Administration.GetMailboxSettingsAsync(CancellationToken.None);
+        _defaultFoldersText = string.Join(Environment.NewLine, mailboxSettings.DefaultFolders);
+
+        var certificateSettings = await Administration.GetCertificateSelectionSettingsAsync(CancellationToken.None);
+        ApplyCertificateSettings(certificateSettings);
+
+        _loaded = true;
+    }
+
+    private async Task ReloadFromButtonAsync()
+    {
+        if (_busy) return;
+        _busy = true;
+        _busyPanel = null;
+        try
+        {
+            await ReloadAsync();
+            Toasts.Success("系统设置已刷新。");
+        }
+        catch (Exception exception)
+        {
+            Toasts.Error(exception.Message);
+        }
+        finally
+        {
+            _busy = false;
+            _busyPanel = null;
+        }
+    }
+
+    private async Task<string> ActorAsync() =>
+        (await Authentication.GetAuthenticationStateAsync()).User.Identity?.Name ?? "admin-ui";
+
+    private async Task SaveDeliveryAsync()
+    {
+        if (!Can(PermissionCodes.SettingsUpdate))
+        {
+            Toasts.Error("当前账号没有编辑系统设置的权限。");
+            return;
+        }
+
+        if (_busy) return;
+        _busy = true;
+        _busyPanel = "delivery";
+        try
+        {
+            await Administration.UpdateDeliverySettingsAsync(
+                new DeliverySettingsView(
+                    _batchSize,
+                    _leaseSeconds,
+                    _maximumAttempts,
+                    _pollIntervalSeconds),
+                await ActorAsync(),
+                CancellationToken.None);
+            Toasts.Success("投递设置已保存。");
+        }
+        catch (Exception exception)
+        {
+            Toasts.Error(exception.Message);
+        }
+        finally
+        {
+            _busy = false;
+            _busyPanel = null;
+        }
+    }
+
+    private async Task SaveMailboxSettingsAsync()
+    {
+        if (!Can(PermissionCodes.SettingsUpdate))
+        {
+            Toasts.Error("当前账号没有编辑系统设置的权限。");
+            return;
+        }
+
+        if (_busy) return;
+        _busy = true;
+        _busyPanel = "mailbox";
+        try
+        {
+            var folders = _defaultFoldersText.Split(
+                ['\r', '\n'],
+                StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            var saved = await Administration.UpdateMailboxSettingsAsync(
+                new MailboxSettingsView(folders),
+                await ActorAsync(),
+                CancellationToken.None);
+            _defaultFoldersText = string.Join(Environment.NewLine, saved.DefaultFolders);
+            Toasts.Success("默认文件夹已保存。");
+        }
+        catch (Exception exception)
+        {
+            Toasts.Error(exception.Message);
+        }
+        finally
+        {
+            _busy = false;
+            _busyPanel = null;
+        }
+    }
+
+    private async Task SaveSmtpAsync()
+    {
+        if (!Can(PermissionCodes.SettingsUpdate))
+        {
+            Toasts.Error("当前账号没有编辑系统设置的权限。");
+            return;
+        }
+
+        if (_busy) return;
+        _busy = true;
+        _busyPanel = "smtp";
+        try
+        {
+            var saved = await Administration.UpdateSmtpSettingsAsync(
+                new SmtpSettingsView(_smtpCommandTimeoutSeconds),
+                await ActorAsync(),
+                CancellationToken.None);
+            _smtpCommandTimeoutSeconds = saved.CommandTimeoutSeconds;
+            Toasts.Success("SMTP 设置已保存。");
+        }
+        catch (Exception exception)
+        {
+            Toasts.Error(exception.Message);
+        }
+        finally
+        {
+            _busy = false;
+            _busyPanel = null;
+        }
+    }
+
+    private async Task SaveCertificateSettingsAsync()
+    {
+        if (!Can(PermissionCodes.SettingsUpdate))
+        {
+            Toasts.Error("当前账号没有编辑系统设置的权限。");
+            return;
+        }
+
+        if (_busy) return;
+        _busy = true;
+        _busyPanel = "certificate";
+        try
+        {
+            var saved = await Administration.UpdateCertificateSelectionSettingsAsync(
+                new CertificateSelectionSettingsView(
+                    _defaultMailHostName,
+                    _allowSingleCertificateFallback,
+                    [],
+                    null),
+                await ActorAsync(),
+                CancellationToken.None);
+            ApplyCertificateSettings(saved);
+            Toasts.Success("TLS 证书选择设置已保存。");
+        }
+        catch (Exception exception)
+        {
+            Toasts.Error(exception.Message);
+        }
+        finally
+        {
+            _busy = false;
+            _busyPanel = null;
+        }
+    }
+
+    private void ApplyCertificateSettings(CertificateSelectionSettingsView settings)
+    {
+        _defaultMailHostName = settings.DefaultMailHostName;
+        _allowSingleCertificateFallback = settings.AllowSingleCertificateFallback;
+        _availableMailHostNames = settings.AvailableMailHostNames;
+        _effectiveDefaultMailHostName = settings.EffectiveDefaultMailHostName;
+    }
+
+    private bool Can(string code) => _permissions.Has(code);
+
+    private bool ShowDeliveryBusy => ShowBusyPanel("delivery");
+    private bool ShowSmtpBusy => ShowBusyPanel("smtp");
+    private bool ShowMailboxBusy => ShowBusyPanel("mailbox");
+    private bool ShowCertificateBusy => ShowBusyPanel("certificate");
+    private bool ShowBusyPanel(string panel) => _busy && (_busyPanel is null || _busyPanel == panel);
+
+}

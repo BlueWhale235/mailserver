@@ -1,0 +1,89 @@
+@inject AuthenticationStateProvider Authentication
+@inject PermissionService Permissions
+
+<div class="domain-cloudflare-nav">
+    <a class="domain-context-back" href="/admin/domains">
+        <i class="bi bi-arrow-left"></i>
+        返回域名列表
+    </a>
+
+    <div class="domain-context-card">
+        <span class="domain-context-title">当前域名</span>
+        <strong class="domain-context-name" title="@DomainName">@DomainName</strong>
+        <span class="domain-context-meta">域名工作区</span>
+    </div>
+
+    @if (_loaded)
+    {
+        <div class="domain-menu-label">域名菜单</div>
+        <nav class="admin-nav domain-nav" aria-label="域名导航">
+            @if (Can(PermissionCodes.DomainDetail))
+            {
+                <NavLink class="admin-nav-link" href="@Url("overview")" Match="NavLinkMatch.All">
+                    <i class="bi bi-grid-1x2"></i><span>概览</span>
+                </NavLink>
+            }
+            @if (CanAny(PermissionCodes.DomainUpdate, PermissionCodes.DomainDnsDetail, PermissionCodes.DomainDnsUpdate, PermissionCodes.DomainCertificateDetail, PermissionCodes.DomainCertificateUpdate))
+            {
+                <NavLink class="admin-nav-link" href="@Url("domain-config")">
+                    <i class="bi bi-sliders"></i><span>域名配置</span>
+                </NavLink>
+            }
+            @if (CanAny(PermissionCodes.DomainAccountList, PermissionCodes.DomainAccountCreate, PermissionCodes.DomainAccountUpdate, PermissionCodes.DomainAccountPassword))
+            {
+                <NavLink class="admin-nav-link" href="@Url("accounts")">
+                    <i class="bi bi-people"></i><span>账号</span>
+                </NavLink>
+            }
+            @if (CanAny(PermissionCodes.DomainAliasList, PermissionCodes.DomainAliasCreate, PermissionCodes.DomainAliasUpdate, PermissionCodes.DomainAliasDelete))
+            {
+                <NavLink class="admin-nav-link" href="@Url("aliases")">
+                    <i class="bi bi-at"></i><span>别名</span>
+                </NavLink>
+            }
+            @if (CanAny(PermissionCodes.DomainRuleList, PermissionCodes.DomainRuleCreate, PermissionCodes.DomainRuleUpdate, PermissionCodes.DomainRuleDelete, PermissionCodes.DomainRuleReorder))
+            {
+                <NavLink class="admin-nav-link" href="@Url("mail-rules")">
+                    <i class="bi bi-list-check"></i><span>收发信规则</span>
+                </NavLink>
+            }
+            @if (Can(PermissionCodes.DomainAccountList))
+            {
+                <NavLink class="admin-nav-link" href="@Url("imap-folders")">
+                    <i class="bi bi-folder2-open"></i><span>IMAP 文件夹</span>
+                </NavLink>
+            }
+            @if (Can(PermissionCodes.DomainRead))
+            {
+                <NavLink class="admin-nav-link" href="@Url("queue")">
+                    <i class="bi bi-send"></i><span>投递队列</span>
+                </NavLink>
+            }
+            @if (Can(PermissionCodes.DomainAuditList))
+            {
+                <NavLink class="admin-nav-link" href="@Url("logs")">
+                    <i class="bi bi-journal-text"></i><span>日志</span>
+                </NavLink>
+            }
+        </nav>
+    }
+</div>
+
+@code {
+    [Parameter, EditorRequired] public Guid DomainId { get; set; }
+    [Parameter, EditorRequired] public string DomainName { get; set; } = string.Empty;
+
+    private bool _loaded;
+    private PermissionSnapshot _permissions = new();
+    private string Url(string section) => $"/admin/domains/{DomainId}/{section}";
+
+    protected override async Task OnParametersSetAsync()
+    {
+        var user = (await Authentication.GetAuthenticationStateAsync()).User;
+        _permissions = await Permissions.GetSnapshotAsync(user, CancellationToken.None);
+        _loaded = true;
+    }
+
+    private bool Can(string code) => _permissions.Has(code, DomainId);
+    private bool CanAny(params string[] codes) => codes.Any(Can);
+}

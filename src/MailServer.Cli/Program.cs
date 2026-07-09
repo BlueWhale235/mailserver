@@ -1,3 +1,9 @@
+using MailServer.Domain;
+using MailServer.Infrastructure;
+using Microsoft.AspNetCore.WebUtilities;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
 using System.Net;
 using System.Net.Sockets;
 using System.Reflection;
@@ -6,13 +12,6 @@ using System.Security.Cryptography;
 using System.Security.Principal;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using MailServer.Domain;
-using MailServer.Infrastructure;
-using Microsoft.AspNetCore.WebUtilities;
-using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Configuration;
-using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Logging;
 
 return await MailServerCli.RunAsync(args);
 
@@ -74,12 +73,8 @@ internal static class MailServerCli
         var httpsPort = ParsePort(args.Get("https-port") ?? Prompt(interactive, "Admin HTTPS port (0 disables)", "0"), allowZero: true);
         var certificatePath = args.Get("admin-cert") ?? Prompt(interactive, "Admin PEM certificate path (blank for none)", string.Empty);
         var privateKeyPath = args.Get("admin-key") ?? Prompt(interactive, "Admin PEM private key path (blank for none)", string.Empty);
-        var mailCertificatePath = args.Get("mail-cert") ?? Prompt(interactive, "Mail PEM certificate path (blank for none)", string.Empty);
-        var mailPrivateKeyPath = args.Get("mail-key") ?? Prompt(interactive, "Mail PEM private key path (blank for none)", string.Empty);
         if (httpsPort > 0 && (string.IsNullOrWhiteSpace(certificatePath) || string.IsNullOrWhiteSpace(privateKeyPath)))
             return Fail("HTTPS requires --admin-cert and --admin-key.");
-        if (string.IsNullOrWhiteSpace(mailCertificatePath) != string.IsNullOrWhiteSpace(mailPrivateKeyPath))
-            return Fail("Mail TLS requires both --mail-cert and --mail-key.");
         if (httpPort == 0 && httpsPort == 0) return Fail("At least one admin endpoint must be enabled.");
 
         var adminName = args.Get("admin") ?? Prompt(interactive, "Initial administrator", "admin");
@@ -93,8 +88,6 @@ internal static class MailServerCli
             httpsPort,
             certificatePath,
             privateKeyPath,
-            mailCertificatePath,
-            mailPrivateKeyPath,
             jwtKey);
 
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
@@ -124,14 +117,12 @@ internal static class MailServerCli
 
         var certificates = configuration.GetSection(CertificatesOptions.SectionName).Get<CertificatesOptions>()
             ?? new CertificatesOptions();
-        CheckCertificate(certificates.Mail, "Mail");
         CheckCertificate(certificates.Admin, "Admin");
         var smtpProbes = configuration.GetSection("Smtp:Endpoints").Get<List<EndpointProbe>>() ?? [];
         var imapProbes = configuration.GetSection("Imap:Endpoints").Get<List<EndpointProbe>>() ?? [];
-        if (!certificates.Mail.IsConfigured
-            && (smtpProbes.Any(x => x.ImplicitTls || x.RequireAuthentication)
-                || imapProbes.Any(x => x.ImplicitTls)))
-            Console.WriteLine("[INFO] Mail TLS is not configured; implicit TLS endpoints are disabled and authentication is unavailable.");
+        if (smtpProbes.Any(x => x.Port == 25 && x.Security == ConnectionSecurity.Plain))
+            Console.WriteLine("[INFO] SMTP 25 is configured without STARTTLS.");
+        Console.WriteLine("[INFO] SMTP/IMAP TLS certificates are managed per domain in the administration site.");
 
         var adminServer = configuration.GetSection(AdminServerOptions.SectionName).Get<AdminServerOptions>()
             ?? new AdminServerOptions();
@@ -154,6 +145,16 @@ internal static class MailServerCli
         Console.WriteLine(pending.Length == 0
             ? "[OK] Database is reachable and schema is current."
             : $"[FAIL] Database has {pending.Length} pending migration(s).");
+        var domain = args.Get("domain");
+        if (!string.IsNullOrWhiteSpace(domain))
+        {
+            await PrintDnsDiagnosticsAsync(
+                services.GetRequiredService<DnsDiagnosticService>(),
+                domain,
+                args.Get("selector"),
+                CancellationToken.None);
+        }
+
         Console.WriteLine("[OK] Configuration validation completed.");
         return pending.Length == 0 ? 0 : 1;
     }
@@ -336,7 +337,11 @@ internal static class MailServerCli
     private static ServiceProvider BuildServices(IConfiguration configuration)
     {
         var services = new ServiceCollection();
-        services.AddLogging(logging => logging.AddSimpleConsole(options => options.SingleLine = true));
+        services.AddSingleton(configuration);
+        services.AddLogging(logging =>
+        {
+            logging.AddMailServerLogging(configuration);
+        });
         services.AddMailServerInfrastructure(configuration);
         return services.BuildServiceProvider();
     }
@@ -379,12 +384,42 @@ internal static class MailServerCli
         if (string.IsNullOrWhiteSpace(configuration["Jwt:SigningKey"])
             || configuration["Jwt:SigningKey"]!.Length < 32)
             yield return "Jwt:SigningKey must contain at least 32 characters.";
-        foreach (var pair in new[] { ("Mail", certificates.Mail), ("Admin", certificates.Admin) })
+        foreach (var error in ValidateMailboxFolders(
+                     configuration.GetSection($"{MailboxDefaultsOptions.SectionName}:Folders").Get<List<string>>() ?? []))
+        {
+            yield return error;
+        }
+        var sentCopyGrace = configuration.GetValue<int?>($"{MailRulesOptions.SectionName}:SentCopyGraceSeconds") ?? 60;
+        if (sentCopyGrace is < 5 or > 600)
+            yield return "MailRules:SentCopyGraceSeconds must be between 5 and 600.";
+        var sentCopyDeduplication = configuration.GetValue<int?>($"{MailRulesOptions.SectionName}:SentCopyDeduplicationMinutes") ?? 15;
+        if (sentCopyDeduplication is < 1 or > 1440)
+            yield return "MailRules:SentCopyDeduplicationMinutes must be between 1 and 1440.";
+        var forwarding = configuration.GetSection(ForwardingOptions.SectionName).Get<ForwardingOptions>() ?? new ForwardingOptions();
+        if (!string.IsNullOrWhiteSpace(forwarding.SrsSecret) && forwarding.SrsSecret.Length < 32)
+            yield return "Forwarding:SrsSecret must contain at least 32 characters when configured.";
+        if (forwarding.MaxHops is < 1 or > 20) yield return "Forwarding:MaxHops must be between 1 and 20.";
+        if (forwarding.MaxAgeDays is < 1 or > 90) yield return "Forwarding:MaxAgeDays must be between 1 and 90.";
+        if (forwarding.MaxTargetsPerRule is < 1 or > 100)
+            yield return "Forwarding:MaxTargetsPerRule must be between 1 and 100.";
+        foreach (var pair in new[] { ("Admin", certificates.Admin) })
         {
             if (string.IsNullOrWhiteSpace(pair.Item2.CertificatePath)
                 != string.IsNullOrWhiteSpace(pair.Item2.PrivateKeyPath))
                 yield return $"Certificates:{pair.Item1} requires both certificate and private-key paths.";
         }
+        var relay = configuration.GetSection(RelayOptions.SectionName).Get<RelayOptions>() ?? new RelayOptions();
+        if (!IsPort(relay.Port)) yield return "Relay:Port is invalid.";
+        string? relaySecurityError = null;
+        try
+        {
+            _ = relay.EffectiveSecurity;
+        }
+        catch (FormatException exception)
+        {
+            relaySecurityError = exception.Message;
+        }
+        if (relaySecurityError is not null) yield return relaySecurityError;
         foreach (var endpoint in configuration.GetSection("Smtp:Endpoints").Get<List<EndpointProbe>>() ?? [])
         {
             if (!IPAddress.TryParse(endpoint.Address, out _) || !IsPort(endpoint.Port))
@@ -425,6 +460,35 @@ internal static class MailServerCli
         }
     }
 
+    private static async Task PrintDnsDiagnosticsAsync(
+        DnsDiagnosticService diagnostics,
+        string domain,
+        string? selector,
+        CancellationToken cancellationToken)
+    {
+        var result = await diagnostics.InspectAsync(domain, selector, cancellationToken);
+        Console.WriteLine($"[INFO] DNS diagnostics for {result.Domain}");
+        foreach (var mx in result.Mx)
+        {
+            Console.WriteLine($"[INFO] MX {mx}");
+        }
+
+        foreach (var item in result.MxConnectivity)
+        {
+            Console.WriteLine(item.Success
+                ? $"[OK] MX connectivity: {item.Host} {item.AddressFamily} {item.Address}:{item.Port}"
+                : $"[FAIL] MX connectivity: {item.Host} {item.AddressFamily} {item.Address}:{item.Port} - {item.Error}");
+        }
+
+        foreach (var spf in result.Spf) Console.WriteLine($"[INFO] SPF {spf}");
+        foreach (var dmarc in result.Dmarc) Console.WriteLine($"[INFO] DMARC {dmarc}");
+        foreach (var dkim in result.Dkim) Console.WriteLine($"[INFO] DKIM {dkim}");
+        foreach (var warning in result.Warnings)
+        {
+            Console.WriteLine($"[WARN] {warning}");
+        }
+    }
+
     private static Dictionary<string, object?> CreateConfiguration(
         DatabaseProvider provider,
         string connection,
@@ -433,23 +497,26 @@ internal static class MailServerCli
         int httpsPort,
         string certificatePath,
         string privateKeyPath,
-        string mailCertificatePath,
-        string mailPrivateKeyPath,
         string jwtKey) =>
         new()
         {
             ["Database"] = new { Provider = provider },
             ["ConnectionStrings"] = new { MailDatabase = connection },
             ["Storage"] = new { RootPath = "data/messages", MaximumMessageBytes = 52_428_800 },
+            ["SecurityAssets"] = new { RootPath = "security-assets" },
+            ["MailboxDefaults"] = new { Folders = new[] { "INBOX", "Sent", "Drafts", "Trash", "Junk", "Archives" } },
+            ["MailRules"] = new { SentCopyGraceSeconds = 60, SentCopyDeduplicationMinutes = 15 },
+            ["Forwarding"] = new
+            {
+                SrsSecret = Convert.ToHexString(RandomNumberGenerator.GetBytes(32)),
+                MaxHops = 5,
+                MaxAgeDays = 21,
+                MaxTargetsPerRule = 20
+            },
             ["Plugins"] = new { Path = "plugins" },
             ["Certificates"] = new
             {
-                Mail = new
-                {
-                    CertificatePath = mailCertificatePath,
-                    PrivateKeyPath = mailPrivateKeyPath,
-                    PrivateKeyPassword = ""
-                },
+                DefaultMailHostName = "mail.localhost",
                 Admin = new { CertificatePath = certificatePath, PrivateKeyPath = privateKeyPath, PrivateKeyPassword = "" }
             },
             ["AdminServer"] = new
@@ -468,9 +535,9 @@ internal static class MailServerCli
                 MaximumMessageBytes = 52_428_800,
                 Endpoints = new object[]
                 {
-                    new { Address = "0.0.0.0", Port = 25, ImplicitTls = false, RequireAuthentication = false },
-                    new { Address = "0.0.0.0", Port = 465, ImplicitTls = true, RequireAuthentication = true },
-                    new { Address = "0.0.0.0", Port = 587, ImplicitTls = false, RequireAuthentication = true }
+                    new { Address = "0.0.0.0", Port = 25, Security = ConnectionSecurity.StartTls, RequireAuthentication = false },
+                    new { Address = "0.0.0.0", Port = 465, Security = ConnectionSecurity.ImplicitTls, RequireAuthentication = true },
+                    new { Address = "0.0.0.0", Port = 587, Security = ConnectionSecurity.StartTls, RequireAuthentication = true }
                 }
             },
             ["Imap"] = new
@@ -479,15 +546,32 @@ internal static class MailServerCli
                 CommandTimeoutSeconds = 1800,
                 MaximumConnections = 200,
                 MaximumAppendBytes = 52_428_800,
+                IdlePollSeconds = 15,
                 Endpoints = new object[]
                 {
-                    new { Address = "0.0.0.0", Port = 143, ImplicitTls = false },
-                    new { Address = "0.0.0.0", Port = 993, ImplicitTls = true }
+                    new { Address = "0.0.0.0", Port = 143, Security = ConnectionSecurity.StartTls },
+                    new { Address = "0.0.0.0", Port = 993, Security = ConnectionSecurity.ImplicitTls }
                 }
             },
-            ["Relay"] = new { Host = "localhost", Port = 25, UseStartTls = true, UserName = "", Password = "" },
+            ["Relay"] = new { Host = "localhost", Port = 25, Security = RelaySecurity.StartTls, UseStartTls = true, UserName = "", Password = "" },
             ["Delivery"] = new { BatchSize = 20, LeaseSeconds = 120, MaximumAttempts = 12, PollIntervalSeconds = 5 },
-            ["Worker"] = new { HostName = "mail.localhost" }
+            ["Worker"] = new { HostName = "mail.localhost" },
+            ["Logging"] = new
+            {
+                LogLevel = new Dictionary<string, string>
+                {
+                    ["Default"] = "Information",
+                    ["Microsoft.AspNetCore"] = "Warning",
+                    ["Microsoft.EntityFrameworkCore"] = "Warning",
+                    ["Microsoft.EntityFrameworkCore.Database.Command"] = "Warning"
+                }
+            },
+            ["MailServerLogging"] = new
+            {
+                Console = new { Enabled = true, Color = true },
+                File = new { Enabled = true, Directory = "logs" },
+                TimestampFormat = "yyyy/MM/dd HH:mm:ss"
+            }
         };
 
     private static string GetConfigPath(CliArguments args)
@@ -527,6 +611,18 @@ internal static class MailServerCli
             : throw new FormatException($"Invalid port: {value}");
     private static bool IsPort(int port) => port is > 0 and <= 65535;
 
+    private static IEnumerable<string> ValidateMailboxFolders(IEnumerable<string> folders)
+    {
+        foreach (var folder in folders)
+        {
+            var value = folder.Trim().Trim('"').Replace('\\', '/');
+            if (string.IsNullOrWhiteSpace(value) || value.Contains("..", StringComparison.Ordinal) || value.Length > 255)
+            {
+                yield return $"MailboxDefaults:Folders contains an invalid mailbox name: '{folder}'.";
+            }
+        }
+    }
+
     private static void ProtectConfigurationFile(string path)
     {
         if (!OperatingSystem.IsWindows())
@@ -562,7 +658,7 @@ internal static class MailServerCli
             MailServer portable CLI
 
               mailserver init [--provider Sqlite|PostgreSql|MySql] [--config path]
-              mailserver doctor [--config path]
+              mailserver doctor [--config path] [--domain example.com] [--selector dkim-selector]
               mailserver config validate
               mailserver db status|update
               mailserver admin create|password <name> --password <value>
@@ -578,6 +674,7 @@ internal static class MailServerCli
         public string Address { get; set; } = "0.0.0.0";
         public int Port { get; set; }
         public bool ImplicitTls { get; set; }
+        public ConnectionSecurity Security { get; set; }
         public bool RequireAuthentication { get; set; }
     }
 }

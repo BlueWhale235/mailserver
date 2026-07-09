@@ -34,16 +34,14 @@ appsettings.*.local.json
 certificates/*
 !certificates/.gitkeep
 !certificates/README.md
+security-assets/*
+!security-assets/README.md
 *.pfx
 *.p12
 *.pem
 *.key
 *.crt
 *.cer
-
-# Installed/generated plugins
-plugins/*
-!plugins/.gitkeep
 
 # Logs, dumps and temporary files
 *.log
@@ -57,3 +55,9 @@ plugins/*
 .DS_Store
 Thumbs.db
 Desktop.ini
+
+
+# other files
+frontend_design.md
+下拉菜单.txt
+logs/

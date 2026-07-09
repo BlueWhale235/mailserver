@@ -56,7 +56,15 @@ namespace MailServer.Migrations.Sqlite.Migrations
                     b.Property<long>("CreatedAt")
                         .HasColumnType("INTEGER");
 
+                    b.Property<string>("CreatedBy")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("TEXT");
+
                     b.Property<long?>("ExpiresAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long?>("LastUsedAt")
                         .HasColumnType("INTEGER");
 
                     b.Property<string>("Name")
@@ -72,17 +80,14 @@ namespace MailServer.Migrations.Sqlite.Migrations
                     b.Property<long?>("RevokedAt")
                         .HasColumnType("INTEGER");
 
-                    b.Property<string>("Scopes")
-                        .IsRequired()
-                        .HasMaxLength(1024)
-                        .HasColumnType("TEXT");
-
                     b.Property<string>("SecretHash")
                         .IsRequired()
                         .HasMaxLength(128)
                         .HasColumnType("TEXT");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("LastUsedAt");
 
                     b.HasIndex("Prefix")
                         .IsUnique();
@@ -174,6 +179,9 @@ namespace MailServer.Migrations.Sqlite.Migrations
                     b.Property<long>("CreatedAt")
                         .HasColumnType("INTEGER");
 
+                    b.Property<int>("ForwardDepth")
+                        .HasColumnType("INTEGER");
+
                     b.Property<string>("LastError")
                         .HasColumnType("TEXT");
 
@@ -190,9 +198,15 @@ namespace MailServer.Migrations.Sqlite.Migrations
                     b.Property<long>("NextAttemptAt")
                         .HasColumnType("INTEGER");
 
+                    b.Property<Guid?>("OriginRuleId")
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("Recipient")
                         .IsRequired()
                         .HasMaxLength(320)
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid?>("RouteDomainId")
                         .HasColumnType("TEXT");
 
                     b.Property<string>("RouteMode")
@@ -217,9 +231,238 @@ namespace MailServer.Migrations.Sqlite.Migrations
 
                     b.HasIndex("MessageId");
 
+                    b.HasIndex("OriginRuleId");
+
+                    b.HasIndex("RouteDomainId");
+
                     b.HasIndex("Status", "NextAttemptAt");
 
                     b.ToTable("delivery_jobs", (string)null);
+                });
+
+            modelBuilder.Entity("MailServer.Domain.DomainCertificate", b =>
+                {
+                    b.Property<Guid>("DomainId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("CertificatePath")
+                        .IsRequired()
+                        .HasMaxLength(2048)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Issuer")
+                        .IsRequired()
+                        .HasMaxLength(1024)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("NotAfter")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("NotBefore")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("PrivateKeyPath")
+                        .IsRequired()
+                        .HasMaxLength(2048)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Source")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Subject")
+                        .IsRequired()
+                        .HasMaxLength(1024)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("SubjectAlternativeNames")
+                        .IsRequired()
+                        .HasMaxLength(4096)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Thumbprint")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("UpdatedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("DomainId");
+
+                    b.ToTable("domain_certificates", (string)null);
+                });
+
+            modelBuilder.Entity("MailServer.Domain.DomainDnsCheck", b =>
+                {
+                    b.Property<Guid>("DomainId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<long?>("CheckedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("DetailsJson")
+                        .IsRequired()
+                        .HasMaxLength(32768)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("LastError")
+                        .HasMaxLength(4096)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("DomainId");
+
+                    b.ToTable("domain_dns_checks", (string)null);
+                });
+
+            modelBuilder.Entity("MailServer.Domain.DomainDnsSettings", b =>
+                {
+                    b.Property<Guid>("DomainId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<bool>("DaneEnabled")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("DaneTlsaRecords")
+                        .IsRequired()
+                        .HasMaxLength(8192)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("DmarcAggregateReportUris")
+                        .IsRequired()
+                        .HasMaxLength(4096)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("DmarcDkimAlignment")
+                        .IsRequired()
+                        .HasMaxLength(4)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("DmarcFailureOptions")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("DmarcForensicReportUris")
+                        .IsRequired()
+                        .HasMaxLength(4096)
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("DmarcPercentage")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("DmarcPolicy")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("DmarcSpfAlignment")
+                        .IsRequired()
+                        .HasMaxLength(4)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("DmarcSubdomainPolicy")
+                        .HasMaxLength(16)
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("MtaStsMaxAgeSeconds")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("MtaStsMode")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("MtaStsMxPatterns")
+                        .IsRequired()
+                        .HasMaxLength(4096)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("MtaStsPolicyId")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("SpfAllPolicy")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("SpfCustomMechanisms")
+                        .IsRequired()
+                        .HasMaxLength(4096)
+                        .HasColumnType("TEXT");
+
+                    b.Property<bool>("SpfIncludeA")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<bool>("SpfIncludeMx")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("SpfIncludes")
+                        .IsRequired()
+                        .HasMaxLength(4096)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("SpfIpv4")
+                        .IsRequired()
+                        .HasMaxLength(4096)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("SpfIpv6")
+                        .IsRequired()
+                        .HasMaxLength(4096)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("TlsReportUris")
+                        .IsRequired()
+                        .HasMaxLength(4096)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("UpdatedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("DomainId");
+
+                    b.ToTable("domain_dns_settings", (string)null);
+                });
+
+            modelBuilder.Entity("MailServer.Domain.FirewallRule", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Cidr")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("CreatedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<bool>("IsEnabled")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Note")
+                        .HasMaxLength(512)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("UpdatedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Cidr")
+                        .IsUnique();
+
+                    b.ToTable("firewall_rules", (string)null);
                 });
 
             modelBuilder.Entity("MailServer.Domain.MailAccount", b =>
@@ -268,11 +511,18 @@ namespace MailServer.Migrations.Sqlite.Migrations
                         .HasColumnType("INTEGER");
 
                     b.Property<string>("DestinationAddress")
-                        .IsRequired()
                         .HasMaxLength(320)
                         .HasColumnType("TEXT");
 
                     b.Property<Guid>("DomainId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<bool>("IsEnabled")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Mode")
+                        .IsRequired()
+                        .HasMaxLength(32)
                         .HasColumnType("TEXT");
 
                     b.Property<string>("SourceLocalPart")
@@ -280,10 +530,15 @@ namespace MailServer.Migrations.Sqlite.Migrations
                         .HasMaxLength(128)
                         .HasColumnType("TEXT");
 
+                    b.Property<Guid?>("TargetAccountId")
+                        .HasColumnType("TEXT");
+
                     b.HasKey("Id");
 
                     b.HasIndex("DomainId", "SourceLocalPart")
                         .IsUnique();
+
+                    b.HasIndex("TargetAccountId", "DomainId");
 
                     b.ToTable("mail_aliases", (string)null);
                 });
@@ -297,18 +552,37 @@ namespace MailServer.Migrations.Sqlite.Migrations
                     b.Property<long>("CreatedAt")
                         .HasColumnType("INTEGER");
 
+                    b.Property<bool>("DirectDeliverSameDomain")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER")
+                        .HasDefaultValue(true);
+
                     b.Property<string>("DkimPrivateKeyPath")
+                        .HasMaxLength(2048)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("DkimPublicKey")
+                        .HasMaxLength(4096)
                         .HasColumnType("TEXT");
 
                     b.Property<string>("DkimSelector")
+                        .HasMaxLength(63)
                         .HasColumnType("TEXT");
 
                     b.Property<bool>("IsActive")
                         .HasColumnType("INTEGER");
 
+                    b.Property<string>("MailHostName")
+                        .HasMaxLength(255)
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("Name")
                         .IsRequired()
                         .HasMaxLength(255)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("OutboundIpAddresses")
+                        .HasMaxLength(1024)
                         .HasColumnType("TEXT");
 
                     b.Property<string>("OutboundMode")
@@ -316,12 +590,135 @@ namespace MailServer.Migrations.Sqlite.Migrations
                         .HasMaxLength(32)
                         .HasColumnType("TEXT");
 
+                    b.Property<long>("QuotaBytes")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER")
+                        .HasDefaultValue(10737418240L);
+
+                    b.Property<string>("SmtpHostName")
+                        .HasMaxLength(255)
+                        .HasColumnType("TEXT");
+
                     b.HasKey("Id");
+
+                    b.HasIndex("MailHostName")
+                        .IsUnique();
 
                     b.HasIndex("Name")
                         .IsUnique();
 
                     b.ToTable("mail_domains", (string)null);
+                });
+
+            modelBuilder.Entity("MailServer.Domain.MailRule", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("CreatedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Direction")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("DomainId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<bool>("IsEnabled")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("MatchMode")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("Priority")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("TargetMailboxName")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("UpdatedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("DomainId", "Direction", "Priority");
+
+                    b.ToTable("mail_rules", (string)null);
+                });
+
+            modelBuilder.Entity("MailServer.Domain.MailRuleAction", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Kind")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("Position")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<Guid>("RuleId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ValuesJson")
+                        .IsRequired()
+                        .HasMaxLength(4096)
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("RuleId", "Position");
+
+                    b.ToTable("mail_rule_actions", (string)null);
+                });
+
+            modelBuilder.Entity("MailServer.Domain.MailRuleCondition", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Field")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Operator")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("Position")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<Guid>("RuleId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ValuesJson")
+                        .IsRequired()
+                        .HasMaxLength(4096)
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("RuleId", "Position");
+
+                    b.ToTable("mail_rule_conditions", (string)null);
                 });
 
             modelBuilder.Entity("MailServer.Domain.Mailbox", b =>
@@ -394,6 +791,182 @@ namespace MailServer.Migrations.Sqlite.Migrations
                     b.ToTable("mailbox_messages", (string)null);
                 });
 
+            modelBuilder.Entity("MailServer.Domain.MtaStsPolicyCache", b =>
+                {
+                    b.Property<string>("Domain")
+                        .HasMaxLength(255)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("ExpiresAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("FetchedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("LastError")
+                        .HasMaxLength(4096)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long?>("LastRefreshAttemptAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("MaxAgeSeconds")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Mode")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("MxPatterns")
+                        .IsRequired()
+                        .HasMaxLength(4096)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("PolicyId")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Domain");
+
+                    b.HasIndex("ExpiresAt");
+
+                    b.ToTable("mta_sts_policy_cache", (string)null);
+                });
+
+            modelBuilder.Entity("MailServer.Domain.PermissionGrant", b =>
+                {
+                    b.Property<string>("SubjectType")
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("SubjectId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("PermissionCode")
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ResourceType")
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT")
+                        .HasDefaultValue("");
+
+                    b.Property<string>("ResourceKey")
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT")
+                        .HasDefaultValue("");
+
+                    b.Property<long>("CreatedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("CreatedBy")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("SubjectType", "SubjectId", "PermissionCode", "ResourceType", "ResourceKey");
+
+                    b.HasIndex("PermissionCode", "ResourceType", "ResourceKey");
+
+                    b.ToTable("permission_grants", (string)null);
+                });
+
+            modelBuilder.Entity("MailServer.Domain.SentCopyJob", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("AccountId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid?>("ClientMailboxMessageId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<long?>("CompletedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("CreatedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("DeduplicateUntil")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("IdentityKey")
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("MessageId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("ReadyAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<Guid?>("RuleId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid?>("ServerMailboxMessageId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("TargetMailboxName")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("MessageId");
+
+                    b.HasIndex("RuleId");
+
+                    b.HasIndex("AccountId", "DeduplicateUntil");
+
+                    b.HasIndex("State", "ReadyAt");
+
+                    b.ToTable("sent_copy_jobs", (string)null);
+                });
+
+            modelBuilder.Entity("MailServer.Domain.SrsAddressMapping", b =>
+                {
+                    b.Property<string>("Token")
+                        .HasMaxLength(96)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("CreatedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<Guid>("DomainId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("ExpiresAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("ForwardDepth")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("OriginalSender")
+                        .IsRequired()
+                        .HasMaxLength(320)
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Token");
+
+                    b.HasIndex("DomainId");
+
+                    b.HasIndex("ExpiresAt");
+
+                    b.ToTable("srs_address_mappings", (string)null);
+                });
+
             modelBuilder.Entity("MailServer.Domain.StoredMessage", b =>
                 {
                     b.Property<Guid>("Id")
@@ -427,6 +1000,128 @@ namespace MailServer.Migrations.Sqlite.Migrations
                     b.ToTable("stored_messages", (string)null);
                 });
 
+            modelBuilder.Entity("MailServer.Domain.SystemSetting", b =>
+                {
+                    b.Property<string>("Key")
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Value")
+                        .IsRequired()
+                        .HasMaxLength(8192)
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Key");
+
+                    b.ToTable("system_settings", (string)null);
+                });
+
+            modelBuilder.Entity("MailServer.Domain.TlsDeliveryEvent", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("FailureReason")
+                        .IsRequired()
+                        .HasMaxLength(4096)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("MxHost")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("OccurredAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("PolicyDomain")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("PolicyString")
+                        .IsRequired()
+                        .HasMaxLength(8192)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("PolicyType")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ReceivingIp")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.Property<bool>("Reported")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("ResultType")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("SendingIp")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Reported", "OccurredAt");
+
+                    b.ToTable("tls_delivery_events", (string)null);
+                });
+
+            modelBuilder.Entity("MailServer.Domain.TlsReportDelivery", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("Attempts")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long?>("CompletedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("LastError")
+                        .HasMaxLength(4096)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("NextAttemptAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("PeriodEnd")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("PeriodStart")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("PolicyDomain")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ReportJson")
+                        .IsRequired()
+                        .HasMaxLength(1048576)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ReportUri")
+                        .IsRequired()
+                        .HasMaxLength(2048)
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CompletedAt", "NextAttemptAt");
+
+                    b.ToTable("tls_report_deliveries", (string)null);
+                });
+
             modelBuilder.Entity("MailServer.Domain.DeliveryAttempt", b =>
                 {
                     b.HasOne("MailServer.Domain.DeliveryJob", "DeliveryJob")
@@ -446,7 +1141,47 @@ namespace MailServer.Migrations.Sqlite.Migrations
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
 
+                    b.HasOne("MailServer.Domain.MailDomain", "RouteDomain")
+                        .WithMany()
+                        .HasForeignKey("RouteDomainId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
                     b.Navigation("Message");
+
+                    b.Navigation("RouteDomain");
+                });
+
+            modelBuilder.Entity("MailServer.Domain.DomainCertificate", b =>
+                {
+                    b.HasOne("MailServer.Domain.MailDomain", "Domain")
+                        .WithOne("Certificate")
+                        .HasForeignKey("MailServer.Domain.DomainCertificate", "DomainId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Domain");
+                });
+
+            modelBuilder.Entity("MailServer.Domain.DomainDnsCheck", b =>
+                {
+                    b.HasOne("MailServer.Domain.MailDomain", "Domain")
+                        .WithOne()
+                        .HasForeignKey("MailServer.Domain.DomainDnsCheck", "DomainId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Domain");
+                });
+
+            modelBuilder.Entity("MailServer.Domain.DomainDnsSettings", b =>
+                {
+                    b.HasOne("MailServer.Domain.MailDomain", "Domain")
+                        .WithOne("DnsSettings")
+                        .HasForeignKey("MailServer.Domain.DomainDnsSettings", "DomainId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Domain");
                 });
 
             modelBuilder.Entity("MailServer.Domain.MailAccount", b =>
@@ -468,7 +1203,48 @@ namespace MailServer.Migrations.Sqlite.Migrations
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
 
+                    b.HasOne("MailServer.Domain.MailAccount", "TargetAccount")
+                        .WithMany()
+                        .HasForeignKey("TargetAccountId", "DomainId")
+                        .HasPrincipalKey("Id", "DomainId")
+                        .OnDelete(DeleteBehavior.NoAction);
+
                     b.Navigation("Domain");
+
+                    b.Navigation("TargetAccount");
+                });
+
+            modelBuilder.Entity("MailServer.Domain.MailRule", b =>
+                {
+                    b.HasOne("MailServer.Domain.MailDomain", "Domain")
+                        .WithMany()
+                        .HasForeignKey("DomainId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Domain");
+                });
+
+            modelBuilder.Entity("MailServer.Domain.MailRuleAction", b =>
+                {
+                    b.HasOne("MailServer.Domain.MailRule", "Rule")
+                        .WithMany("Actions")
+                        .HasForeignKey("RuleId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Rule");
+                });
+
+            modelBuilder.Entity("MailServer.Domain.MailRuleCondition", b =>
+                {
+                    b.HasOne("MailServer.Domain.MailRule", "Rule")
+                        .WithMany("Conditions")
+                        .HasForeignKey("RuleId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Rule");
                 });
 
             modelBuilder.Entity("MailServer.Domain.Mailbox", b =>
@@ -499,6 +1275,57 @@ namespace MailServer.Migrations.Sqlite.Migrations
                     b.Navigation("Mailbox");
 
                     b.Navigation("Message");
+                });
+
+            modelBuilder.Entity("MailServer.Domain.SentCopyJob", b =>
+                {
+                    b.HasOne("MailServer.Domain.MailAccount", "Account")
+                        .WithMany()
+                        .HasForeignKey("AccountId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("MailServer.Domain.StoredMessage", "Message")
+                        .WithMany()
+                        .HasForeignKey("MessageId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("MailServer.Domain.MailRule", "Rule")
+                        .WithMany()
+                        .HasForeignKey("RuleId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
+                    b.Navigation("Account");
+
+                    b.Navigation("Message");
+
+                    b.Navigation("Rule");
+                });
+
+            modelBuilder.Entity("MailServer.Domain.SrsAddressMapping", b =>
+                {
+                    b.HasOne("MailServer.Domain.MailDomain", "Domain")
+                        .WithMany()
+                        .HasForeignKey("DomainId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Domain");
+                });
+
+            modelBuilder.Entity("MailServer.Domain.MailDomain", b =>
+                {
+                    b.Navigation("Certificate");
+
+                    b.Navigation("DnsSettings");
+                });
+
+            modelBuilder.Entity("MailServer.Domain.MailRule", b =>
+                {
+                    b.Navigation("Actions");
+
+                    b.Navigation("Conditions");
                 });
 #pragma warning restore 612, 618
         }

@@ -1,0 +1,371 @@
+@inject PermissionService Permissions
+@inject AdminApplicationService Administration
+@inject AdminToastService Toasts
+
+<div class="modal-backdrop" @onclick="Cancel">
+    <div class="modal-panel permission-modal" @onclick:stopPropagation>
+        <div class="modal-header">
+            <div>
+                <h2>@Title</h2>
+                <p>@SubjectName</p>
+            </div>
+            <button class="icon-button" type="button" title="关闭" @onclick="Cancel"><i class="bi bi-x-lg"></i></button>
+        </div>
+
+        <div class="permission-scope-row">
+            <label class="form-field">
+                <span>资源范围</span>
+                <SelectDropdown TValue="string" @bind-Value="_resourceMode" @bind-Value:after="ReloadGridAsync"
+                                Options="ResourceModeOptions" AriaLabel="资源范围" />
+            </label>
+            @if (_resourceMode == "domain")
+            {
+                <label class="form-field">
+                    <span>域名</span>
+                    <MultiSelectDropdown TItem="MailDomain" TValue="Guid"
+                                         Items="_domains" ValueSelector="domain => domain.Id" TextSelector="domain => domain.Name"
+                                         SelectedValues="_domainIds" SelectedValuesChanged="DomainSelectionChanged"
+                                         Placeholder="请选择域名" SelectedUnit="个域名" SearchPlaceholder="筛选域名"
+                                         AriaLabel="域名" />
+                </label>
+            }
+        </div>
+        @if (_selected.Any(x => x.PermissionCode == PermissionCodes.FullAccess))
+        {
+            <div class="permission-risk-note">
+                <i class="bi bi-exclamation-triangle"></i>
+                全部权限拥有后台和 API 的完整操作能力，并会与其他细分授权互斥。
+            </div>
+        }
+
+        <div class="permission-editor-grid">
+            <section class="permission-pane selected-pane">
+                <div class="permission-pane-header">
+                    <strong>已选权限</strong>
+                    <span>@_selected.Count 项</span>
+                </div>
+                @if (_selected.Count == 0)
+                {
+                    <div class="empty-cell">还没有选择权限</div>
+                }
+                else
+                {
+                    <div class="permission-list">
+                        @foreach (var grant in _selected)
+                        {
+                            <div class="permission-row selected">
+                                <div>
+                                    <strong>@PermissionName(grant.PermissionCode)</strong>
+                                    <span>@grant.PermissionCode</span>
+                                    <small>@ScopeText(grant)</small>
+                                </div>
+                                <button class="icon-button" type="button" title="移除" @onclick="() => RemoveGrant(grant)"><i class="bi bi-x-lg"></i></button>
+                            </div>
+                        }
+                    </div>
+                }
+            </section>
+
+            <section class="permission-pane available-pane">
+                <ServerDataGrid @ref="_grid" TItem="PermissionCatalogItem" LoadData="LoadPermissionsAsync"
+                                SearchPlaceholder="搜索权限名称、代码或描述" EmptyText="没有符合条件的权限"
+                                ColumnCount="4" InitialPageSize="10" SearchOnInput="false" CssClass="permission-catalog-grid">
+                    <ToolbarTemplate>
+                        <SelectDropdown TValue="string" @bind-Value="_group" Options="GroupOptions"
+                                        AriaLabel="权限分组" CssClass="compact-select" />
+                        <button class="btn btn-primary admin-btn" type="button" @onclick="ReloadGridAsync">
+                            <i class="bi bi-search"></i>
+                            搜索
+                        </button>
+                    </ToolbarTemplate>
+                    <HeaderTemplate>
+                        <th class="check-col">
+                            <input type="checkbox"
+                                   aria-label="全选当前筛选结果"
+                                   title="全选当前筛选结果"
+                                   checked="@AllVisiblePermissionsSelected"
+                                   @onchange="ToggleAllVisiblePermissions"
+                                   @onclick:stopPropagation />
+                        </th>
+                        <th>权限</th>
+                        <th>分组</th>
+                        <th>范围</th>
+                    </HeaderTemplate>
+                    <RowTemplate Context="permission">
+                        <td class="check-col">
+                            <input type="checkbox" checked="@IsPermissionChecked(permission)" @onchange="args => TogglePermission(permission, args)" @onclick:stopPropagation />
+                        </td>
+                        <td>
+                            <strong>@permission.Name</strong>
+                            <span class="row-hint">@permission.Code</span>
+                            <span class="row-hint">@permission.Description</span>
+                        </td>
+                        <td>@GroupName(permission.GroupKey)</td>
+                        <td>@(permission.SupportsDomainScope ? "支持域名范围" : "系统权限")</td>
+                    </RowTemplate>
+                </ServerDataGrid>
+            </section>
+        </div>
+
+        <div class="modal-actions">
+            <button class="btn btn-outline-secondary admin-btn" type="button" @onclick="Cancel">取消</button>
+            <button class="btn btn-primary admin-btn" type="button" @onclick="SaveAsync">保存授权</button>
+        </div>
+    </div>
+</div>
+
+@code {
+    [Parameter] public string Title { get; set; } = "新增授权";
+    [Parameter] public string SubjectName { get; set; } = string.Empty;
+    [Parameter] public IReadOnlyList<PermissionGrantInput> InitialGrants { get; set; } = [];
+    [Parameter] public EventCallback<IReadOnlyList<PermissionGrantInput>> OnSave { get; set; }
+    [Parameter] public EventCallback OnCancel { get; set; }
+
+    private ServerDataGrid<PermissionCatalogItem>? _grid;
+    private IReadOnlyList<PermissionCatalogGroup> _catalog = [];
+    private IReadOnlyList<MailDomain> _domains = [];
+    private readonly List<PermissionGrantInput> _selected = [];
+    private IReadOnlyList<PermissionCatalogItem> _visiblePermissions = [];
+    private IReadOnlySet<Guid> _domainIds = new HashSet<Guid>();
+    private string _resourceMode = "system";
+    private string _group = string.Empty;
+
+    private static readonly IReadOnlyList<AdminSelectOption<string>> ResourceModeOptions =
+    [
+        new("system", "系统权限"),
+        new("all-domains", "全部域名"),
+        new("domain", "指定域名")
+    ];
+
+    private IReadOnlyList<AdminSelectOption<string>> GroupOptions =>
+    [
+        new(string.Empty, "全部分组"),
+        .. _catalog.Select(group => new AdminSelectOption<string>(group.Key, group.Name))
+    ];
+
+    protected override async Task OnInitializedAsync() => await LoadAsync();
+
+    protected override void OnParametersSet()
+    {
+        _selected.Clear();
+        _selected.AddRange(PermissionService.NormalizeGrantInputs(InitialGrants));
+    }
+
+    private async Task LoadAsync()
+    {
+        _catalog = Permissions.GetCatalog();
+        _domains = await Administration.GetDomainsAsync(CancellationToken.None);
+    }
+
+    private Task<PagedResult<PermissionCatalogItem>> LoadPermissionsAsync(string search, int page, int pageSize)
+    {
+        var query = _catalog.SelectMany(x => x.Permissions);
+        query = _resourceMode == "system"
+            ? query.Where(x => !x.SupportsDomainScope || x.Code == PermissionCodes.FullAccess)
+            : query.Where(x => x.SupportsDomainScope || x.Code == PermissionCodes.FullAccess);
+        if (!string.IsNullOrWhiteSpace(_group))
+            query = query.Where(x => x.GroupKey == _group);
+        if (!string.IsNullOrWhiteSpace(search))
+        {
+            var normalized = search.Trim();
+            query = query.Where(x =>
+                x.Code.Contains(normalized, StringComparison.OrdinalIgnoreCase)
+                || x.Name.Contains(normalized, StringComparison.OrdinalIgnoreCase)
+                || x.Description.Contains(normalized, StringComparison.OrdinalIgnoreCase));
+        }
+
+        var items = query.ToArray();
+        var rows = items.Skip((Math.Max(1, page) - 1) * pageSize).Take(pageSize).ToArray();
+        _visiblePermissions = rows;
+        return Task.FromResult(new PagedResult<PermissionCatalogItem>(rows, page, pageSize, items.Length));
+    }
+
+    private async Task ReloadGridAsync()
+    {
+        if (_grid is not null) await _grid.ReloadFromFirstPageAsync();
+    }
+
+    private void TogglePermission(PermissionCatalogItem permission, ChangeEventArgs args)
+    {
+        if (args.Value is true)
+        {
+            AddPermission(permission);
+            return;
+        }
+
+        RemovePermissionForCurrentScope(permission);
+    }
+
+    private bool AllVisiblePermissionsSelected =>
+        _visiblePermissions.Count > 0
+        && (_selected.Any(x => x.PermissionCode == PermissionCodes.FullAccess)
+            || _visiblePermissions.All(IsPermissionChecked));
+
+    private void ToggleAllVisiblePermissions(ChangeEventArgs args)
+    {
+        var selected = args.Value is true;
+        if (selected && _visiblePermissions.Any(x => x.Code == PermissionCodes.FullAccess))
+        {
+            AddPermission(_visiblePermissions.First(x => x.Code == PermissionCodes.FullAccess));
+            return;
+        }
+
+        foreach (var permission in _visiblePermissions)
+        {
+            if (selected)
+            {
+                AddPermission(permission);
+            }
+            else
+            {
+                RemovePermissionForCurrentScope(permission);
+            }
+        }
+    }
+
+    private void AddPermission(PermissionCatalogItem permission)
+    {
+        if (permission.Code == PermissionCodes.FullAccess)
+        {
+            _selected.Clear();
+            _selected.Add(PermissionService.FullAccessGrant());
+            return;
+        }
+
+        if (_selected.Any(x => x.PermissionCode == PermissionCodes.FullAccess))
+        {
+            _selected.Clear();
+        }
+
+        if (permission.SupportsDomainScope)
+        {
+            if (_resourceMode == "domain")
+            {
+                if (_domainIds.Count == 0)
+                {
+                    Toasts.Error("请先选择至少一个域名。");
+                    return;
+                }
+
+                foreach (var domainId in _domainIds)
+                {
+                    AddGrant(new PermissionGrantInput(permission.Code, PermissionService.DomainResourceType, domainId.ToString()));
+                }
+            }
+            else
+            {
+                AddGrant(new PermissionGrantInput(permission.Code, PermissionService.DomainResourceType, PermissionService.AllResources));
+            }
+
+            return;
+        }
+
+        if (_resourceMode != "system")
+        {
+            Toasts.Error("该权限不支持域名范围，请切换到系统权限。");
+            return;
+        }
+
+        AddGrant(new PermissionGrantInput(permission.Code, string.Empty, string.Empty));
+    }
+
+    private void AddGrant(PermissionGrantInput grant)
+    {
+        if (_selected.Any(x => GrantKey(x) == GrantKey(grant))) return;
+        _selected.Add(grant);
+    }
+
+    private void RemoveGrant(PermissionGrantInput grant) =>
+        _selected.RemoveAll(x => GrantKey(x) == GrantKey(grant));
+
+    private void RemovePermissionForCurrentScope(PermissionCatalogItem permission)
+    {
+        if (permission.Code == PermissionCodes.FullAccess)
+        {
+            _selected.RemoveAll(x => x.PermissionCode == PermissionCodes.FullAccess);
+            return;
+        }
+
+        if (!permission.SupportsDomainScope)
+        {
+            _selected.RemoveAll(x => x.PermissionCode == permission.Code && string.IsNullOrWhiteSpace(x.ResourceType));
+            return;
+        }
+
+        if (_resourceMode == "domain")
+        {
+            var keys = _domainIds.Select(x => x.ToString()).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            _selected.RemoveAll(x =>
+                x.PermissionCode == permission.Code
+                && x.ResourceType == PermissionService.DomainResourceType
+                && keys.Contains(x.ResourceKey ?? string.Empty));
+            return;
+        }
+
+        _selected.RemoveAll(x =>
+            x.PermissionCode == permission.Code
+            && x.ResourceType == PermissionService.DomainResourceType
+            && x.ResourceKey == PermissionService.AllResources);
+    }
+
+    private bool IsPermissionChecked(PermissionCatalogItem permission)
+    {
+        if (permission.Code == PermissionCodes.FullAccess)
+            return _selected.Any(x => x.PermissionCode == PermissionCodes.FullAccess);
+        if (!permission.SupportsDomainScope)
+            return _selected.Any(x => x.PermissionCode == permission.Code && string.IsNullOrWhiteSpace(x.ResourceType));
+        if (_resourceMode == "domain")
+        {
+            return _domainIds.Count > 0 && _domainIds.All(domainId =>
+                _selected.Any(x =>
+                    x.PermissionCode == permission.Code
+                    && x.ResourceType == PermissionService.DomainResourceType
+                    && string.Equals(x.ResourceKey, domainId.ToString(), StringComparison.OrdinalIgnoreCase)));
+        }
+
+        return _selected.Any(x =>
+            x.PermissionCode == permission.Code
+            && x.ResourceType == PermissionService.DomainResourceType
+            && x.ResourceKey == PermissionService.AllResources);
+    }
+
+    private async Task SaveAsync()
+    {
+        try
+        {
+            var normalized = PermissionService.NormalizeGrantInputs(_selected);
+            if (normalized.Count == 0)
+            {
+                Toasts.Error("请至少选择一项权限。");
+                return;
+            }
+
+            await OnSave.InvokeAsync(normalized);
+        }
+        catch (Exception exception)
+        {
+            Toasts.Error(exception.Message);
+        }
+    }
+
+    private async Task Cancel() => await OnCancel.InvokeAsync();
+
+    private void DomainSelectionChanged(IReadOnlySet<Guid> ids) => _domainIds = ids.ToHashSet();
+
+    private string PermissionName(string code) =>
+        _catalog.SelectMany(x => x.Permissions).FirstOrDefault(x => x.Code == code)?.Name ?? code;
+
+    private string GroupName(string key) =>
+        _catalog.FirstOrDefault(x => x.Key == key)?.Name ?? key;
+
+    private string ScopeText(PermissionGrantInput grant)
+    {
+        if (string.IsNullOrWhiteSpace(grant.ResourceType)) return "系统权限";
+        if (grant.ResourceKey == PermissionService.AllResources) return "全部域名";
+        var domain = _domains.FirstOrDefault(x => x.Id.ToString().Equals(grant.ResourceKey, StringComparison.OrdinalIgnoreCase));
+        return domain is null ? $"域名：{grant.ResourceKey}" : $"域名：{domain.Name}";
+    }
+
+    private static string GrantKey(PermissionGrantInput grant) =>
+        $"{grant.PermissionCode}|{grant.ResourceType}|{grant.ResourceKey}";
+}

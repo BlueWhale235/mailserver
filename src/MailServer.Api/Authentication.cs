@@ -41,13 +41,15 @@ public sealed class ApiKeyAuthenticationHandler(
             return AuthenticateResult.Fail("Invalid API key.");
         }
 
+        record.LastUsedAt = DateTimeOffset.UtcNow;
+        await db.SaveChangesAsync(Context.RequestAborted);
+
         var claims = new List<Claim>
         {
             new(ClaimTypes.NameIdentifier, record.Id.ToString()),
             new(ClaimTypes.Name, record.Name),
             new("auth_type", "api_key")
         };
-        claims.AddRange(record.Scopes.Split(' ', StringSplitOptions.RemoveEmptyEntries).Select(scope => new Claim("scope", scope)));
         return AuthenticateResult.Success(
             new AuthenticationTicket(new ClaimsPrincipal(new ClaimsIdentity(claims, SchemeName)), SchemeName));
     }

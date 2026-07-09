@@ -1,12 +1,19 @@
 @page "/admin"
 @attribute [Authorize]
 @inject AdminApplicationService Administration
+@inject AuthenticationStateProvider Authentication
+@inject PermissionService Permissions
 
-<PageTitle>MailServer 仪表盘</PageTitle>
-<h1>仪表盘</h1>
-@if (_dashboard is null)
+<PageTitle>MailServer 概览</PageTitle>
+<AdminPageHeader Title="概览" Description="查看邮件域、账号、队列和存储的当前状态。" />
+
+@if (_accessDenied)
 {
-    <p>正在加载…</p>
+    <AccessDeniedPanel />
+}
+else if (_dashboard is null)
+{
+    <p>正在加载...</p>
 }
 else
 {
@@ -15,15 +22,26 @@ else
         <section><strong>@_dashboard.Accounts</strong><span>账号</span></section>
         <section><strong>@_dashboard.Aliases</strong><span>别名</span></section>
         <section><strong>@_dashboard.PendingDeliveries</strong><span>待投递</span></section>
-        <section><strong>@_dashboard.FailedDeliveries</strong><span>失败</span></section>
+        <section><strong>@_dashboard.FailedDeliveries</strong><span>失败任务</span></section>
         <section><strong>@FormatBytes(_dashboard.StoredBytes)</strong><span>邮件存储</span></section>
     </div>
 }
 
 @code {
     private AdminDashboard? _dashboard;
-    protected override async Task OnInitializedAsync() =>
+    private bool _accessDenied;
+
+    protected override async Task OnInitializedAsync()
+    {
+        var user = (await Authentication.GetAuthenticationStateAsync()).User;
+        if (!await Permissions.HasPermissionAsync(user, PermissionCodes.DashboardView, null, CancellationToken.None))
+        {
+            _accessDenied = true;
+            return;
+        }
+
         _dashboard = await Administration.GetDashboardAsync(CancellationToken.None);
+    }
 
     private static string FormatBytes(long value) =>
         value >= 1_073_741_824 ? $"{value / 1_073_741_824d:F1} GiB" :

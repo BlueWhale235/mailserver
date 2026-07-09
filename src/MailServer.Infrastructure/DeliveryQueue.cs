@@ -1,15 +1,16 @@
 using MailServer.Domain;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
 namespace MailServer.Infrastructure;
 
 public sealed class DeliveryQueue(
     IDbContextFactory<MailDbContext> dbFactory,
-    IOptions<DeliveryOptions> options,
-    IOptions<DatabaseOptions> databaseOptions) : IDeliveryQueue
+    SystemSettingsService settings,
+    IOptions<DatabaseOptions> databaseOptions,
+    ILogger<DeliveryQueue> logger) : IDeliveryQueue
 {
-    private readonly DeliveryOptions _options = options.Value;
     private readonly DatabaseProvider _provider = databaseOptions.Value.Provider;
 
     public async Task<IReadOnlyList<DeliveryJob>> LeaseAsync(
@@ -76,6 +77,15 @@ public sealed class DeliveryQueue(
 
         await db.SaveChangesAsync(cancellationToken);
         await transaction.CommitAsync(cancellationToken);
+        if (jobs.Count > 0)
+        {
+            logger.LogInformation(
+                "Delivery queue leased {Count} job(s) for owner={Owner}, leaseUntil={LeaseUntil}.",
+                jobs.Count,
+                owner,
+                now.Add(duration));
+        }
+
         return jobs;
     }
 
@@ -97,11 +107,12 @@ public sealed class DeliveryQueue(
         job.LeaseUntil = null;
         job.LastError = result.Succeeded ? null : result.Response;
         job.UpdatedAt = DateTimeOffset.UtcNow;
+        var options = await settings.GetDeliveryOptionsAsync(cancellationToken);
         if (result.Succeeded)
         {
             job.Status = DeliveryStatus.Delivered;
         }
-        else if (result.PermanentFailure || job.Attempts >= _options.MaximumAttempts)
+        else if (result.PermanentFailure || job.Attempts >= options.MaximumAttempts)
         {
             job.Status = DeliveryStatus.Failed;
         }
@@ -113,6 +124,16 @@ public sealed class DeliveryQueue(
         }
 
         await db.SaveChangesAsync(cancellationToken);
+        logger.LogInformation(
+            "Delivery job {JobId} completed: status={Status}, succeeded={Succeeded}, permanentFailure={PermanentFailure}, attempts={Attempts}, nextAttemptAt={NextAttemptAt}, remoteHost={RemoteHost}, response={Response}.",
+            job.Id,
+            job.Status,
+            result.Succeeded,
+            result.PermanentFailure,
+            job.Attempts,
+            job.NextAttemptAt,
+            result.RemoteHost ?? string.Empty,
+            result.Response);
     }
 
     public async Task RetryNowAsync(Guid jobId, CancellationToken cancellationToken)
@@ -125,5 +146,16 @@ public sealed class DeliveryQueue(
         job.LeaseUntil = null;
         job.UpdatedAt = DateTimeOffset.UtcNow;
         await db.SaveChangesAsync(cancellationToken);
+        logger.LogInformation("Delivery job {JobId} was reset for immediate retry.", job.Id);
+    }
+
+    public async Task DeleteAsync(Guid jobId, CancellationToken cancellationToken)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+        var job = await db.DeliveryJobs.SingleOrDefaultAsync(x => x.Id == jobId, cancellationToken)
+            ?? throw new KeyNotFoundException("Delivery job not found.");
+        db.DeliveryJobs.Remove(job);
+        await db.SaveChangesAsync(cancellationToken);
+        logger.LogInformation("Delivery job {JobId} was deleted.", jobId);
     }
 }

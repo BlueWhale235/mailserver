@@ -9,15 +9,28 @@
     "RootPath": "data/messages",
     "MaximumMessageBytes": 52428800
   },
+  "SecurityAssets": {
+    "RootPath": "security-assets"
+  },
+  "MailboxDefaults": {
+    "Folders": [ "INBOX", "Sent", "Drafts", "Trash", "Junk", "Archives" ]
+  },
+  "MailRules": {
+    "SentCopyGraceSeconds": 60,
+    "SentCopyDeduplicationMinutes": 15
+  },
+  "Forwarding": {
+    "SrsSecret": "replace-with-an-independent-32-byte-secret",
+    "MaxHops": 5,
+    "MaxAgeDays": 21,
+    "MaxTargetsPerRule": 20
+  },
   "Plugins": {
     "Path": "plugins"
   },
   "Certificates": {
-    "Mail": {
-      "CertificatePath": "",
-      "PrivateKeyPath": "",
-      "PrivateKeyPassword": ""
-    },
+    "DefaultMailHostName": "mail.localhost",
+    "AllowSingleCertificateFallback": true,
     "Admin": {
       "CertificatePath": "",
       "PrivateKeyPath": "",
@@ -49,24 +62,39 @@
     "MaximumRecipients": 100,
     "MaximumMessageBytes": 52428800,
     "Endpoints": [
-      { "Address": "0.0.0.0", "Port": 25, "ImplicitTls": false, "RequireAuthentication": false },
-      { "Address": "0.0.0.0", "Port": 465, "ImplicitTls": true, "RequireAuthentication": true },
-      { "Address": "0.0.0.0", "Port": 587, "ImplicitTls": false, "RequireAuthentication": true }
+      { "Address": "0.0.0.0", "Port": 25, "Security": "StartTls", "RequireAuthentication": false },
+      { "Address": "0.0.0.0", "Port": 465, "Security": "ImplicitTls", "RequireAuthentication": true, "AuthenticationMechanisms": [ "PLAIN", "LOGIN", "XOAUTH2", "OAUTHBEARER" ] },
+      { "Address": "0.0.0.0", "Port": 587, "Security": "StartTls", "RequireAuthentication": true, "AuthenticationMechanisms": [ "PLAIN", "LOGIN", "XOAUTH2", "OAUTHBEARER" ] }
     ]
+  },
+  "SmtpAbuse": {
+    "AuthenticationWindowMinutes": 15,
+    "MaximumAuthenticationFailures": 5,
+    "AuthenticationBlockMinutes": 30
+  },
+  "TransportSecurity": {
+    "TrustedDnssecResolvers": "127.0.0.1,::1",
+    "PolicyFetchTimeoutSeconds": 60,
+    "PolicyRefreshHours": 24,
+    "ReportOrganizationName": "Example Mail",
+    "ReportContactInfo": "postmaster@example.com"
   },
   "Imap": {
     "HostName": "mail.localhost",
     "CommandTimeoutSeconds": 1800,
     "MaximumConnections": 200,
     "MaximumAppendBytes": 52428800,
+    "IdlePollSeconds": 15,
+    "AuthenticationMechanisms": [ "LOGIN", "PLAIN", "XOAUTH2", "OAUTHBEARER" ],
     "Endpoints": [
-      { "Address": "0.0.0.0", "Port": 143, "ImplicitTls": false },
-      { "Address": "0.0.0.0", "Port": 993, "ImplicitTls": true }
+      { "Address": "0.0.0.0", "Port": 143, "Security": "StartTls" },
+      { "Address": "0.0.0.0", "Port": 993, "Security": "ImplicitTls" }
     ]
   },
   "Relay": {
     "Host": "localhost",
     "Port": 25,
+    "Security": "StartTls",
     "UseStartTls": true,
     "UserName": "",
     "Password": ""
@@ -79,5 +107,18 @@
   },
   "Worker": {
     "HostName": "mail.localhost"
+  },
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft.AspNetCore": "Warning",
+      "Microsoft.EntityFrameworkCore": "Warning",
+      "Microsoft.EntityFrameworkCore.Database.Command": "Warning"
+    }
+  },
+  "MailServerLogging": {
+    "Console": { "Enabled": true, "Color": true },
+    "File": { "Enabled": true, "Directory": "logs" },
+    "TimestampFormat": "yyyy/MM/dd HH:mm:ss"
   }
 }

@@ -9,6 +9,7 @@ using MailServer.Domain;
 using MailServer.Infrastructure;
 using MailServer.PluginSdk;
 using Microsoft.Extensions.Options;
+using MimeKit;
 
 namespace MailServer.Imap;
 
@@ -19,41 +20,50 @@ public sealed class ImapServerOptions
     public int CommandTimeoutSeconds { get; set; } = 1800;
     public int MaximumConnections { get; set; } = 200;
     public long MaximumAppendBytes { get; set; } = 52_428_800;
+    public int IdlePollSeconds { get; set; } = 15;
+    public string[] AuthenticationMechanisms { get; set; } = ["LOGIN", "PLAIN", "XOAUTH2", "OAUTHBEARER"];
     public List<ImapEndpointOptions> Endpoints { get; set; } = [];
 }
 
 public sealed class ImapEndpointOptions
 {
+    private ConnectionSecurity? _security;
+    private bool? _legacyImplicitTls;
     public string Address { get; set; } = "0.0.0.0";
     public int Port { get; set; }
-    public bool ImplicitTls { get; set; }
+    public ConnectionSecurity Security
+    {
+        get => _security
+               ?? (_legacyImplicitTls == true
+                   ? ConnectionSecurity.ImplicitTls
+                   : ConnectionSecurity.StartTls);
+        set => _security = value;
+    }
+    public bool ImplicitTls
+    {
+        get => Security == ConnectionSecurity.ImplicitTls;
+        set => _legacyImplicitTls = value;
+    }
 }
 
 public sealed partial class ImapServerService(
     IServiceScopeFactory scopeFactory,
     IOptions<ImapServerOptions> options,
-    IOptions<CertificatesOptions> certificates,
-    ILogger<ImapServerService> logger) : BackgroundService
+    DomainCertificateProvider certificateProvider,
+    ILogger<ImapServerService> logger,
+    IpFirewallService? firewall = null) : BackgroundService
 {
+    internal const string BaseCapabilities = "IMAP4rev1 UIDPLUS MOVE IDLE NAMESPACE ENABLE UTF8=ACCEPT SPECIAL-USE";
     private readonly ImapServerOptions _options = options.Value;
     private readonly List<TcpListener> _listeners = [];
     private readonly List<Task> _acceptLoops = [];
-    private readonly CertificatesOptions _certificates = certificates.Value;
-    private LoadedPemCertificate? _certificate;
     private SemaphoreSlim _connectionLimit = null!;
 
     protected override Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        _certificate = LoadCertificate();
         _connectionLimit = new SemaphoreSlim(_options.MaximumConnections);
         foreach (var endpoint in _options.Endpoints)
         {
-            if (endpoint.ImplicitTls && _certificate is null)
-            {
-                logger.LogWarning("IMAP endpoint {Port} is disabled because no TLS certificate is configured.", endpoint.Port);
-                continue;
-            }
-
             if (!IPAddress.TryParse(endpoint.Address, out var bindAddress))
             {
                 throw new InvalidOperationException($"Invalid IMAP bind address: {endpoint.Address}");
@@ -63,7 +73,7 @@ public sealed partial class ImapServerService(
             listener.Start();
             _listeners.Add(listener);
             _acceptLoops.Add(AcceptLoopAsync(listener, endpoint, stoppingToken));
-            logger.LogInformation("IMAP listening on {Port}; implicit TLS={ImplicitTls}", endpoint.Port, endpoint.ImplicitTls);
+            logger.LogInformation("IMAP listening on {Port}; security={Security}", endpoint.Port, endpoint.Security);
         }
 
         return Task.WhenAll(_acceptLoops);
@@ -73,7 +83,6 @@ public sealed partial class ImapServerService(
     {
         foreach (var listener in _listeners) listener.Stop();
         await base.StopAsync(cancellationToken);
-        _certificate?.Dispose();
     }
 
     private async Task AcceptLoopAsync(
@@ -97,6 +106,17 @@ public sealed partial class ImapServerService(
                 break;
             }
 
+            if (firewall is not null
+                && client.Client.RemoteEndPoint is IPEndPoint remoteEndPoint
+                && await firewall.IsBlockedAsync(remoteEndPoint.Address, cancellationToken))
+            {
+                logger.LogWarning(
+                    "IMAP connection from {RemoteAddress} was closed by firewall before greeting.",
+                    remoteEndPoint.Address);
+                client.Dispose();
+                continue;
+            }
+
             await _connectionLimit.WaitAsync(cancellationToken);
             _ = HandleClientAsync(client, endpoint, cancellationToken).ContinueWith(
                 _ => _connectionLimit.Release(),
@@ -118,7 +138,7 @@ public sealed partial class ImapServerService(
             {
                 Stream stream = client.GetStream();
                 var isTls = false;
-                if (endpoint.ImplicitTls)
+                if (endpoint.Security == ConnectionSecurity.ImplicitTls)
                 {
                     stream = await UpgradeTlsAsync(stream, cancellationToken);
                     isTls = true;
@@ -128,8 +148,29 @@ public sealed partial class ImapServerService(
                     stream,
                     TimeSpan.FromSeconds(_options.CommandTimeoutSeconds),
                     _options.MaximumAppendBytes);
+                using (var scope = scopeFactory.CreateScope())
+                {
+                    var pipeline = scope.ServiceProvider.GetService<PluginPipeline>();
+                    if (pipeline is not null)
+                    {
+                        var decision = await pipeline.OnConnectionAsync(
+                            new ConnectionContext(MailProtocol.Imap, remote, isTls),
+                            cancellationToken);
+                        if (decision.Kind != PluginDecisionKind.Continue)
+                        {
+                            await connection.WriteLineAsync(
+                                $"* BYE {decision.Message ?? "Connection rejected by policy"}",
+                                cancellationToken);
+                            return;
+                        }
+                        if (isTls)
+                            await pipeline.OnTlsEstablishedAsync(
+                                new TlsEstablishedContext(MailProtocol.Imap, remote),
+                                cancellationToken);
+                    }
+                }
                 await connection.WriteLineAsync(
-                    "* OK [CAPABILITY IMAP4rev2 IMAP4rev1 UIDPLUS MOVE IDLE NAMESPACE ENABLE UTF8=ACCEPT] MailServer ready",
+                    $"* OK [CAPABILITY {BaseCapabilities}] MailServer ready",
                     cancellationToken);
                 var state = new ImapSessionState();
 
@@ -144,29 +185,15 @@ public sealed partial class ImapServerService(
                         continue;
                     }
 
-                    var tag = line[..firstSpace];
-                    var remainder = line[(firstSpace + 1)..].TrimStart();
-                    var secondSpace = remainder.IndexOf(' ');
-                    var command = (secondSpace < 0 ? remainder : remainder[..secondSpace]).ToUpperInvariant();
-                    var arguments = secondSpace < 0 ? string.Empty : remainder[(secondSpace + 1)..].Trim();
-                    var useUid = false;
-                    if (command == "UID")
+                    var parsed = ParseCommandLine(line);
+                    if (parsed is null)
                     {
-                        var uidSpace = arguments.IndexOf(' ');
-                        if (uidSpace < 0)
-                        {
-                            await connection.WriteLineAsync($"{tag} BAD UID requires a command", cancellationToken);
-                            continue;
-                        }
-
-                        command = arguments[..uidSpace].ToUpperInvariant();
-                        arguments = arguments[(uidSpace + 1)..].Trim();
-                        useUid = true;
+                        await connection.WriteLineAsync("* BAD Invalid command tag", cancellationToken);
+                        continue;
                     }
 
-                    try
-                    {
-                        var keepRunning = await DispatchAsync(
+                    var (tag, command, arguments, useUid) = parsed.Value;
+                    var keepRunning = await ExecuteCommandAsync(
                             connection,
                             state,
                             tag,
@@ -174,28 +201,22 @@ public sealed partial class ImapServerService(
                             arguments,
                             useUid,
                             remote,
+                            endpoint.Security,
                             isTls,
                             cancellationToken);
-                        if (!keepRunning) return;
-                        if (command == "STARTTLS" && state.TlsUpgradeRequested)
-                        {
-                            stream = await UpgradeTlsAsync(connection.Detach(), cancellationToken);
-                            connection.Attach(stream);
-                            isTls = true;
-                            state = new ImapSessionState();
-                        }
-                    }
-                    catch (KeyNotFoundException exception)
+                    if (!keepRunning) return;
+                    if (command == "STARTTLS" && state.TlsUpgradeRequested)
                     {
-                        await connection.WriteLineAsync($"{tag} NO {Quote(exception.Message)}", cancellationToken);
-                    }
-                    catch (FormatException exception)
-                    {
-                        await connection.WriteLineAsync($"{tag} BAD {Quote(exception.Message)}", cancellationToken);
-                    }
-                    catch (InvalidOperationException exception)
-                    {
-                        await connection.WriteLineAsync($"{tag} NO {Quote(exception.Message)}", cancellationToken);
+                        stream = await UpgradeTlsAsync(connection.Detach(), cancellationToken);
+                        connection.Attach(stream);
+                        isTls = true;
+                        state = new ImapSessionState();
+                        using var scope = scopeFactory.CreateScope();
+                        var pipeline = scope.ServiceProvider.GetService<PluginPipeline>();
+                        if (pipeline is not null)
+                            await pipeline.OnTlsEstablishedAsync(
+                                new TlsEstablishedContext(MailProtocol.Imap, remote),
+                                cancellationToken);
                     }
                 }
             }
@@ -203,11 +224,156 @@ public sealed partial class ImapServerService(
             {
                 logger.LogInformation("IMAP client {Remote} timed out.", remote);
             }
+            catch (AuthenticationException exception)
+            {
+                logger.LogDebug(
+                    "IMAP TLS handshake with {Remote} was rejected: {Message}",
+                    remote,
+                    exception.Message);
+            }
             catch (Exception exception) when (exception is not OperationCanceledException)
             {
                 logger.LogError(exception, "IMAP session {Remote} failed.", remote);
             }
         }
+    }
+
+    internal async Task<bool> ExecuteLineAsync(
+        ImapConnection connection,
+        ImapSessionState state,
+        string line,
+        string remote,
+        ConnectionSecurity endpointSecurity,
+        bool isTls,
+        CancellationToken cancellationToken)
+    {
+        var parsed = ParseCommandLine(line);
+        if (parsed is null)
+        {
+            await connection.WriteLineAsync("* BAD Invalid command tag", cancellationToken);
+            return true;
+        }
+
+        var (tag, command, arguments, useUid) = parsed.Value;
+        return await ExecuteCommandAsync(
+            connection,
+            state,
+            tag,
+            command,
+            arguments,
+            useUid,
+            remote,
+            endpointSecurity,
+            isTls,
+            cancellationToken);
+    }
+
+    internal async Task<bool> ExecuteCommandAsync(
+        ImapConnection connection,
+        ImapSessionState state,
+        string tag,
+        string command,
+        string arguments,
+        bool useUid,
+        string remote,
+        ConnectionSecurity endpointSecurity,
+        bool isTls,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await DispatchAsync(
+                connection,
+                state,
+                tag,
+                command,
+                arguments,
+                useUid,
+                remote,
+                endpointSecurity,
+                isTls,
+                cancellationToken);
+        }
+        catch (KeyNotFoundException exception)
+        {
+            await connection.WriteLineAsync($"{tag} NO {Quote(exception.Message)}", cancellationToken);
+        }
+        catch (FormatException exception)
+        {
+            logger.LogInformation(
+                "IMAP command {Command} from {Remote} was rejected as malformed: {Message}; argumentLength={ArgumentLength}, hasLiteralMarker={HasLiteralMarker}, hasUtf8Wrapper={HasUtf8Wrapper}.",
+                command,
+                remote,
+                exception.Message,
+                arguments.Length,
+                command == "APPEND" && LiteralRegex().IsMatch(arguments),
+                command == "APPEND" && arguments.Contains("UTF8", StringComparison.OrdinalIgnoreCase));
+            await connection.WriteLineAsync($"{tag} BAD {Quote(exception.Message)}", cancellationToken);
+        }
+        catch (InvalidDataException exception)
+        {
+            await connection.WriteLineAsync($"{tag} BAD {Quote(exception.Message)}", cancellationToken);
+        }
+        catch (InvalidOperationException exception)
+        {
+            await connection.WriteLineAsync($"{tag} NO {Quote(exception.Message)}", cancellationToken);
+        }
+
+        return true;
+    }
+
+    private static (string Tag, string Command, string Arguments, bool UseUid)? ParseCommandLine(string line)
+    {
+        var firstSpace = line.IndexOf(' ');
+        if (firstSpace <= 0)
+        {
+            return null;
+        }
+
+        var tag = line[..firstSpace];
+        if (!IsValidTag(tag))
+        {
+            return null;
+        }
+
+        var remainder = line[(firstSpace + 1)..].TrimStart();
+        var secondSpace = remainder.IndexOf(' ');
+        var command = (secondSpace < 0 ? remainder : remainder[..secondSpace]).ToUpperInvariant();
+        var arguments = secondSpace < 0 ? string.Empty : remainder[(secondSpace + 1)..].Trim();
+        var useUid = false;
+        if (command == "UID")
+        {
+            var uidSpace = arguments.IndexOf(' ');
+            if (uidSpace < 0)
+            {
+                return (tag, command, arguments, useUid);
+            }
+
+            command = arguments[..uidSpace].ToUpperInvariant();
+            arguments = arguments[(uidSpace + 1)..].Trim();
+            useUid = true;
+        }
+
+        return (tag, command, arguments, useUid);
+    }
+
+    private static bool IsValidTag(string tag)
+    {
+        if (tag.Length == 0)
+        {
+            return false;
+        }
+
+        foreach (var character in tag)
+        {
+            if (character is <= ' ' or >= '\u007f'
+                || character is '(' or ')' or '{' or '%' or '*' or '"' or '\\' or ']')
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private async Task<bool> DispatchAsync(
@@ -218,18 +384,45 @@ public sealed partial class ImapServerService(
         string arguments,
         bool useUid,
         string remote,
+        ConnectionSecurity endpointSecurity,
         bool isTls,
         CancellationToken cancellationToken)
     {
+        using (var scope = scopeFactory.CreateScope())
+        {
+            var pipeline = scope.ServiceProvider.GetService<PluginPipeline>();
+            if (pipeline is not null)
+            {
+                var decision = await pipeline.OnImapCommandAsync(
+                    new ImapCommandContext(
+                        command,
+                        arguments,
+                        state.AccountId,
+                        state.UserName,
+                        state.MailboxName,
+                        state.ReadOnly,
+                        remote),
+                    cancellationToken);
+                if (decision.Kind != PluginDecisionKind.Continue)
+                    throw new InvalidOperationException(decision.Message ?? "Command rejected by policy.");
+            }
+        }
+
         switch (command)
         {
             case "CAPABILITY":
+                var authCapabilities = await GetAuthenticationCapabilitiesAsync(isTls, cancellationToken);
                 await connection.WriteLineAsync(
-                    $"* CAPABILITY IMAP4rev2 IMAP4rev1 UIDPLUS MOVE IDLE NAMESPACE ENABLE UTF8=ACCEPT{(!isTls && _certificate is not null ? " STARTTLS" : string.Empty)}{(isTls ? " AUTH=PLAIN" : " LOGINDISABLED")}",
+                    $"* CAPABILITY {BaseCapabilities}{(!isTls && endpointSecurity == ConnectionSecurity.StartTls && (certificateProvider is null || await certificateProvider.HasAnyCertificateAsync(cancellationToken)) ? " STARTTLS" : string.Empty)}{(isTls ? authCapabilities : " LOGINDISABLED")}",
                     cancellationToken);
                 await OkAsync(connection, tag, "CAPABILITY completed", cancellationToken);
                 return true;
             case "NOOP":
+                if (state.MailboxId is not null)
+                {
+                    await RefreshSelectedMailboxAsync(connection, state, remote, cancellationToken);
+                }
+
                 await OkAsync(connection, tag, "NOOP completed", cancellationToken);
                 return true;
             case "LOGOUT":
@@ -239,13 +432,18 @@ public sealed partial class ImapServerService(
             case "STARTTLS":
                 RequireNotAuthenticated(state);
                 if (isTls) throw new InvalidOperationException("TLS is already active.");
-                if (_certificate is null) throw new InvalidOperationException("TLS is unavailable.");
+                if (endpointSecurity != ConnectionSecurity.StartTls) throw new InvalidOperationException("TLS is unavailable.");
+                if (certificateProvider is not null
+                    && !await certificateProvider.HasAnyCertificateAsync(cancellationToken))
+                    throw new InvalidOperationException("TLS is unavailable.");
                 await OkAsync(connection, tag, "Begin TLS negotiation now", cancellationToken);
                 state.TlsUpgradeRequested = true;
                 return true;
             case "LOGIN":
                 RequireNotAuthenticated(state);
                 if (!isTls) throw new InvalidOperationException("TLS is required before authentication.");
+                if (!_options.AuthenticationMechanisms.Contains("LOGIN", StringComparer.OrdinalIgnoreCase))
+                    throw new InvalidOperationException("LOGIN authentication is disabled.");
                 var loginTokens = ImapTokenizer.Tokenize(arguments);
                 if (loginTokens.Count != 2) throw new FormatException("LOGIN requires user name and password.");
                 await AuthenticateAsync(state, loginTokens[0], loginTokens[1], remote, isTls, cancellationToken);
@@ -254,13 +452,31 @@ public sealed partial class ImapServerService(
             case "AUTHENTICATE":
                 RequireNotAuthenticated(state);
                 if (!isTls) throw new InvalidOperationException("TLS is required before authentication.");
-                if (!arguments.Equals("PLAIN", StringComparison.OrdinalIgnoreCase))
-                    throw new InvalidOperationException("Only AUTHENTICATE PLAIN is supported.");
+                var mechanism = arguments.ToUpperInvariant();
+                if (!_options.AuthenticationMechanisms.Contains(mechanism, StringComparer.OrdinalIgnoreCase))
+                    throw new InvalidOperationException("Authentication mechanism is disabled.");
                 await connection.WriteLineAsync("+", cancellationToken);
                 var encoded = await connection.ReadLineAsync(cancellationToken) ?? throw new EndOfStreamException();
-                var fields = Encoding.UTF8.GetString(Convert.FromBase64String(encoded)).Split('\0');
-                if (fields.Length != 3) throw new FormatException("Invalid AUTHENTICATE PLAIN payload.");
-                await AuthenticateAsync(state, fields[1], fields[2], remote, isTls, cancellationToken);
+                if (mechanism == "PLAIN")
+                {
+                    var fields = Encoding.UTF8.GetString(Convert.FromBase64String(encoded)).Split('\0');
+                    if (fields.Length != 3) throw new FormatException("Invalid AUTHENTICATE PLAIN payload.");
+                    await AuthenticateAsync(state, fields[1], fields[2], remote, isTls, cancellationToken);
+                }
+                else if (mechanism is "XOAUTH2" or "OAUTHBEARER")
+                {
+                    await AuthenticateBearerAsync(
+                        state,
+                        mechanism,
+                        Encoding.UTF8.GetString(Convert.FromBase64String(encoded)),
+                        remote,
+                        isTls,
+                        cancellationToken);
+                }
+                else
+                {
+                    throw new InvalidOperationException("Authentication mechanism is not available.");
+                }
                 await OkAsync(connection, tag, "AUTHENTICATE completed", cancellationToken);
                 return true;
             case "NAMESPACE":
@@ -304,7 +520,7 @@ public sealed partial class ImapServerService(
             case "SELECT":
             case "EXAMINE":
                 RequireAuthenticated(state);
-                await SelectAsync(connection, state, ImapTokenizer.Unquote(arguments), command == "EXAMINE", cancellationToken);
+                await SelectAsync(connection, state, ImapTokenizer.Unquote(arguments), command == "EXAMINE", remote, cancellationToken);
                 await OkAsync(connection, tag, $"[{(command == "EXAMINE" ? "READ-ONLY" : "READ-WRITE")}] {command} completed", cancellationToken);
                 return true;
             case "STATUS":
@@ -314,17 +530,18 @@ public sealed partial class ImapServerService(
                 return true;
             case "APPEND":
                 RequireAuthenticated(state);
-                await AppendAsync(connection, state, tag, arguments, cancellationToken);
+                await AppendAsync(connection, state, tag, arguments, remote, cancellationToken);
                 return true;
             case "CHECK":
                 RequireSelected(state);
+                await RefreshSelectedMailboxAsync(connection, state, remote, cancellationToken);
                 await OkAsync(connection, tag, "CHECK completed", cancellationToken);
                 return true;
             case "CLOSE":
                 RequireSelected(state);
                 if (!state.ReadOnly)
                 {
-                    await WithMailboxServiceAsync(service => service.ExpungeAsync(state.MailboxId!.Value, cancellationToken));
+                    _ = await WithMailboxServiceAsync(service => service.ExpungeAsync(state.MailboxId!.Value, cancellationToken));
                 }
                 state.Deselect();
                 await OkAsync(connection, tag, "CLOSE completed", cancellationToken);
@@ -337,7 +554,7 @@ public sealed partial class ImapServerService(
             case "EXPUNGE":
                 RequireSelected(state);
                 RequireWritable(state);
-                await WithMailboxServiceAsync(service => service.ExpungeAsync(state.MailboxId!.Value, cancellationToken));
+                await ExpungeAsync(connection, state, cancellationToken);
                 await OkAsync(connection, tag, "EXPUNGE completed", cancellationToken);
                 return true;
             case "SEARCH":
@@ -347,7 +564,7 @@ public sealed partial class ImapServerService(
                 return true;
             case "FETCH":
                 RequireSelected(state);
-                await FetchAsync(connection, state, arguments, useUid, cancellationToken);
+                await FetchAsync(connection, state, arguments, remote, useUid, cancellationToken);
                 await OkAsync(connection, tag, "FETCH completed", cancellationToken);
                 return true;
             case "STORE":
@@ -360,16 +577,14 @@ public sealed partial class ImapServerService(
             case "MOVE":
                 RequireSelected(state);
                 if (command == "MOVE") RequireWritable(state);
-                await CopyMoveAsync(state, arguments, useUid, command == "MOVE", cancellationToken);
-                await OkAsync(connection, tag, $"{command} completed", cancellationToken);
+                var copyMoveResult = await CopyMoveAsync(connection, state, arguments, useUid, command == "MOVE", cancellationToken);
+                await connection.WriteLineAsync(
+                    $"{tag} OK [COPYUID {copyMoveResult.TargetUidValidity} {FormatSequenceSet(copyMoveResult.SourceUids)} {FormatSequenceSet(copyMoveResult.TargetUids)}] {command} completed",
+                    cancellationToken);
                 return true;
             case "IDLE":
                 RequireAuthenticated(state);
-                await connection.WriteLineAsync("+ idling", cancellationToken);
-                var done = await connection.ReadLineAsync(cancellationToken);
-                if (!string.Equals(done, "DONE", StringComparison.OrdinalIgnoreCase))
-                    throw new FormatException("Expected DONE.");
-                await OkAsync(connection, tag, "IDLE terminated", cancellationToken);
+                await IdleAsync(connection, state, tag, remote, cancellationToken);
                 return true;
             default:
                 await connection.WriteLineAsync($"{tag} BAD Unsupported command", cancellationToken);
@@ -388,8 +603,61 @@ public sealed partial class ImapServerService(
         using var scope = scopeFactory.CreateScope();
         var authenticator = scope.ServiceProvider.GetRequiredService<IAccountAuthenticator>();
         var accountId = await authenticator.AuthenticateMailboxAsync(address, password, cancellationToken);
-        if (accountId is null) throw new InvalidOperationException("Authentication failed.");
-        var pipeline = scope.ServiceProvider.GetService<PluginPipeline>();
+        if (accountId is null)
+        {
+            logger.LogInformation(
+                "IMAP authentication failed for {UserName} from {Remote}.",
+                address,
+                remote);
+            throw new InvalidOperationException("Authentication failed.");
+        }
+
+        await CompleteAuthenticationAsync(scope.ServiceProvider, state, accountId.Value, address, remote, isTls, cancellationToken);
+    }
+
+    private async Task AuthenticateBearerAsync(
+        ImapSessionState state,
+        string mechanism,
+        string payload,
+        string remote,
+        bool isTls,
+        CancellationToken cancellationToken)
+    {
+        var (userName, token) = ParseBearerPayload(payload);
+        using var scope = scopeFactory.CreateScope();
+        var pipeline = scope.ServiceProvider.GetService<PluginPipeline>()
+                       ?? throw new InvalidOperationException("Authentication mechanism is not available.");
+        var result = await pipeline.AuthenticateAsync(
+            new AuthenticationContext(MailProtocol.Imap, mechanism, userName, token, remote, isTls),
+            cancellationToken);
+        if (result.Status != AuthenticationStatus.Success || string.IsNullOrWhiteSpace(result.Identity))
+            throw new InvalidOperationException(
+                result.Status == AuthenticationStatus.NotHandled
+                    ? "Authentication mechanism is not available."
+                    : result.Message ?? "Authentication failed.");
+        var authenticator = scope.ServiceProvider.GetRequiredService<IAccountAuthenticator>();
+        var accountId = await authenticator.ResolveMailboxIdentityAsync(result.Identity, cancellationToken);
+        if (accountId is null) throw new InvalidOperationException("Authentication identity is not an active mailbox.");
+        await CompleteAuthenticationAsync(
+            scope.ServiceProvider,
+            state,
+            accountId.Value,
+            result.Identity,
+            remote,
+            isTls,
+            cancellationToken);
+    }
+
+    private async Task CompleteAuthenticationAsync(
+        IServiceProvider serviceProvider,
+        ImapSessionState state,
+        Guid accountId,
+        string address,
+        string remote,
+        bool isTls,
+        CancellationToken cancellationToken)
+    {
+        var pipeline = serviceProvider.GetService<PluginPipeline>();
         if (pipeline is not null)
         {
             var decision = await pipeline.OnImapSessionAsync(
@@ -399,11 +667,54 @@ public sealed partial class ImapServerService(
                 throw new InvalidOperationException(decision.Message ?? "Rejected by policy.");
         }
 
+        var mailboxes = serviceProvider.GetRequiredService<IMailboxService>();
+        await mailboxes.EnsureDefaultFoldersAsync(accountId, cancellationToken);
         state.AccountId = accountId;
         state.UserName = address.ToLowerInvariant();
+        logger.LogInformation(
+            "IMAP authentication succeeded for {UserName} from {Remote}.",
+            state.UserName,
+            remote);
     }
 
-    private async Task ListAsync(
+    private async Task<string> GetAuthenticationCapabilitiesAsync(bool isTls, CancellationToken cancellationToken)
+    {
+        if (!isTls) return string.Empty;
+        var mechanisms = new List<string>();
+        if (_options.AuthenticationMechanisms.Contains("PLAIN", StringComparer.OrdinalIgnoreCase))
+            mechanisms.Add("PLAIN");
+        using var scope = scopeFactory.CreateScope();
+        var pipeline = scope.ServiceProvider.GetService<PluginPipeline>();
+        if (pipeline is not null)
+        {
+            foreach (var mechanism in await pipeline.GetAuthenticationMechanismsAsync(MailProtocol.Imap, cancellationToken))
+            {
+                if (_options.AuthenticationMechanisms.Contains(mechanism, StringComparer.OrdinalIgnoreCase)
+                    && !mechanisms.Contains(mechanism, StringComparer.OrdinalIgnoreCase))
+                    mechanisms.Add(mechanism);
+            }
+        }
+        return mechanisms.Count == 0 ? string.Empty : " " + string.Join(' ', mechanisms.Select(x => $"AUTH={x}"));
+    }
+
+    internal static (string? UserName, string Token) ParseBearerPayload(string payload)
+    {
+        string? userName = null;
+        string? token = null;
+        foreach (var field in payload.Split('\u0001', StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (field.StartsWith("user=", StringComparison.OrdinalIgnoreCase))
+                userName = field[5..];
+            else if (field.StartsWith("n,a=", StringComparison.OrdinalIgnoreCase))
+                userName = field[4..].TrimEnd(',');
+            else if (field.StartsWith("auth=Bearer ", StringComparison.OrdinalIgnoreCase))
+                token = field[12..];
+        }
+        if (string.IsNullOrWhiteSpace(token)) throw new FormatException("Invalid bearer authentication payload.");
+        return (userName, token);
+    }
+
+    internal async Task ListAsync(
         ImapConnection connection,
         ImapSessionState state,
         bool subscribedOnly,
@@ -412,17 +723,19 @@ public sealed partial class ImapServerService(
         var mailboxes = await WithMailboxServiceAsync(service => service.ListAsync(state.AccountId!.Value, cancellationToken));
         foreach (var mailbox in mailboxes)
         {
+            var attributes = SpecialUseAttributes(mailbox.Name);
             await connection.WriteLineAsync(
-                $"* {(subscribedOnly ? "LSUB" : "LIST")} (\\HasNoChildren) \"/\" {Quote(mailbox.Name)}",
+                $"* {(subscribedOnly ? "LSUB" : "LIST")} ({attributes}) \"/\" {Quote(mailbox.Name)}",
                 cancellationToken);
         }
     }
 
-    private async Task SelectAsync(
+    internal async Task SelectAsync(
         ImapConnection connection,
         ImapSessionState state,
         string mailboxName,
         bool readOnly,
+        string remote,
         CancellationToken cancellationToken)
     {
         var mailbox = await WithMailboxServiceAsync(service =>
@@ -431,6 +744,18 @@ public sealed partial class ImapServerService(
         state.MailboxId = mailbox.Id;
         state.MailboxName = mailbox.Name;
         state.ReadOnly = readOnly;
+        state.Exists = mailbox.Exists;
+        state.UidNext = mailbox.UidNext;
+        state.HighestModSeq = mailbox.HighestModSeq;
+        logger.LogInformation(
+            "IMAP SELECT from {Remote}: user={UserName}, mailbox={Mailbox}, readOnly={ReadOnly}, exists={Exists}, uidNext={UidNext}, highestModSeq={HighestModSeq}.",
+            remote,
+            state.UserName ?? string.Empty,
+            mailbox.Name,
+            readOnly,
+            mailbox.Exists,
+            mailbox.UidNext,
+            mailbox.HighestModSeq);
         await connection.WriteLineAsync("* FLAGS (\\Answered \\Flagged \\Deleted \\Seen \\Draft)", cancellationToken);
         await connection.WriteLineAsync("* OK [PERMANENTFLAGS (\\Answered \\Flagged \\Deleted \\Seen \\Draft \\*)] Flags permitted", cancellationToken);
         await connection.WriteLineAsync($"* {mailbox.Exists} EXISTS", cancellationToken);
@@ -456,36 +781,283 @@ public sealed partial class ImapServerService(
             cancellationToken);
     }
 
-    private async Task AppendAsync(
+    internal async Task RefreshSelectedMailboxAsync(
+        ImapConnection connection,
+        ImapSessionState state,
+        string remote,
+        CancellationToken cancellationToken)
+    {
+        if (state.AccountId is null || state.MailboxName is null)
+        {
+            return;
+        }
+
+        var mailbox = await WithMailboxServiceAsync(service =>
+            service.SelectAsync(state.AccountId.Value, state.MailboxName, cancellationToken));
+        if (mailbox is null)
+        {
+            return;
+        }
+
+        var changed = false;
+        if (mailbox.Exists != state.Exists)
+        {
+            await connection.WriteLineAsync($"* {mailbox.Exists} EXISTS", cancellationToken);
+            changed = true;
+        }
+
+        if (mailbox.UidNext != state.UidNext)
+        {
+            await connection.WriteLineAsync($"* OK [UIDNEXT {mailbox.UidNext}] Predicted next UID", cancellationToken);
+            changed = true;
+        }
+
+        if (mailbox.HighestModSeq != state.HighestModSeq)
+        {
+            await connection.WriteLineAsync($"* OK [HIGHESTMODSEQ {mailbox.HighestModSeq}] Highest mod-sequence", cancellationToken);
+            changed = true;
+        }
+
+        if (changed)
+        {
+            logger.LogInformation(
+                "IMAP mailbox refresh for {Remote}: user={UserName}, mailbox={Mailbox}, exists={Exists}, uidNext={UidNext}, highestModSeq={HighestModSeq}.",
+                remote,
+                state.UserName ?? string.Empty,
+                mailbox.Name,
+                mailbox.Exists,
+                mailbox.UidNext,
+                mailbox.HighestModSeq);
+        }
+
+        state.Exists = mailbox.Exists;
+        state.UidNext = mailbox.UidNext;
+        state.HighestModSeq = mailbox.HighestModSeq;
+    }
+
+    private async Task IdleAsync(
+        ImapConnection connection,
+        ImapSessionState state,
+        string tag,
+        string remote,
+        CancellationToken cancellationToken)
+    {
+        await connection.WriteLineAsync("+ idling", cancellationToken);
+        await RefreshSelectedMailboxAsync(connection, state, remote, cancellationToken);
+        var doneTask = connection.ReadLineAsync(cancellationToken);
+        var poll = TimeSpan.FromSeconds(Math.Max(1, _options.IdlePollSeconds));
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            var delayTask = Task.Delay(poll, cancellationToken);
+            var completed = await Task.WhenAny(doneTask, delayTask);
+            if (completed == doneTask)
+            {
+                var done = await doneTask;
+                if (!string.Equals(done, "DONE", StringComparison.OrdinalIgnoreCase))
+                    throw new FormatException("Expected DONE.");
+                await OkAsync(connection, tag, "IDLE terminated", cancellationToken);
+                return;
+            }
+
+            await RefreshSelectedMailboxAsync(connection, state, remote, cancellationToken);
+        }
+    }
+
+    internal async Task AppendAsync(
         ImapConnection connection,
         ImapSessionState state,
         string tag,
         string arguments,
+        string remote,
         CancellationToken cancellationToken)
     {
-        var match = LiteralRegex().Match(arguments);
-        if (!match.Success) throw new FormatException("APPEND requires a literal.");
-        var literalLength = long.Parse(match.Groups["length"].Value, CultureInfo.InvariantCulture);
-        var nonSynchronizing = match.Groups["plus"].Success;
-        var beforeLiteral = arguments[..match.Index].Trim();
-        var tokens = ImapTokenizer.Tokenize(beforeLiteral);
-        if (tokens.Count == 0) throw new FormatException("APPEND requires a mailbox.");
-        var mailboxName = tokens[0];
-        var flags = tokens.Count > 1 && tokens[1].StartsWith('(')
-            ? ParseFlags(tokens[1])
-            : [];
-        if (!nonSynchronizing)
+        var request = await ParseAppendArgumentsAsync(connection, arguments, cancellationToken);
+        logger.LogInformation(
+            "IMAP APPEND requested from {Remote}: user={UserName}, mailbox={Mailbox}, flags={FlagCount}, hasInternalDate={HasInternalDate}, literalLength={LiteralLength}, literalKind={LiteralKind}, mailboxLiteralKind={MailboxLiteralKind}, utf8Wrapped={Utf8Wrapped}.",
+            remote,
+            state.UserName ?? string.Empty,
+            request.MailboxName,
+            request.Flags.Count,
+            request.InternalDate.HasValue,
+            request.LiteralLength,
+            request.BinaryLiteral ? "binary" : "literal",
+            request.MailboxLiteralKind,
+            request.Utf8Wrapped);
+
+        var mailbox = await WithMailboxServiceAsync(service =>
+            service.SelectAsync(state.AccountId!.Value, request.MailboxName, cancellationToken));
+        if (mailbox is null)
+        {
+            if (request.NonSynchronizing)
+            {
+                await using var ignored = await connection.ReadLiteralAsync(request.LiteralLength, cancellationToken);
+                await ReadAppendCommandEndAsync(connection, request, cancellationToken);
+            }
+
+            logger.LogInformation(
+                "IMAP APPEND from {Remote} was rejected because mailbox {Mailbox} does not exist.",
+                remote,
+                request.MailboxName);
+            await connection.WriteLineAsync($"{tag} NO [TRYCREATE] Mailbox does not exist.", cancellationToken);
+            return;
+        }
+
+        if (!request.NonSynchronizing)
         {
             await connection.WriteLineAsync("+ Ready for literal data", cancellationToken);
         }
 
-        await using var literal = await connection.ReadLiteralAsync(literalLength, cancellationToken);
+        await using var literal = await connection.ReadLiteralAsync(request.LiteralLength, cancellationToken);
+        await ReadAppendCommandEndAsync(connection, request, cancellationToken);
         var item = await WithMailboxServiceAsync(service =>
-            service.AppendAsync(state.AccountId!.Value, mailboxName, literal, flags, null, cancellationToken));
-        await connection.ReadOptionalLineEndingAsync(cancellationToken);
+            service.AppendAsync(
+                state.AccountId!.Value,
+                request.MailboxName,
+                literal,
+                request.Flags,
+                request.InternalDate,
+                cancellationToken));
+        logger.LogInformation(
+            "IMAP APPEND completed from {Remote}: user={UserName}, mailbox={Mailbox}, uid={Uid}, size={Size}.",
+            remote,
+            state.UserName ?? string.Empty,
+            request.MailboxName,
+            item.Uid,
+            request.LiteralLength);
         await connection.WriteLineAsync(
             $"{tag} OK [APPENDUID {DateTimeOffset.UtcNow.ToUnixTimeSeconds()} {item.Uid}] APPEND completed",
             cancellationToken);
+    }
+
+    internal async Task<ImapAppendRequest> ParseAppendArgumentsAsync(
+        ImapConnection connection,
+        string arguments,
+        CancellationToken cancellationToken)
+    {
+        var firstLiteral = TryParseSoleLiteralMarker(arguments);
+        if (firstLiteral is null)
+        {
+            return ParseAppendArguments(arguments);
+        }
+
+        if (!firstLiteral.NonSynchronizing)
+        {
+            await connection.WriteLineAsync("+ Ready for mailbox name literal", cancellationToken);
+        }
+
+        var mailboxName = await connection.ReadLiteralTextAsync(firstLiteral.Length, cancellationToken);
+        var remainder = await connection.ReadLineAsync(cancellationToken) ?? string.Empty;
+        return ParseAppendArguments(
+            Quote(mailboxName) + remainder,
+            firstLiteral.Binary ? "binary-mailbox" : "mailbox");
+    }
+
+    private static async Task ReadAppendCommandEndAsync(
+        ImapConnection connection,
+        ImapAppendRequest request,
+        CancellationToken cancellationToken)
+    {
+        var remainder = await connection.ReadLineAsync(cancellationToken);
+        if (request.Utf8Wrapped)
+        {
+            if (!string.Equals(remainder?.Trim(), ")", StringComparison.Ordinal))
+            {
+                throw MalformedAppend();
+            }
+
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(remainder))
+        {
+            throw MalformedAppend();
+        }
+    }
+
+    internal static ImapAppendRequest ParseAppendArguments(string arguments)
+        => ParseAppendArguments(arguments, mailboxLiteralKind: "none");
+
+    private static ImapAppendRequest ParseAppendArguments(string arguments, string mailboxLiteralKind)
+    {
+        if (TryExpandInlineMailboxLiteral(arguments, out var expandedArguments, out var expandedLiteralKind))
+        {
+            arguments = expandedArguments;
+            mailboxLiteralKind = expandedLiteralKind;
+        }
+
+        var match = LiteralRegex().Match(arguments);
+        if (!match.Success) throw MalformedAppend();
+
+        if (!long.TryParse(match.Groups["length"].Value, CultureInfo.InvariantCulture, out var literalLength))
+        {
+            throw MalformedAppend();
+        }
+        var nonSynchronizing = match.Groups["plus"].Success;
+        var binaryLiteral = match.Groups["binary"].Success;
+        var reader = new ImapAppendArgumentReader(arguments[..match.Index].Trim());
+        var mailboxName = DecodeMailboxName(reader.ReadAString());
+        reader.SkipWhitespace();
+
+        IReadOnlyCollection<string> flags = [];
+        if (!reader.End && reader.Current == '(')
+        {
+            flags = ParseFlags(reader.ReadList());
+            reader.SkipWhitespace();
+        }
+
+        DateTimeOffset? internalDate = null;
+        var utf8Wrapped = false;
+        if (!reader.End)
+        {
+            var nextArgument = reader.ReadAString();
+            if (nextArgument.Equals("UTF8", StringComparison.OrdinalIgnoreCase))
+            {
+                ReadUtf8WrapperOpen(reader);
+                utf8Wrapped = true;
+            }
+            else
+            {
+                if (!nextArgument.Equals("NIL", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (!TryParseInternalDate(nextArgument, out var parsedInternalDate))
+                    {
+                        throw MalformedAppend();
+                    }
+
+                    internalDate = parsedInternalDate;
+                }
+
+                reader.SkipWhitespace();
+                if (!reader.End)
+                {
+                    if (!reader.ReadAString().Equals("UTF8", StringComparison.OrdinalIgnoreCase))
+                    {
+                        throw MalformedAppend();
+                    }
+
+                    ReadUtf8WrapperOpen(reader);
+                    utf8Wrapped = true;
+                }
+            }
+        }
+
+        if (!reader.End) throw MalformedAppend();
+        return new ImapAppendRequest(
+            mailboxName,
+            flags,
+            internalDate,
+            literalLength,
+            nonSynchronizing,
+            binaryLiteral,
+            mailboxLiteralKind,
+            utf8Wrapped);
+    }
+
+    private static void ReadUtf8WrapperOpen(ImapAppendArgumentReader reader)
+    {
+        reader.SkipWhitespace();
+        reader.ReadExpected('(');
+        reader.SkipWhitespace();
     }
 
     private async Task SearchAsync(
@@ -502,45 +1074,351 @@ public sealed partial class ImapServerService(
             cancellationToken);
     }
 
-    private async Task FetchAsync(
+    internal async Task FetchAsync(
         ImapConnection connection,
         ImapSessionState state,
         string arguments,
+        string remote,
         bool useUid,
         CancellationToken cancellationToken)
     {
         var separator = arguments.IndexOf(' ');
         if (separator < 0) throw new FormatException("FETCH requires sequence set and data items.");
         var sequenceSet = arguments[..separator];
-        var dataItems = arguments[(separator + 1)..].ToUpperInvariant();
+        var dataItems = arguments[(separator + 1)..].Trim();
+        var request = ImapFetchRequest.Parse(dataItems);
         var items = await WithMailboxServiceAsync(service =>
             service.FetchAsync(state.MailboxId!.Value, sequenceSet, useUid, cancellationToken));
+        logger.LogInformation(
+            "IMAP FETCH from {Remote}: user={UserName}, mailbox={Mailbox}, sequenceSet={SequenceSet}, useUid={UseUid}, requested={Requested}, returned={Returned}.",
+            remote,
+            state.UserName ?? string.Empty,
+            state.MailboxName ?? string.Empty,
+            sequenceSet,
+            useUid,
+            request.LogSummary,
+            items.Count);
         foreach (var item in items)
         {
-            var fields = new List<string>();
-            if (useUid || dataItems.Contains("UID", StringComparison.Ordinal)) fields.Add($"UID {item.Uid}");
-            if (dataItems.Contains("FLAGS", StringComparison.Ordinal) || dataItems is "ALL" or "FAST" or "FULL")
-                fields.Add($"FLAGS ({item.Flags})");
-            if (dataItems.Contains("RFC822.SIZE", StringComparison.Ordinal) || dataItems is "ALL" or "FULL")
-                fields.Add($"RFC822.SIZE {item.Size}");
-            if (dataItems.Contains("INTERNALDATE", StringComparison.Ordinal) || dataItems is "ALL" or "FULL")
-                fields.Add($"INTERNALDATE \"{item.InternalDate:dd-MMM-yyyy HH:mm:ss zzz}\"");
-            fields.Add($"MODSEQ ({item.ModSeq})");
-            var includeBody = dataItems.Contains("BODY[]", StringComparison.Ordinal)
-                              || dataItems.Contains("BODY.PEEK[]", StringComparison.Ordinal)
-                              || dataItems.Contains("RFC822", StringComparison.Ordinal);
-            if (!includeBody)
+            var parts = new List<ImapFetchResponsePart>();
+            if (useUid || request.Uid) parts.Add(ImapFetchResponsePart.Atom($"UID {item.Uid}"));
+            if (request.Flags) parts.Add(ImapFetchResponsePart.Atom($"FLAGS ({item.Flags})"));
+            if (request.Rfc822Size) parts.Add(ImapFetchResponsePart.Atom($"RFC822.SIZE {item.Size}"));
+            if (request.InternalDate) parts.Add(ImapFetchResponsePart.Atom($"INTERNALDATE \"{item.InternalDate:dd-MMM-yyyy HH:mm:ss zzz}\""));
+
+            byte[]? raw = null;
+            MimeMessage? message = null;
+            if (request.RequiresMessage)
             {
-                await connection.WriteLineAsync($"* {item.Sequence} FETCH ({string.Join(' ', fields)})", cancellationToken);
+                await using var body = await WithMailboxServiceAsync(service => service.OpenMessageAsync(item.Id, cancellationToken));
+                using var memory = new MemoryStream();
+                await body.CopyToAsync(memory, cancellationToken);
+                raw = memory.ToArray();
+                message = MimeMessage.Load(new MemoryStream(raw));
+            }
+
+            if (request.Envelope && message is not null)
+            {
+                parts.Add(ImapFetchResponsePart.Atom($"ENVELOPE {BuildEnvelope(message)}"));
+            }
+
+            if (request.Body)
+            {
+                parts.Add(ImapFetchResponsePart.Atom($"BODY {BuildBodyStructure(message, raw, extended: false)}"));
+            }
+
+            if (request.BodyStructure)
+            {
+                parts.Add(ImapFetchResponsePart.Atom($"BODYSTRUCTURE {BuildBodyStructure(message, raw, extended: true)}"));
+            }
+
+            if (request.Rfc822 && raw is not null)
+            {
+                parts.Add(ImapFetchResponsePart.Literal("RFC822", raw));
+            }
+
+            if (raw is not null && message is not null)
+            {
+                foreach (var section in request.BodySections)
+                {
+                    parts.Add(ImapFetchResponsePart.Literal(
+                        section.ResponseName,
+                        ApplyPartial(BuildBodySection(raw, message, section.Section), section.Offset, section.Length)));
+                }
+            }
+
+            parts.Add(ImapFetchResponsePart.Atom($"MODSEQ ({item.ModSeq})"));
+            await WriteFetchResponseAsync(connection, item.Sequence, parts, cancellationToken);
+        }
+
+        if (request.MarkSeen)
+        {
+            var unseenIds = items
+                .Where(x => !ParseFlags(x.Flags).Contains("\\Seen"))
+                .Select(x => x.Id)
+                .ToArray();
+            await WithMailboxServiceAsync(service =>
+                service.MarkSeenAsync(state.MailboxId!.Value, unseenIds, cancellationToken));
+        }
+    }
+
+    private static async Task WriteFetchResponseAsync(
+        ImapConnection connection,
+        long sequence,
+        IReadOnlyList<ImapFetchResponsePart> parts,
+        CancellationToken cancellationToken)
+    {
+        await connection.WriteAsync($"* {sequence} FETCH (", cancellationToken);
+        for (var index = 0; index < parts.Count; index++)
+        {
+            if (index > 0)
+            {
+                await connection.WriteAsync(" ", cancellationToken);
+            }
+
+            var part = parts[index];
+            if (part.Bytes is null)
+            {
+                await connection.WriteAsync(part.Name, cancellationToken);
                 continue;
             }
 
-            await using var body = await WithMailboxServiceAsync(service => service.OpenMessageAsync(item.Id, cancellationToken));
-            await connection.WriteAsync(
-                $"* {item.Sequence} FETCH ({string.Join(' ', fields)} BODY[] {{{item.Size}}}\r\n",
-                cancellationToken);
-            await connection.CopyFromAsync(body, cancellationToken);
-            await connection.WriteLineAsync(")", cancellationToken);
+            await connection.WriteAsync($"{part.Name} {{{part.Bytes.Length}}}\r\n", cancellationToken);
+            await connection.WriteBytesAsync(part.Bytes, cancellationToken);
+        }
+
+        await connection.WriteLineAsync(")", cancellationToken);
+    }
+
+    private static string BuildEnvelope(MimeMessage message)
+    {
+        var sender = new InternetAddressList();
+        if (message.Sender is null)
+        {
+            sender.AddRange(message.From);
+        }
+        else
+        {
+            sender.Add(message.Sender);
+        }
+
+        var replyTo = message.ReplyTo.Count == 0 ? message.From : message.ReplyTo;
+        var date = message.Date == DateTimeOffset.MinValue
+            ? null
+            : message.Date.ToString("ddd, dd MMM yyyy HH:mm:ss zzz", CultureInfo.InvariantCulture);
+        var messageId = message.Headers["Message-ID"] ?? (string.IsNullOrWhiteSpace(message.MessageId) ? null : $"<{message.MessageId}>");
+        return "("
+               + $"{NString(date)} "
+               + $"{NString(message.Subject)} "
+               + $"{BuildEnvelopeAddressList(message.From)} "
+               + $"{BuildEnvelopeAddressList(sender)} "
+               + $"{BuildEnvelopeAddressList(replyTo)} "
+               + $"{BuildEnvelopeAddressList(message.To)} "
+               + $"{BuildEnvelopeAddressList(message.Cc)} "
+               + $"{BuildEnvelopeAddressList(message.Bcc)} "
+               + $"{NString(message.Headers["In-Reply-To"])} "
+               + $"{NString(messageId)}"
+               + ")";
+    }
+
+    private static string BuildEnvelopeAddressList(IEnumerable<InternetAddress> addresses)
+    {
+        var mailboxes = FlattenAddresses(addresses).ToArray();
+        if (mailboxes.Length == 0)
+        {
+            return "NIL";
+        }
+
+        return "(" + string.Join(' ', mailboxes.Select(BuildEnvelopeMailbox)) + ")";
+    }
+
+    private static IEnumerable<MailboxAddress> FlattenAddresses(IEnumerable<InternetAddress> addresses)
+    {
+        foreach (var address in addresses)
+        {
+            if (address is MailboxAddress mailbox)
+            {
+                yield return mailbox;
+            }
+            else if (address is GroupAddress group)
+            {
+                foreach (var member in FlattenAddresses(group.Members))
+                {
+                    yield return member;
+                }
+            }
+        }
+    }
+
+    private static string BuildEnvelopeMailbox(MailboxAddress mailbox)
+    {
+        var at = mailbox.Address.LastIndexOf('@');
+        var localPart = at > 0 ? mailbox.Address[..at] : mailbox.Address;
+        var domain = at > 0 && at < mailbox.Address.Length - 1 ? mailbox.Address[(at + 1)..] : string.Empty;
+        return $"({NString(mailbox.Name)} NIL {NString(localPart)} {NString(domain)})";
+    }
+
+    private static string BuildBodyStructure(MimeMessage? message, byte[]? raw, bool extended)
+    {
+        var body = raw is null ? Array.Empty<byte>() : ExtractTextBytes(raw);
+        var mediaSubtype = message?.Body is TextPart textPart
+            ? textPart.ContentType.MediaSubtype.ToUpperInvariant()
+            : "PLAIN";
+        var charset = message?.Body?.ContentType.Charset;
+        var charsetPart = string.IsNullOrWhiteSpace(charset)
+            ? "NIL"
+            : $"(\"CHARSET\" {NString(charset)})";
+        var lineCount = CountLines(body);
+        var extension = extended ? " NIL NIL NIL NIL" : string.Empty;
+        return $"(\"TEXT\" {NString(mediaSubtype)} {charsetPart} NIL NIL \"7BIT\" {body.Length} {lineCount}{extension})";
+    }
+
+    private static byte[] BuildBodySection(byte[] raw, MimeMessage message, string section)
+    {
+        var normalized = section.Trim();
+        if (normalized.Length == 0)
+        {
+            return raw;
+        }
+
+        var upper = normalized.ToUpperInvariant();
+        if (upper == "HEADER")
+        {
+            return ExtractHeaderBytes(raw);
+        }
+
+        if (upper == "TEXT")
+        {
+            return ExtractTextBytes(raw);
+        }
+
+        if (upper.StartsWith("HEADER.FIELDS", StringComparison.Ordinal))
+        {
+            return BuildSelectedHeaderBytes(message, normalized);
+        }
+
+        return raw;
+    }
+
+    private static byte[] ApplyPartial(byte[] value, int? offset, int? length)
+    {
+        if (offset is null)
+        {
+            return value;
+        }
+
+        if (offset.Value >= value.Length)
+        {
+            return [];
+        }
+
+        var available = value.Length - offset.Value;
+        var count = length is null ? available : Math.Min(length.Value, available);
+        return value[offset.Value..(offset.Value + count)];
+    }
+
+    private static byte[] BuildSelectedHeaderBytes(MimeMessage message, string section)
+    {
+        var match = HeaderFieldsRegex().Match(section);
+        if (!match.Success)
+        {
+            return Encoding.ASCII.GetBytes("\r\n");
+        }
+
+        var fields = match.Groups["fields"].Value
+            .Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var builder = new StringBuilder();
+        foreach (var header in message.Headers)
+        {
+            if (fields.Contains(header.Field))
+            {
+                builder.Append(header.Field).Append(": ").Append(header.Value).Append("\r\n");
+            }
+        }
+
+        builder.Append("\r\n");
+        return Encoding.UTF8.GetBytes(builder.ToString());
+    }
+
+    private static byte[] ExtractHeaderBytes(byte[] raw)
+    {
+        var split = FindHeaderBodySplit(raw);
+        if (split.HeaderEnd < 0)
+        {
+            var fallback = new byte[raw.Length + 2];
+            raw.CopyTo(fallback, 0);
+            fallback[^2] = (byte)'\r';
+            fallback[^1] = (byte)'\n';
+            return fallback;
+        }
+
+        var length = split.HeaderEnd + split.SeparatorLength;
+        return raw[..length];
+    }
+
+    private static byte[] ExtractTextBytes(byte[] raw)
+    {
+        var split = FindHeaderBodySplit(raw);
+        return split.BodyStart < 0 ? Array.Empty<byte>() : raw[split.BodyStart..];
+    }
+
+    private static (int HeaderEnd, int BodyStart, int SeparatorLength) FindHeaderBodySplit(byte[] raw)
+    {
+        for (var index = 0; index <= raw.Length - 4; index++)
+        {
+            if (raw[index] == '\r'
+                && raw[index + 1] == '\n'
+                && raw[index + 2] == '\r'
+                && raw[index + 3] == '\n')
+            {
+                return (index, index + 4, 4);
+            }
+        }
+
+        for (var index = 0; index <= raw.Length - 2; index++)
+        {
+            if (raw[index] == '\n' && raw[index + 1] == '\n')
+            {
+                return (index, index + 2, 2);
+            }
+        }
+
+        return (-1, -1, 0);
+    }
+
+    private static int CountLines(byte[] value)
+    {
+        if (value.Length == 0)
+        {
+            return 0;
+        }
+
+        var lines = 0;
+        foreach (var character in value)
+        {
+            if (character == '\n')
+            {
+                lines++;
+            }
+        }
+
+        return value[^1] == '\n' ? lines : lines + 1;
+    }
+
+    private static string NString(string? value) =>
+        string.IsNullOrWhiteSpace(value) ? "NIL" : Quote(value);
+
+    internal async Task ExpungeAsync(
+        ImapConnection connection,
+        ImapSessionState state,
+        CancellationToken cancellationToken)
+    {
+        var expunged = await WithMailboxServiceAsync(service =>
+            service.ExpungeAsync(state.MailboxId!.Value, cancellationToken));
+        foreach (var item in expunged.OrderByDescending(x => x.Sequence))
+        {
+            await connection.WriteLineAsync($"* {item.Sequence} EXPUNGE", cancellationToken);
         }
     }
 
@@ -565,11 +1443,12 @@ public sealed partial class ImapServerService(
                 cancellationToken));
         if (!silent)
         {
-            await FetchAsync(connection, state, $"{tokens[0]} (FLAGS UID)", useUid, cancellationToken);
+            await FetchAsync(connection, state, $"{tokens[0]} (FLAGS UID)", "local", useUid, cancellationToken);
         }
     }
 
-    private async Task CopyMoveAsync(
+    internal async Task<CopyMoveResult> CopyMoveAsync(
+        ImapConnection connection,
         ImapSessionState state,
         string arguments,
         bool useUid,
@@ -578,8 +1457,17 @@ public sealed partial class ImapServerService(
     {
         var tokens = ImapTokenizer.Tokenize(arguments);
         if (tokens.Count != 2) throw new FormatException("COPY/MOVE requires sequence set and destination.");
-        await WithMailboxServiceAsync(service =>
+        var result = await WithMailboxServiceAsync(service =>
             service.CopyAsync(state.MailboxId!.Value, tokens[0], useUid, tokens[1], move, cancellationToken));
+        if (move)
+        {
+            foreach (var item in result.ExpungedItems.OrderByDescending(x => x.Sequence))
+            {
+                await connection.WriteLineAsync($"* {item.Sequence} EXPUNGE", cancellationToken);
+            }
+        }
+
+        return result;
     }
 
     private async Task<T> WithMailboxServiceAsync<T>(Func<IMailboxService, Task<T>> action)
@@ -598,18 +1486,11 @@ public sealed partial class ImapServerService(
     {
         var ssl = new SslStream(stream, leaveInnerStreamOpen: false);
         await ssl.AuthenticateAsServerAsync(
-            new SslServerAuthenticationOptions
-            {
-                ServerCertificateContext = _certificate?.SslContext,
-                EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
-                ClientCertificateRequired = false
-            },
+            async (_, hello, _, token) => await certificateProvider.SelectOptionsAsync(hello, token),
+            state: null,
             cancellationToken);
         return ssl;
     }
-
-    private LoadedPemCertificate? LoadCertificate() =>
-        PemCertificateLoader.LoadOptional(_certificates.Mail, "Mail");
 
     private static IReadOnlyCollection<string> ParseFlags(string value) =>
         value.Trim().Trim('(', ')').Split(' ', StringSplitOptions.RemoveEmptyEntries);
@@ -618,6 +1499,197 @@ public sealed partial class ImapServerService(
         connection.WriteLineAsync($"{tag} OK {message}", cancellationToken);
 
     private static string Quote(string value) => $"\"{value.Replace("\\", "\\\\").Replace("\"", "\\\"")}\"";
+
+    private static string FormatSequenceSet(IReadOnlyList<long> values) => string.Join(',', values);
+
+    internal static FormatException MalformedAppend() => new("Malformed APPEND command.");
+
+    private static string DecodeMailboxName(string mailboxName)
+    {
+        if (mailboxName.IndexOf('&') < 0)
+        {
+            return mailboxName;
+        }
+
+        var result = new StringBuilder(mailboxName.Length);
+        var index = 0;
+        while (index < mailboxName.Length)
+        {
+            var character = mailboxName[index];
+            if (character != '&')
+            {
+                result.Append(character);
+                index++;
+                continue;
+            }
+
+            var terminator = mailboxName.IndexOf('-', index + 1);
+            if (terminator < 0)
+            {
+                throw MalformedAppend();
+            }
+
+            if (terminator == index + 1)
+            {
+                result.Append('&');
+                index = terminator + 1;
+                continue;
+            }
+
+            var encoded = mailboxName[(index + 1)..terminator].Replace(',', '/');
+            var padding = encoded.Length % 4;
+            if (padding != 0)
+            {
+                encoded = encoded.PadRight(encoded.Length + 4 - padding, '=');
+            }
+
+            try
+            {
+                var bytes = Convert.FromBase64String(encoded);
+                if (bytes.Length % 2 != 0)
+                {
+                    throw MalformedAppend();
+                }
+
+                result.Append(Encoding.BigEndianUnicode.GetString(bytes));
+            }
+            catch (FormatException)
+            {
+                throw MalformedAppend();
+            }
+
+            index = terminator + 1;
+        }
+
+        return result.ToString();
+    }
+
+    private static string SpecialUseAttributes(string mailboxName)
+    {
+        var attributes = new List<string> { "\\HasNoChildren" };
+        if (mailboxName.Equals("Sent", StringComparison.OrdinalIgnoreCase)
+            || mailboxName.Equals("Sent Messages", StringComparison.OrdinalIgnoreCase)
+            || mailboxName.Equals("Sent Items", StringComparison.OrdinalIgnoreCase))
+        {
+            attributes.Add("\\Sent");
+        }
+        else if (mailboxName.Equals("Drafts", StringComparison.OrdinalIgnoreCase))
+        {
+            attributes.Add("\\Drafts");
+        }
+        else if (mailboxName.Equals("Trash", StringComparison.OrdinalIgnoreCase)
+                 || mailboxName.Equals("Deleted Items", StringComparison.OrdinalIgnoreCase))
+        {
+            attributes.Add("\\Trash");
+        }
+        else if (mailboxName.Equals("Junk", StringComparison.OrdinalIgnoreCase)
+                 || mailboxName.Equals("Spam", StringComparison.OrdinalIgnoreCase))
+        {
+            attributes.Add("\\Junk");
+        }
+        else if (mailboxName.Equals("Archives", StringComparison.OrdinalIgnoreCase)
+                 || mailboxName.Equals("Archive", StringComparison.OrdinalIgnoreCase))
+        {
+            attributes.Add("\\Archive");
+        }
+
+        return string.Join(' ', attributes);
+    }
+
+    private static AppendLiteralMarker? TryParseSoleLiteralMarker(string value)
+    {
+        var match = SoleLiteralRegex().Match(value);
+        return match.Success ? ReadLiteralMarker(match) : null;
+    }
+
+    private static bool TryExpandInlineMailboxLiteral(
+        string arguments,
+        out string expandedArguments,
+        out string mailboxLiteralKind)
+    {
+        expandedArguments = arguments;
+        mailboxLiteralKind = "none";
+        var match = InlineLeadingLiteralRegex().Match(arguments);
+        if (!match.Success) return false;
+        var marker = ReadLiteralMarker(match);
+        var literalStart = match.Index + match.Length;
+        if (!TryReadUtf8Text(arguments, literalStart, marker.Length, out var mailboxName, out var literalEnd))
+        {
+            throw MalformedAppend();
+        }
+
+        expandedArguments = Quote(mailboxName) + arguments[literalEnd..];
+        mailboxLiteralKind = marker.Binary ? "binary-mailbox" : "mailbox";
+        return true;
+    }
+
+    private static bool TryReadUtf8Text(
+        string value,
+        int start,
+        long byteLength,
+        out string text,
+        out int end)
+    {
+        if (byteLength > int.MaxValue)
+        {
+            text = string.Empty;
+            end = start;
+            return false;
+        }
+
+        var bytes = new List<byte>((int)byteLength);
+        var index = start;
+        while (index < value.Length && bytes.Count < byteLength)
+        {
+            var scalar = char.ConvertToUtf32(value, index);
+            var current = char.ConvertFromUtf32(scalar);
+            var encoded = Encoding.UTF8.GetBytes(current);
+            if (bytes.Count + encoded.Length > byteLength)
+            {
+                text = string.Empty;
+                end = start;
+                return false;
+            }
+
+            bytes.AddRange(encoded);
+            index += current.Length;
+        }
+
+        if (bytes.Count != byteLength)
+        {
+            text = string.Empty;
+            end = start;
+            return false;
+        }
+
+        text = Encoding.UTF8.GetString(bytes.ToArray());
+        end = index;
+        return true;
+    }
+
+    private static AppendLiteralMarker ReadLiteralMarker(Match match)
+    {
+        if (!long.TryParse(match.Groups["length"].Value, CultureInfo.InvariantCulture, out var length))
+        {
+            throw MalformedAppend();
+        }
+
+        return new AppendLiteralMarker(
+            length,
+            match.Groups["plus"].Success,
+            match.Groups["binary"].Success);
+    }
+
+    private static bool TryParseInternalDate(string value, out DateTimeOffset internalDate)
+    {
+        var normalized = InternalDateZoneRegex().Replace(value, " $1:$2");
+        return DateTimeOffset.TryParseExact(
+            normalized,
+            ["d-MMM-yyyy HH:mm:ss zzz", "dd-MMM-yyyy HH:mm:ss zzz"],
+            CultureInfo.InvariantCulture,
+            DateTimeStyles.AllowWhiteSpaces,
+            out internalDate);
+    }
 
     private static void RequireAuthenticated(ImapSessionState state)
     {
@@ -640,41 +1712,192 @@ public sealed partial class ImapServerService(
         if (state.ReadOnly) throw new InvalidOperationException("Mailbox is read-only.");
     }
 
-    [GeneratedRegex(@"\{(?<length>\d+)(?<plus>\+)?\}\s*$", RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"(?<binary>~)?\{(?<length>\d+)(?<plus>\+)?\}\s*$", RegexOptions.CultureInvariant)]
     private static partial Regex LiteralRegex();
+
+    [GeneratedRegex(@"^\s*(?<binary>~)?\{(?<length>\d+)(?<plus>\+)?\}\s*$", RegexOptions.CultureInvariant)]
+    private static partial Regex SoleLiteralRegex();
+
+    [GeneratedRegex(@"^\s*(?<binary>~)?\{(?<length>\d+)(?<plus>\+)?\}\s*(?:\r\n|\n|\r)", RegexOptions.CultureInvariant)]
+    private static partial Regex InlineLeadingLiteralRegex();
+
+    [GeneratedRegex(@"\((?<fields>[^)]*)\)", RegexOptions.CultureInvariant)]
+    private static partial Regex HeaderFieldsRegex();
+
+    [GeneratedRegex(@" ([+-]\d{2})(\d{2})$", RegexOptions.CultureInvariant)]
+    private static partial Regex InternalDateZoneRegex();
 }
 
-internal sealed class ImapSessionState
-{
-    public Guid? AccountId { get; set; }
-    public string? UserName { get; set; }
-    public Guid? MailboxId { get; set; }
-    public string? MailboxName { get; set; }
-    public bool ReadOnly { get; set; }
-    public bool TlsUpgradeRequested { get; set; }
+internal sealed record ImapAppendRequest(
+    string MailboxName,
+    IReadOnlyCollection<string> Flags,
+    DateTimeOffset? InternalDate,
+    long LiteralLength,
+    bool NonSynchronizing,
+    bool BinaryLiteral,
+    string MailboxLiteralKind,
+    bool Utf8Wrapped);
 
-    public void Deselect()
+internal sealed record AppendLiteralMarker(long Length, bool NonSynchronizing, bool Binary);
+
+internal sealed record ImapFetchResponsePart(string Name, byte[]? Bytes)
+{
+    public static ImapFetchResponsePart Atom(string value) => new(value, null);
+    public static ImapFetchResponsePart Literal(string name, byte[] value) => new(name, value);
+}
+
+internal sealed record ImapBodySectionRequest(string Section, bool Peek, int? Offset = null, int? Length = null)
+{
+    public string ResponseName => Offset is null
+        ? $"BODY[{NormalizeSectionName(Section)}]"
+        : $"BODY[{NormalizeSectionName(Section)}]<{Offset.Value}>";
+
+    private static string NormalizeSectionName(string section)
     {
-        MailboxId = null;
-        MailboxName = null;
-        ReadOnly = false;
+        var normalized = section.Trim().ToUpperInvariant();
+        if (normalized.StartsWith("HEADER.FIELDS", StringComparison.Ordinal)
+            && normalized.Contains('(', StringComparison.Ordinal))
+        {
+            var start = normalized.IndexOf('(');
+            var end = normalized.LastIndexOf(')');
+            if (end > start)
+            {
+                var fields = normalized[(start + 1)..end]
+                    .Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                return $"HEADER.FIELDS ({string.Join(' ', fields)})";
+            }
+        }
+
+        return normalized;
     }
 }
 
-internal static class ImapTokenizer
+internal sealed partial class ImapFetchRequest
 {
-    public static IReadOnlyList<string> Tokenize(string input)
+    private ImapFetchRequest()
     {
-        var result = new List<string>();
-        var current = new StringBuilder();
+    }
+
+    public bool Uid { get; private init; }
+    public bool Flags { get; private init; }
+    public bool Rfc822Size { get; private init; }
+    public bool InternalDate { get; private init; }
+    public bool Envelope { get; private init; }
+    public bool Body { get; private init; }
+    public bool BodyStructure { get; private init; }
+    public bool Rfc822 { get; private init; }
+    public IReadOnlyList<ImapBodySectionRequest> BodySections { get; private init; } = [];
+    public bool MarkSeen => Rfc822 || BodySections.Any(x => !x.Peek);
+    public bool RequiresMessage => Envelope || Body || BodyStructure || Rfc822 || BodySections.Count > 0;
+    public string LogSummary
+    {
+        get
+        {
+            var parts = new List<string>();
+            if (Uid) parts.Add("UID");
+            if (Flags) parts.Add("FLAGS");
+            if (Rfc822Size) parts.Add("RFC822.SIZE");
+            if (InternalDate) parts.Add("INTERNALDATE");
+            if (Envelope) parts.Add("ENVELOPE");
+            if (Body) parts.Add("BODY");
+            if (BodyStructure) parts.Add("BODYSTRUCTURE");
+            if (Rfc822) parts.Add("RFC822");
+            parts.AddRange(BodySections.Select(x => x.ResponseName));
+            return string.Join(',', parts);
+        }
+    }
+
+    public static ImapFetchRequest Parse(string dataItems)
+    {
+        var normalized = dataItems.Trim();
+        var macro = normalized.Trim('(', ')').Trim().ToUpperInvariant();
+        var all = macro == "ALL";
+        var fast = macro == "FAST";
+        var full = macro == "FULL";
+        var upper = normalized.ToUpperInvariant();
+        var sections = BodySectionRegex().Matches(normalized)
+            .Select(match => new ImapBodySectionRequest(
+                match.Groups["section"].Value,
+                match.Groups["peek"].Success,
+                match.Groups["offset"].Success ? int.Parse(match.Groups["offset"].Value, CultureInfo.InvariantCulture) : null,
+                match.Groups["length"].Success ? int.Parse(match.Groups["length"].Value, CultureInfo.InvariantCulture) : null))
+            .ToList();
+        if (ContainsFetchItem(upper, "RFC822.HEADER"))
+        {
+            sections.Add(new ImapBodySectionRequest("HEADER", Peek: true));
+        }
+
+        if (ContainsFetchItem(upper, "RFC822.TEXT"))
+        {
+            sections.Add(new ImapBodySectionRequest("TEXT", Peek: false));
+        }
+
+        return new ImapFetchRequest
+        {
+            Uid = ContainsFetchItem(upper, "UID"),
+            Flags = all || fast || full || ContainsFetchItem(upper, "FLAGS"),
+            Rfc822Size = all || fast || full || ContainsFetchItem(upper, "RFC822.SIZE"),
+            InternalDate = all || fast || full || ContainsFetchItem(upper, "INTERNALDATE"),
+            Envelope = all || full || ContainsFetchItem(upper, "ENVELOPE"),
+            Body = full || ContainsBareBody(upper),
+            BodyStructure = ContainsFetchItem(upper, "BODYSTRUCTURE"),
+            Rfc822 = ContainsFetchItem(upper, "RFC822"),
+            BodySections = sections
+        };
+    }
+
+    private static bool ContainsFetchItem(string upper, string item) =>
+        Regex.IsMatch(
+            upper,
+            $@"(^|[\s(]){Regex.Escape(item)}($|[\s)])",
+            RegexOptions.CultureInvariant);
+
+    private static bool ContainsBareBody(string upper) =>
+        Regex.IsMatch(
+            upper,
+            @"(^|[\s(])BODY($|[\s)])",
+            RegexOptions.CultureInvariant);
+
+    [GeneratedRegex(@"BODY(?<peek>\.PEEK)?\[(?<section>[^\]]*)\](?:<(?<offset>\d+)(?:\.(?<length>\d+))?>)?", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex BodySectionRegex();
+}
+
+internal sealed class ImapAppendArgumentReader(string input)
+{
+    private int _index;
+
+    public bool End => _index >= input.Length;
+    public char Current => End ? '\0' : input[_index];
+
+    public void SkipWhitespace()
+    {
+        while (!End && char.IsWhiteSpace(Current))
+        {
+            _index++;
+        }
+    }
+
+    public string ReadAString()
+    {
+        SkipWhitespace();
+        if (End) throw ImapServerService.MalformedAppend();
+        return Current == '"' ? ReadQuotedString() : ReadAtom();
+    }
+
+    public string ReadList()
+    {
+        SkipWhitespace();
+        if (End || Current != '(') throw ImapServerService.MalformedAppend();
+
+        var start = _index;
+        var depth = 0;
         var quoted = false;
         var escaped = false;
-        var parenthesisDepth = 0;
-        foreach (var character in input)
+        while (!End)
         {
+            var character = input[_index++];
             if (escaped)
             {
-                current.Append(character);
                 escaped = false;
                 continue;
             }
@@ -691,26 +1914,173 @@ internal static class ImapTokenizer
                 continue;
             }
 
+            if (quoted) continue;
+            if (character == '(')
+            {
+                depth++;
+                continue;
+            }
+
+            if (character == ')')
+            {
+                depth--;
+                if (depth < 0) throw ImapServerService.MalformedAppend();
+                if (depth == 0) return input[start.._index];
+            }
+        }
+
+        throw ImapServerService.MalformedAppend();
+    }
+
+    public void ReadExpected(char expected)
+    {
+        if (End || Current != expected)
+        {
+            throw ImapServerService.MalformedAppend();
+        }
+
+        _index++;
+    }
+
+    private string ReadQuotedString()
+    {
+        _index++;
+        var value = new StringBuilder();
+        var escaped = false;
+        while (!End)
+        {
+            var character = input[_index++];
+            if (escaped)
+            {
+                value.Append(character);
+                escaped = false;
+                continue;
+            }
+
+            if (character == '\\')
+            {
+                escaped = true;
+                continue;
+            }
+
+            if (character == '"')
+            {
+                return value.ToString();
+            }
+
+            value.Append(character);
+        }
+
+        throw ImapServerService.MalformedAppend();
+    }
+
+    private string ReadAtom()
+    {
+        var start = _index;
+        while (!End && !char.IsWhiteSpace(Current))
+        {
+            if (Current is '(' or ')') throw ImapServerService.MalformedAppend();
+            _index++;
+        }
+
+        if (_index == start) throw ImapServerService.MalformedAppend();
+        return input[start.._index];
+    }
+}
+
+internal sealed class ImapSessionState
+{
+    public Guid? AccountId { get; set; }
+    public string? UserName { get; set; }
+    public Guid? MailboxId { get; set; }
+    public string? MailboxName { get; set; }
+    public bool ReadOnly { get; set; }
+    public bool TlsUpgradeRequested { get; set; }
+    public long Exists { get; set; }
+    public long UidNext { get; set; }
+    public long HighestModSeq { get; set; }
+
+    public void Deselect()
+    {
+        MailboxId = null;
+        MailboxName = null;
+        ReadOnly = false;
+        Exists = 0;
+        UidNext = 0;
+        HighestModSeq = 0;
+    }
+}
+
+internal static class ImapTokenizer
+{
+    public static IReadOnlyList<string> Tokenize(string input)
+    {
+        var result = new List<string>();
+        var current = new StringBuilder();
+        var quoted = false;
+        var escaped = false;
+        var tokenStarted = false;
+        var parenthesisDepth = 0;
+        foreach (var character in input)
+        {
+            if (escaped)
+            {
+                current.Append(character);
+                escaped = false;
+                tokenStarted = true;
+                continue;
+            }
+
+            if (quoted && character == '\\')
+            {
+                escaped = true;
+                continue;
+            }
+
+            if (character == '"')
+            {
+                quoted = !quoted;
+                tokenStarted = true;
+                continue;
+            }
+
             if (!quoted)
             {
-                if (character == '(') parenthesisDepth++;
-                if (character == ')') parenthesisDepth--;
+                if (character == '(')
+                {
+                    parenthesisDepth++;
+                    current.Append(character);
+                    tokenStarted = true;
+                    continue;
+                }
+
+                if (character == ')')
+                {
+                    parenthesisDepth--;
+                    if (parenthesisDepth < 0) throw new FormatException("Unbalanced quoted string or list.");
+                    current.Append(character);
+                    tokenStarted = true;
+                    continue;
+                }
+
                 if (char.IsWhiteSpace(character) && parenthesisDepth == 0)
                 {
-                    if (current.Length > 0)
+                    if (tokenStarted)
                     {
                         result.Add(current.ToString());
                         current.Clear();
+                        tokenStarted = false;
                     }
                     continue;
                 }
             }
 
             current.Append(character);
+            tokenStarted = true;
         }
 
-        if (quoted || parenthesisDepth != 0) throw new FormatException("Unbalanced quoted string or list.");
-        if (current.Length > 0) result.Add(current.ToString());
+        if (quoted || escaped || parenthesisDepth != 0) throw new FormatException("Unbalanced quoted string or list.");
+        if (tokenStarted) result.Add(current.ToString());
         return result;
     }
 
@@ -773,14 +2143,12 @@ internal sealed class ImapConnection(Stream stream, TimeSpan timeout, long maxim
         }
     }
 
-    public async Task ReadOptionalLineEndingAsync(CancellationToken cancellationToken)
+    public async Task<string> ReadLiteralTextAsync(long length, CancellationToken cancellationToken)
     {
-        var first = await _stream.ReadAsync(_singleByte, cancellationToken);
-        if (first == 0) return;
-        if (_singleByte[0] == '\n') return;
-        if (_singleByte[0] != '\r') throw new InvalidDataException("Expected line ending after literal.");
-        var second = await _stream.ReadAsync(_singleByte, cancellationToken);
-        if (second == 0 || _singleByte[0] != '\n') throw new InvalidDataException("Expected line ending after literal.");
+        await using var literal = await ReadLiteralAsync(length, cancellationToken);
+        using var memory = new MemoryStream();
+        await literal.CopyToAsync(memory, cancellationToken);
+        return Encoding.UTF8.GetString(memory.ToArray());
     }
 
     public Task WriteLineAsync(string value, CancellationToken cancellationToken) =>
@@ -789,6 +2157,12 @@ internal sealed class ImapConnection(Stream stream, TimeSpan timeout, long maxim
     public async Task WriteAsync(string value, CancellationToken cancellationToken)
     {
         var bytes = Encoding.UTF8.GetBytes(value);
+        await _stream.WriteAsync(bytes, cancellationToken);
+        await _stream.FlushAsync(cancellationToken);
+    }
+
+    public async Task WriteBytesAsync(ReadOnlyMemory<byte> bytes, CancellationToken cancellationToken)
+    {
         await _stream.WriteAsync(bytes, cancellationToken);
         await _stream.FlushAsync(cancellationToken);
     }

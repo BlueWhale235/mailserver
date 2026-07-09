@@ -9,5 +9,6 @@
     <ProjectReference Include="../MailServer.Migrations.PostgreSql/MailServer.Migrations.PostgreSql.csproj" />
     <ProjectReference Include="../MailServer.Migrations.Sqlite/MailServer.Migrations.Sqlite.csproj" />
     <ProjectReference Include="../MailServer.PluginSdk/MailServer.PluginSdk.csproj" />
+    <PackageReference Include="MailKit" />
   </ItemGroup>
 </Project>

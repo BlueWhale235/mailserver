@@ -1,0 +1,213 @@
+@page "/admin/firewall"
+@attribute [Authorize]
+@inject AdminApplicationService Administration
+@inject AuthenticationStateProvider Authentication
+@inject AdminToastService Toasts
+@inject PermissionService Permissions
+
+<PageTitle>防火墙</PageTitle>
+
+<AdminPageHeader Title="防火墙" Description="屏蔽指定 IP 或 CIDR 网段访问 SMTP/IMAP 服务。后台管理入口不会被这里的规则拦截。">
+    <Actions>
+        @if (Can(PermissionCodes.FirewallList))
+        {
+            <button class="btn btn-outline-primary admin-btn" type="button" @onclick="ReloadFromButtonAsync">
+                <i class="bi bi-arrow-clockwise"></i>
+                刷新
+            </button>
+        }
+    </Actions>
+</AdminPageHeader>
+
+@if (!_loaded)
+{
+    <div class="loading-row"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span> 正在加载</div>
+}
+else if (_accessDenied)
+{
+    <AccessDeniedPanel />
+}
+else
+{
+@if (Can(PermissionCodes.FirewallCreate))
+{
+<section class="panel">
+    <div class="panel-header compact-header">
+        <div>
+            <h2>新增屏蔽规则</h2>
+            <p>支持单个 IP 或网段，例如 20.78.129.119、203.0.113.0/24、2001:db8::/32。</p>
+        </div>
+    </div>
+    <div class="form-grid two-column">
+        <label class="form-field"><span>IP 或 CIDR</span>
+            <input class="form-control" @bind="_cidr" placeholder="20.78.129.119 或 203.0.113.0/24" />
+        </label>
+        <label class="form-field"><span>备注</span>
+            <input class="form-control" @bind="_note" placeholder="例如：异常登录来源" />
+        </label>
+    </div>
+    <div class="panel-actions">
+        <button class="btn btn-primary admin-btn" type="button" @onclick="CreateAsync">添加规则</button>
+    </div>
+</section>
+}
+
+@if (Can(PermissionCodes.FirewallList))
+{
+<section class="panel">
+    <div class="panel-header">
+        <div>
+            <h2>屏蔽列表</h2>
+            <p>停用后规则会保留但不再拦截连接。</p>
+        </div>
+    </div>
+    <table>
+        <thead>
+        <tr>
+            <th>IP / CIDR</th>
+            <th>状态</th>
+            <th>备注</th>
+            <th>更新时间</th>
+            <th>操作</th>
+        </tr>
+        </thead>
+        <tbody>
+        @if (_rules.Count == 0)
+        {
+            <tr><td colspan="5" class="empty">暂无防火墙规则。</td></tr>
+        }
+        else
+        {
+            @foreach (var rule in _rules)
+            {
+                <tr>
+                    <td><code>@rule.Cidr</code></td>
+                    <td><span class="status-pill @(rule.IsEnabled ? "status-error" : "status-disabled")">@(rule.IsEnabled ? "拦截中" : "已停用")</span></td>
+                    <td>
+                        <input class="inline-note-input" value="@rule.Note" disabled="@(!Can(PermissionCodes.FirewallUpdate))" @onchange="@(e => UpdateNote(rule, e.Value?.ToString()))" />
+                    </td>
+                    <td>@rule.UpdatedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm")</td>
+                    <td>
+                        <div class="toolbar compact-toolbar">
+                            @if (Can(PermissionCodes.FirewallUpdate))
+                            {
+                                <button class="btn btn-outline-primary admin-btn compact-action" type="button" @onclick="@(() => ToggleAsync(rule))">@(rule.IsEnabled ? "停用" : "启用")</button>
+                            }
+                            @if (Can(PermissionCodes.FirewallDelete))
+                            {
+                                <button class="btn btn-danger admin-btn compact-action" type="button" @onclick="@(() => DeleteAsync(rule.Id))">删除</button>
+                            }
+                        </div>
+                    </td>
+                </tr>
+            }
+        }
+        </tbody>
+    </table>
+</section>
+}
+}
+
+@code {
+    private IReadOnlyList<FirewallRuleView> _rules = [];
+    private string _cidr = string.Empty;
+    private string _note = string.Empty;
+    private bool _loaded;
+    private bool _accessDenied;
+    private PermissionSnapshot _permissions = new();
+
+    protected override async Task OnInitializedAsync()
+    {
+        var user = (await Authentication.GetAuthenticationStateAsync()).User;
+        _permissions = await Permissions.GetSnapshotAsync(user, CancellationToken.None);
+        _accessDenied = !CanAny(
+            PermissionCodes.FirewallList,
+            PermissionCodes.FirewallCreate,
+            PermissionCodes.FirewallUpdate,
+            PermissionCodes.FirewallDelete);
+        _loaded = true;
+        if (Can(PermissionCodes.FirewallList))
+        {
+            await ReloadAsync();
+        }
+    }
+
+    private async Task ReloadAsync()
+    {
+        if (!Can(PermissionCodes.FirewallList)) return;
+        _rules = await Administration.GetFirewallRulesAsync(CancellationToken.None);
+    }
+
+    private async Task ReloadFromButtonAsync()
+    {
+        await ReloadAsync();
+        Toasts.Success("防火墙规则已刷新。");
+    }
+
+    private async Task<string> ActorAsync() =>
+        (await Authentication.GetAuthenticationStateAsync()).User.Identity?.Name ?? "admin-ui";
+
+    private async Task CreateAsync()
+    {
+        if (!Can(PermissionCodes.FirewallCreate))
+        {
+            Toasts.Error("当前账号没有创建防火墙规则的权限。");
+            return;
+        }
+
+        try
+        {
+            await Administration.CreateFirewallRuleAsync(_cidr, _note, await ActorAsync(), CancellationToken.None);
+            _cidr = string.Empty;
+            _note = string.Empty;
+            Toasts.Success("防火墙规则已添加。");
+            await ReloadAsync();
+        }
+        catch (Exception exception) when (exception is FormatException or InvalidOperationException)
+        {
+            Toasts.Error(exception.Message);
+        }
+    }
+
+    private async Task ToggleAsync(FirewallRuleView rule)
+    {
+        if (!Can(PermissionCodes.FirewallUpdate))
+        {
+            Toasts.Error("当前账号没有编辑防火墙规则的权限。");
+            return;
+        }
+
+        await Administration.UpdateFirewallRuleAsync(rule.Id, !rule.IsEnabled, rule.Note, await ActorAsync(), CancellationToken.None);
+        Toasts.Success(rule.IsEnabled ? "规则已停用。" : "规则已启用。");
+        await ReloadAsync();
+    }
+
+    private async Task UpdateNote(FirewallRuleView rule, string? note)
+    {
+        if (!Can(PermissionCodes.FirewallUpdate))
+        {
+            Toasts.Error("当前账号没有编辑防火墙规则的权限。");
+            return;
+        }
+
+        await Administration.UpdateFirewallRuleAsync(rule.Id, rule.IsEnabled, note, await ActorAsync(), CancellationToken.None);
+        Toasts.Success("备注已保存。");
+        await ReloadAsync();
+    }
+
+    private async Task DeleteAsync(Guid id)
+    {
+        if (!Can(PermissionCodes.FirewallDelete))
+        {
+            Toasts.Error("当前账号没有删除防火墙规则的权限。");
+            return;
+        }
+
+        await Administration.DeleteFirewallRuleAsync(id, await ActorAsync(), CancellationToken.None);
+        Toasts.Success("防火墙规则已删除。");
+        await ReloadAsync();
+    }
+
+    private bool Can(string code) => _permissions.Has(code);
+    private bool CanAny(params string[] codes) => _permissions.HasAny(codes);
+}

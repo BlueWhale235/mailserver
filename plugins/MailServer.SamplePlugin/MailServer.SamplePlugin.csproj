@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Platforms>AnyCPU;x64</Platforms>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/MailServer.Domain/MailServer.Domain.csproj" />
+    <ProjectReference Include="../../src/MailServer.PluginSdk/MailServer.PluginSdk.csproj" />
+    <None Update="plugin.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

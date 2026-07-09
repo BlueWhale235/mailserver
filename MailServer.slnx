@@ -2,74 +2,56 @@
   <Folder Name="/src/">
     <Project Path="src/MailServer.Api/MailServer.Api.csproj">
       <Platform Solution="*|x64" Project="x64" />
-      <Build Solution="Debug|x64" Project="false" />
-      <Build Solution="Release|Any CPU" Project="false" />
     </Project>
     <Project Path="src/MailServer.Cli/MailServer.Cli.csproj">
       <Platform Solution="*|x64" Project="x64" />
     </Project>
     <Project Path="src/MailServer.Domain/MailServer.Domain.csproj">
       <Platform Solution="*|x64" Project="x64" />
-      <Build Solution="Debug|x64" Project="false" />
-      <Build Solution="Release|Any CPU" Project="false" />
     </Project>
     <Project Path="src/MailServer.Imap/MailServer.Imap.csproj">
       <Platform Solution="*|x64" Project="x64" />
-      <Build Solution="Debug|x64" Project="false" />
-      <Build Solution="Release|Any CPU" Project="false" />
     </Project>
     <Project Path="src/MailServer.Infrastructure/MailServer.Infrastructure.csproj">
       <Platform Solution="*|x64" Project="x64" />
-      <Build Solution="Debug|x64" Project="false" />
-      <Build Solution="Release|Any CPU" Project="false" />
     </Project>
     <Project Path="src/MailServer.Migrations.MySql/MailServer.Migrations.MySql.csproj">
       <Platform Solution="*|x64" Project="x64" />
-      <Build Solution="Debug|x64" Project="false" />
-      <Build Solution="Release|Any CPU" Project="false" />
     </Project>
     <Project Path="src/MailServer.Migrations.PostgreSql/MailServer.Migrations.PostgreSql.csproj">
       <Platform Solution="*|x64" Project="x64" />
-      <Build Solution="Debug|x64" Project="false" />
-      <Build Solution="Release|Any CPU" Project="false" />
     </Project>
     <Project Path="src/MailServer.Migrations.Sqlite/MailServer.Migrations.Sqlite.csproj">
       <Platform Solution="*|x64" Project="x64" />
-      <Build Solution="Debug|x64" Project="false" />
-      <Build Solution="Release|Any CPU" Project="false" />
     </Project>
     <Project Path="src/MailServer.PluginSdk/MailServer.PluginSdk.csproj">
       <Platform Solution="*|x64" Project="x64" />
-      <Build Solution="Debug|x64" Project="false" />
-      <Build Solution="Release|Any CPU" Project="false" />
     </Project>
     <Project Path="src/MailServer.Smtp/MailServer.Smtp.csproj">
       <Platform Solution="*|x64" Project="x64" />
-      <Build Solution="Debug|x64" Project="false" />
-      <Build Solution="Release|Any CPU" Project="false" />
     </Project>
     <Project Path="src/MailServer.Worker/MailServer.Worker.csproj">
       <Platform Solution="*|x64" Project="x64" />
-      <Build Solution="Debug|x64" Project="false" />
-      <Build Solution="Release|Any CPU" Project="false" />
     </Project>
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/MailServer.Tests/MailServer.Tests.csproj">
       <Platform Solution="*|x64" Project="x64" />
-      <Build Solution="Debug|x64" Project="false" />
-      <Build Solution="Release|Any CPU" Project="false" />
     </Project>
   </Folder>
   <Configurations>
     <Platform Name="Any CPU" />
     <Platform Name="x64" />
   </Configurations>
-  <Folder Name="/samples/">
-    <Project Path="samples/MailServer.SamplePlugin/MailServer.SamplePlugin.csproj">
+  <Folder Name="/plugins/">
+    <Project Path="plugins/MailServer.GreylistingPlugin/MailServer.GreylistingPlugin.csproj">
       <Platform Solution="*|x64" Project="x64" />
-      <Build Solution="Debug|x64" Project="false" />
-      <Build Solution="Release|Any CPU" Project="false" />
+    </Project>
+    <Project Path="plugins/MailServer.MimePlugin/MailServer.MimePlugin.csproj">
+      <Platform Solution="*|x64" Project="x64" />
+    </Project>
+    <Project Path="plugins/MailServer.SamplePlugin/MailServer.SamplePlugin.csproj">
+      <Platform Solution="*|x64" Project="x64" />
     </Project>
   </Folder>
 </Solution>

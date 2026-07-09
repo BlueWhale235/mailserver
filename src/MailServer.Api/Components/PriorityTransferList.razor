@@ -1,0 +1,210 @@
+@typeparam TItem
+
+<div class="priority-board @CssClass">
+    <div class="priority-lane" @ondragover:preventDefault @ondrop="DropSelectedAtEndAsync">
+        <div class="priority-lane-heading">
+            <strong>@SelectedTitle</strong>
+            <small>@SelectedSubtitle</small>
+        </div>
+        @if (SelectedItems.Count == 0 && !string.IsNullOrWhiteSpace(EmptySelectedText))
+        {
+            <div class="priority-empty">@EmptySelectedText</div>
+        }
+        @for (var i = 0; i < SelectedItems.Count; i++)
+        {
+            var item = SelectedItems[i];
+            var key = GetKey(item);
+            <div class="priority-row draggable" draggable="true" @ondragstart="() => StartDrag(key, true)" @ondragover:preventDefault @ondrop="() => DropOnSelectedAsync(key)">
+                <span class="priority-index">@(i + 1)</span>
+                <div class="priority-copy">
+                    <strong>@ItemLabel(item)</strong>
+                    @if (ItemDescription is not null)
+                    {
+                        <small>@ItemDescription(item)</small>
+                    }
+                </div>
+                <div class="priority-actions">
+                    <button class="icon-button compact-icon" type="button" title="上移" disabled="@(i == 0)" @onclick="() => MoveAsync(key, -1)"><i class="bi bi-chevron-up"></i></button>
+                    <button class="icon-button compact-icon" type="button" title="下移" disabled="@(i == SelectedItems.Count - 1)" @onclick="() => MoveAsync(key, 1)"><i class="bi bi-chevron-down"></i></button>
+                    @if (AllowRemoveFromSelected)
+                    {
+                        <button class="icon-button compact-icon" type="button" title="移到右侧" @onclick="() => RemoveAsync(key)"><i class="bi bi-arrow-right"></i></button>
+                    }
+                </div>
+            </div>
+        }
+        @SelectedFooterTemplate
+    </div>
+    <div class="priority-lane" @ondragover:preventDefault @ondrop="DropToAvailableAsync">
+        <div class="priority-lane-heading">
+            <strong>@AvailableTitle</strong>
+            <small>@AvailableSubtitle</small>
+        </div>
+        @if (AvailableItems.Count == 0 && !string.IsNullOrWhiteSpace(EmptyAvailableText))
+        {
+            <div class="priority-empty">@EmptyAvailableText</div>
+        }
+        @foreach (var item in AvailableItems)
+        {
+            var key = GetKey(item);
+            <div class="priority-row draggable" draggable="true" @ondragstart="() => StartDrag(key, false)" @ondblclick="() => AddAsync(key)">
+                <span class="priority-index"><i class="bi @AvailableIcon"></i></span>
+                <div class="priority-copy">
+                    <strong>@ItemLabel(item)</strong>
+                    @if (ItemDescription is not null)
+                    {
+                        <small>@ItemDescription(item)</small>
+                    }
+                </div>
+                <div class="priority-actions">
+                    <button class="icon-button compact-icon" type="button" title="@AvailableActionTitle" @onclick="() => AddAsync(key)">
+                        <i class="bi @AvailableActionIcon"></i>
+                    </button>
+                </div>
+            </div>
+        }
+    </div>
+</div>
+
+@code {
+    [Parameter, EditorRequired] public IReadOnlyList<TItem> SelectedItems { get; set; } = [];
+    [Parameter, EditorRequired] public IReadOnlyList<TItem> AvailableItems { get; set; } = [];
+    [Parameter, EditorRequired] public Func<TItem, string> KeySelector { get; set; } = null!;
+    [Parameter, EditorRequired] public Func<TItem, string> ItemLabel { get; set; } = null!;
+    [Parameter] public Func<TItem, string>? ItemDescription { get; set; }
+    [Parameter] public EventCallback<IReadOnlyList<TItem>> SelectedItemsChanged { get; set; }
+    [Parameter] public string SelectedTitle { get; set; } = "已选择";
+    [Parameter] public string SelectedSubtitle { get; set; } = "可拖拽调整顺序";
+    [Parameter] public string AvailableTitle { get; set; } = "可选择";
+    [Parameter] public string AvailableSubtitle { get; set; } = "拖到左侧使用";
+    [Parameter] public string EmptySelectedText { get; set; } = "暂无选择";
+    [Parameter] public string EmptyAvailableText { get; set; } = "暂无可选择项";
+    [Parameter] public bool AllowRemoveFromSelected { get; set; }
+    [Parameter] public bool AvailableAddsToTop { get; set; }
+    [Parameter] public string AvailableIcon { get; set; } = "bi-plus";
+    [Parameter] public string AvailableActionIcon { get; set; } = "bi-arrow-left";
+    [Parameter] public string AvailableActionTitle { get; set; } = "移到左侧";
+    [Parameter] public string? CssClass { get; set; }
+    [Parameter] public RenderFragment? SelectedFooterTemplate { get; set; }
+
+    private string? _dragKey;
+    private bool _dragFromSelected;
+
+    private string GetKey(TItem item) => KeySelector(item);
+
+    private IReadOnlyDictionary<string, TItem> ItemLookup =>
+        SelectedItems.Concat(AvailableItems)
+            .GroupBy(GetKey, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
+
+    private void StartDrag(string key, bool fromSelected)
+    {
+        _dragKey = key;
+        _dragFromSelected = fromSelected;
+    }
+
+    private async Task DropOnSelectedAsync(string targetKey)
+    {
+        if (string.IsNullOrWhiteSpace(_dragKey) || _dragKey.Equals(targetKey, StringComparison.OrdinalIgnoreCase))
+        {
+            ClearDrag();
+            return;
+        }
+
+        var items = SelectedItems.ToList();
+        var lookup = ItemLookup;
+        items.RemoveAll(item => GetKey(item).Equals(_dragKey, StringComparison.OrdinalIgnoreCase));
+        if (!lookup.TryGetValue(_dragKey, out var dragged))
+        {
+            ClearDrag();
+            return;
+        }
+
+        var targetIndex = items.FindIndex(item => GetKey(item).Equals(targetKey, StringComparison.OrdinalIgnoreCase));
+        if (targetIndex < 0) targetIndex = items.Count;
+        items.Insert(targetIndex, dragged);
+        ClearDrag();
+        await SelectedItemsChanged.InvokeAsync(items);
+    }
+
+    private async Task DropSelectedAtEndAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_dragKey))
+        {
+            return;
+        }
+
+        var items = SelectedItems.ToList();
+        var lookup = ItemLookup;
+        items.RemoveAll(item => GetKey(item).Equals(_dragKey, StringComparison.OrdinalIgnoreCase));
+        if (lookup.TryGetValue(_dragKey, out var dragged))
+        {
+            items.Add(dragged);
+        }
+
+        ClearDrag();
+        await SelectedItemsChanged.InvokeAsync(items);
+    }
+
+    private async Task DropToAvailableAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_dragKey) || !_dragFromSelected || !AllowRemoveFromSelected)
+        {
+            ClearDrag();
+            return;
+        }
+
+        await RemoveAsync(_dragKey);
+        ClearDrag();
+    }
+
+    private async Task AddAsync(string key)
+    {
+        var items = SelectedItems.ToList();
+        var lookup = ItemLookup;
+        items.RemoveAll(item => GetKey(item).Equals(key, StringComparison.OrdinalIgnoreCase));
+        if (!lookup.TryGetValue(key, out var item))
+        {
+            return;
+        }
+
+        if (AvailableAddsToTop)
+        {
+            items.Insert(0, item);
+        }
+        else
+        {
+            items.Add(item);
+        }
+
+        await SelectedItemsChanged.InvokeAsync(items);
+    }
+
+    private async Task RemoveAsync(string key)
+    {
+        var items = SelectedItems.Where(item => !GetKey(item).Equals(key, StringComparison.OrdinalIgnoreCase)).ToList();
+        await SelectedItemsChanged.InvokeAsync(items);
+    }
+
+    private async Task MoveAsync(string key, int delta)
+    {
+        var items = SelectedItems.ToList();
+        var index = items.FindIndex(item => GetKey(item).Equals(key, StringComparison.OrdinalIgnoreCase));
+        var target = index + delta;
+        if (index < 0 || target < 0 || target >= items.Count)
+        {
+            return;
+        }
+
+        var item = items[index];
+        items.RemoveAt(index);
+        items.Insert(target, item);
+        await SelectedItemsChanged.InvokeAsync(items);
+    }
+
+    private void ClearDrag()
+    {
+        _dragKey = null;
+        _dragFromSelected = false;
+    }
+}

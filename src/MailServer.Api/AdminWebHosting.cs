@@ -56,6 +56,7 @@ public static class AdminWebHosting
         services.AddCascadingAuthenticationState();
         services.AddAntiforgery();
         services.AddHttpContextAccessor();
+        services.AddScoped<AdminToastService>();
         services.AddHttpsRedirection(redirect =>
         {
             redirect.HttpsPort = options.Https.Port;
@@ -96,7 +97,7 @@ public static class AdminWebHosting
             {
                 new Claim(ClaimTypes.NameIdentifier, admin.Id.ToString()),
                 new Claim(ClaimTypes.Name, admin.UserName),
-                new Claim("scope", "admin")
+                new Claim("auth_type", "admin")
             };
             await context.SignInAsync(
                 CookieScheme,
@@ -114,6 +115,40 @@ public static class AdminWebHosting
             await antiforgery.ValidateRequestAsync(context);
             await context.SignOutAsync(CookieScheme);
             return Results.Redirect("/admin/login");
+        }).RequireAuthorization();
+
+        app.MapGet("/admin/delivery-queue/{id:guid}/download", async (
+            Guid id,
+            Guid? routeDomainId,
+            HttpContext context,
+            AdminApplicationService administration,
+            PermissionService permissions) =>
+        {
+            var snapshot = await permissions.GetSnapshotAsync(context.User, context.RequestAborted);
+            var allowed = routeDomainId is { } domainId
+                ? snapshot.Has(PermissionCodes.DomainRead, domainId)
+                : snapshot.Has(PermissionCodes.QueueRead);
+            if (!allowed)
+            {
+                return Results.Forbid();
+            }
+
+            try
+            {
+                var download = await administration.OpenDeliveryMessageDownloadAsync(
+                    id,
+                    context.RequestAborted,
+                    routeDomainId);
+                return Results.Stream(download.Content, "message/rfc822", download.FileName);
+            }
+            catch (KeyNotFoundException)
+            {
+                return Results.NotFound();
+            }
+            catch (FileNotFoundException exception)
+            {
+                return Results.NotFound(new { error = exception.Message });
+            }
         }).RequireAuthorization();
 
         app.MapRazorComponents<App>().AddInteractiveServerRenderMode();

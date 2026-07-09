@@ -1,0 +1,67 @@
+{
+  "id": "mailserver-mime-validation",
+  "system": true,
+  "displayName": "MIME 安全验证",
+  "description": "验证 MIME 结构、8BITMIME 声明、部件数量和嵌套深度。",
+  "version": "1.0.0",
+  "contractVersion": "1.0",
+  "entryAssembly": "MailServer.MimePlugin.dll",
+  "order": 10,
+  "hosts": [ "smtp" ],
+  "timeoutMilliseconds": 10000,
+  "failureMode": "reject",
+  "defaultEnabled": true,
+  "settings": [
+    {
+      "key": "requireEightBitMimeDeclaration",
+      "type": "Boolean",
+      "label": "要求声明 8BITMIME",
+      "description": "正文包含8位字节时，MAIL FROM必须声明BODY=8BITMIME。",
+      "defaultValue": true
+    },
+    {
+      "key": "validateMimeStructure",
+      "type": "Boolean",
+      "label": "验证 MIME 结构",
+      "description": "拒绝无法解析或结构异常的MIME消息。",
+      "defaultValue": true
+    },
+    {
+      "key": "maximumMimeParts",
+      "type": "Integer",
+      "label": "最大 MIME 部件数",
+      "description": "包含multipart容器在内的最大部件数量。",
+      "defaultValue": 1000,
+      "minimum": 1,
+      "maximum": 10000
+    },
+    {
+      "key": "maximumNestingDepth",
+      "type": "Integer",
+      "label": "最大嵌套深度",
+      "defaultValue": 30,
+      "minimum": 1,
+      "maximum": 100
+    },
+    {
+      "key": "emptyBodyPolicy",
+      "type": "Select",
+      "label": "空邮件策略",
+      "defaultValue": "accept",
+      "options": [
+        { "value": "accept", "label": "接受" },
+        { "value": "reject", "label": "拒绝" }
+      ]
+    },
+    {
+      "key": "headerOnlyPolicy",
+      "type": "Select",
+      "label": "仅邮件头策略",
+      "defaultValue": "accept",
+      "options": [
+        { "value": "accept", "label": "接受" },
+        { "value": "reject", "label": "拒绝" }
+      ]
+    }
+  ]
+}

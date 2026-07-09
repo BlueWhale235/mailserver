@@ -1,0 +1,291 @@
+@page "/admin/plugins"
+@attribute [Authorize]
+@inject PluginSettingsService PluginsService
+@inject AuthenticationStateProvider Authentication
+@inject PermissionService Permissions
+@inject AdminToastService Toasts
+
+<PageTitle>插件配置</PageTitle>
+
+<AdminPageHeader Title="插件配置" Description="查看已安装插件并管理启用状态和运行参数。" />
+
+@if (!_permissionLoaded)
+{
+    <div class="loading-row"><span class="spinner-border spinner-border-sm"></span> 正在加载</div>
+}
+else if (!Can(PermissionCodes.SettingsDetail))
+{
+    <AccessDeniedPanel />
+}
+else
+{
+    <section class="panel">
+        <ServerDataGrid @ref="_grid"
+                        TItem="PluginListItem"
+                        LoadData="LoadPluginsAsync"
+                        SearchPlaceholder="搜索插件"
+                        EmptyText="没有发现插件"
+                        ColumnCount="5">
+            <HeaderTemplate>
+                <th>顺序</th>
+                <th>插件</th>
+                <th>描述</th>
+                <th>启用状态</th>
+                <th class="actions-cell">操作</th>
+            </HeaderTemplate>
+            <RowTemplate Context="plugin">
+                <td>
+                    <div class="plugin-order-actions">
+                        <span>@plugin.EffectiveOrder</span>
+                        <button class="btn btn-outline-secondary admin-btn" type="button"
+                                disabled="@(!Can(PermissionCodes.SettingsUpdate) || _savingOrder)"
+                                title="上移"
+                                @onclick="() => MovePluginAsync(plugin.Id, -1)"
+                                @onclick:stopPropagation>↑</button>
+                        <button class="btn btn-outline-secondary admin-btn" type="button"
+                                disabled="@(!Can(PermissionCodes.SettingsUpdate) || _savingOrder)"
+                                title="下移"
+                                @onclick="() => MovePluginAsync(plugin.Id, 1)"
+                                @onclick:stopPropagation>↓</button>
+                    </div>
+                </td>
+                <td>
+                    <strong>@plugin.DisplayName</strong>
+                    <span class="status-pill @(plugin.System ? "status-info" : "status-disabled")">@(plugin.System ? "系统插件" : "第三方插件")</span>
+                    <small class="d-block muted">@plugin.Id · @plugin.Version</small>
+                </td>
+                <td>
+                    @plugin.Description
+                    @if (!string.IsNullOrWhiteSpace(plugin.LoadError))
+                    {
+                        <small class="d-block text-danger">加载失败：@plugin.LoadError</small>
+                    }
+                    else if (!plugin.IsHostActive)
+                    {
+                        <small class="d-block muted">此管理进程不执行该插件；插件将在适用的服务中运行。</small>
+                    }
+                </td>
+                <td><span class="status-pill @(plugin.Enabled && plugin.LoadError is null ? "status-enabled" : "status-disabled")">@(plugin.LoadError is not null ? "加载失败" : plugin.Enabled ? "已启用" : "已停用")</span></td>
+                <td class="actions-cell">
+                    <button class="btn btn-outline-primary admin-btn" type="button"
+                            disabled="@(!Can(PermissionCodes.SettingsUpdate))"
+                            @onclick="() => OpenEditorAsync(plugin.Id)">编辑</button>
+                </td>
+            </RowTemplate>
+        </ServerDataGrid>
+    </section>
+}
+
+@if (_configuration is not null)
+{
+    <div class="modal-backdrop" @onclick="CloseEditor">
+        <div class="modal-panel plugin-editor-panel" role="dialog" aria-modal="true"
+             aria-labelledby="plugin-editor-title" @onclick:stopPropagation>
+            <div class="modal-header">
+                <div>
+                    <h2 id="plugin-editor-title">@_configuration.Plugin.DisplayName</h2>
+                    <p>@_configuration.Plugin.Description</p>
+                </div>
+                <button class="icon-button" type="button" title="关闭" disabled="@_saving" @onclick="CloseEditor"><i class="bi bi-x-lg"></i></button>
+            </div>
+
+            <SwitchField Label="启用插件"
+                         Description="关闭后Pipeline会从下一封邮件开始跳过该插件。"
+                         CssClass="switch-card"
+                         @bind-Value="_enabled" />
+
+            <div class="plugin-settings-form">
+                @foreach (var definition in _configuration.Definitions)
+                {
+                    <div class="form-field">
+                        @if (definition.Type == PluginSettingType.Boolean)
+                        {
+                            <SwitchField Label="@definition.Label"
+                                         Description="@definition.Description"
+                                         Value="@GetBoolean(definition.Key)"
+                                         ValueChanged="value => SetBoolean(definition.Key, value)" />
+                        }
+                        else
+                        {
+                            <label for="@FieldId(definition.Key)">@definition.Label</label>
+                            @if (!string.IsNullOrWhiteSpace(definition.Description))
+                            {
+                                <small class="muted">@definition.Description</small>
+                            }
+                            @switch (definition.Type)
+                            {
+                                case PluginSettingType.Integer:
+                                    <input id="@FieldId(definition.Key)" class="form-control" type="number"
+                                           min="@definition.Minimum" max="@definition.Maximum"
+                                           value="@GetText(definition.Key)"
+                                           @oninput="args => SetText(definition.Key, args.Value?.ToString())" />
+                                    break;
+                                case PluginSettingType.Select:
+                                    <SelectDropdown TValue="string"
+                                                    Value="@GetText(definition.Key)"
+                                                    ValueChanged="value => SetText(definition.Key, value)"
+                                                    Options="@definition.Options.Select(x => new AdminSelectOption<string>(x.Value, x.Label)).ToArray()"
+                                                    AriaLabel="@definition.Label" />
+                                    break;
+                                case PluginSettingType.Multiselect:
+                                    <MultiSelectDropdown TItem="PluginSettingOption" TValue="string"
+                                                         Items="@definition.Options"
+                                                         ValueSelector="option => option.Value"
+                                                         TextSelector="option => option.Label"
+                                                         SelectedValues="@GetMultiple(definition.Key)"
+                                                         SelectedValuesChanged="values => SetMultiple(definition.Key, values)"
+                                                         AriaLabel="@definition.Label" />
+                                    break;
+                                case PluginSettingType.Password:
+                                    <input id="@FieldId(definition.Key)" class="form-control" type="password"
+                                           value="@GetText(definition.Key)" autocomplete="new-password"
+                                           placeholder="@(_hasSecrets.Contains(definition.Key) ? "已配置；留空保持不变" : definition.Placeholder)"
+                                           @oninput="args => SetText(definition.Key, args.Value?.ToString())" />
+                                    @if (_hasSecrets.Contains(definition.Key))
+                                    {
+                                        <button class="btn btn-outline-secondary admin-btn plugin-clear-secret" type="button"
+                                                @onclick="() => ClearSecret(definition.Key)">清除已保存密码</button>
+                                    }
+                                    break;
+                                default:
+                                    <input id="@FieldId(definition.Key)" class="form-control"
+                                           value="@GetText(definition.Key)" placeholder="@definition.Placeholder"
+                                           @oninput="args => SetText(definition.Key, args.Value?.ToString())" />
+                                    break;
+                            }
+                        }
+                    </div>
+                }
+            </div>
+            <div class="modal-actions">
+                <button class="btn btn-outline-secondary admin-btn" type="button" disabled="@_saving" @onclick="CloseEditor">取消</button>
+                <button class="btn btn-primary admin-btn" type="button" disabled="@_saving" @onclick="SaveAsync">
+                    @if (_saving) { <span class="spinner-border spinner-border-sm"></span> }
+                    保存
+                </button>
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    private bool _permissionLoaded;
+    private PermissionSnapshot _permissions = new();
+    private PluginConfigurationView? _configuration;
+    private bool _enabled;
+    private bool _saving;
+    private bool _savingOrder;
+    private ServerDataGrid<PluginListItem>? _grid;
+    private readonly Dictionary<string, string> _text = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, bool> _booleans = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, IReadOnlySet<string>> _multiple = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _hasSecrets = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _clearedSecrets = new(StringComparer.OrdinalIgnoreCase);
+
+    protected override async Task OnInitializedAsync()
+    {
+        var user = (await Authentication.GetAuthenticationStateAsync()).User;
+        _permissions = await Permissions.GetSnapshotAsync(user, CancellationToken.None);
+        _permissionLoaded = true;
+    }
+
+    private async Task<PagedResult<PluginListItem>> LoadPluginsAsync(string search, int page, int pageSize)
+    {
+        var items = await PluginsService.ListAsync(CancellationToken.None);
+        var filtered = string.IsNullOrWhiteSpace(search)
+            ? items
+            : items.Where(x => x.DisplayName.Contains(search, StringComparison.OrdinalIgnoreCase)
+                               || x.Id.Contains(search, StringComparison.OrdinalIgnoreCase)
+                               || x.Description.Contains(search, StringComparison.OrdinalIgnoreCase)).ToArray();
+        return new PagedResult<PluginListItem>(
+            filtered.Skip((page - 1) * pageSize).Take(pageSize).ToArray(),
+            page, pageSize, filtered.Count);
+    }
+
+    private async Task MovePluginAsync(string id, int offset)
+    {
+        if (_savingOrder || !Can(PermissionCodes.SettingsUpdate)) return;
+        _savingOrder = true;
+        try
+        {
+            var items = (await PluginsService.ListAsync(CancellationToken.None)).ToList();
+            var index = items.FindIndex(x => x.Id.Equals(id, StringComparison.OrdinalIgnoreCase));
+            var target = index + offset;
+            if (index < 0 || target < 0 || target >= items.Count) return;
+            (items[index], items[target]) = (items[target], items[index]);
+            await PluginsService.SaveOrderAsync(items.Select(x => x.Id).ToArray(), CancellationToken.None);
+            Toasts.Success("插件顺序已保存");
+            if (_grid is not null) await _grid.RefreshAsync();
+        }
+        catch (Exception exception)
+        {
+            Toasts.Error(exception.Message);
+        }
+        finally
+        {
+            _savingOrder = false;
+        }
+    }
+
+    private async Task OpenEditorAsync(string id)
+    {
+        _configuration = await PluginsService.GetConfigurationAsync(id, CancellationToken.None);
+        _enabled = _configuration.Plugin.Enabled;
+        _text.Clear(); _booleans.Clear(); _multiple.Clear(); _hasSecrets.Clear(); _clearedSecrets.Clear();
+        foreach (var item in _configuration.Values)
+        {
+            if (item.HasSecret) _hasSecrets.Add(item.Key);
+            if (item.Value is not { } value) continue;
+            if (value.ValueKind is JsonValueKind.True or JsonValueKind.False) _booleans[item.Key] = value.GetBoolean();
+            else if (value.ValueKind == JsonValueKind.Array) _multiple[item.Key] = value.EnumerateArray().Select(x => x.GetString()!).ToHashSet();
+            else _text[item.Key] = value.ToString();
+        }
+    }
+
+    private async Task SaveAsync()
+    {
+        if (_configuration is null || _saving) return;
+        _saving = true;
+        try
+        {
+            var values = new Dictionary<string, JsonElement>(StringComparer.OrdinalIgnoreCase);
+            foreach (var definition in _configuration.Definitions)
+            {
+                if (definition.Type == PluginSettingType.Password)
+                {
+                    if (!string.IsNullOrEmpty(GetText(definition.Key)))
+                        values[definition.Key] = JsonSerializer.SerializeToElement(GetText(definition.Key));
+                }
+                else if (definition.Type == PluginSettingType.Boolean)
+                    values[definition.Key] = JsonSerializer.SerializeToElement(GetBoolean(definition.Key));
+                else if (definition.Type == PluginSettingType.Integer
+                         && int.TryParse(GetText(definition.Key), out var number))
+                    values[definition.Key] = JsonSerializer.SerializeToElement(number);
+                else if (definition.Type == PluginSettingType.Multiselect)
+                    values[definition.Key] = JsonSerializer.SerializeToElement(GetMultiple(definition.Key));
+                else
+                    values[definition.Key] = JsonSerializer.SerializeToElement(GetText(definition.Key));
+            }
+            await PluginsService.SaveAsync(
+                _configuration.Plugin.Id, _enabled, values, _clearedSecrets, CancellationToken.None);
+            Toasts.Success("插件配置已保存");
+            _configuration = null;
+        }
+        catch (Exception exception)
+        {
+            Toasts.Error(exception.Message);
+        }
+        finally { _saving = false; }
+    }
+
+    private bool GetBoolean(string key) => _booleans.GetValueOrDefault(key);
+    private void SetBoolean(string key, bool value) => _booleans[key] = value;
+    private string GetText(string key) => _text.GetValueOrDefault(key, string.Empty);
+    private void SetText(string key, string? value) => _text[key] = value ?? string.Empty;
+    private IReadOnlySet<string> GetMultiple(string key) => _multiple.GetValueOrDefault(key, new HashSet<string>());
+    private void SetMultiple(string key, IReadOnlySet<string> value) => _multiple[key] = value;
+    private void ClearSecret(string key) { _clearedSecrets.Add(key); _hasSecrets.Remove(key); _text.Remove(key); }
+    private void CloseEditor() { if (!_saving) _configuration = null; }
+    private bool Can(string code) => _permissions.Has(code);
+    private static string FieldId(string key) => $"plugin-setting-{key}";
+}

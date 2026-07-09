@@ -1,0 +1,98 @@
+@inject IAntiforgery Antiforgery
+@inject IHttpContextAccessor Http
+@inject IJSRuntime JS
+
+<div class="admin-shell @ShellClass">
+    <header class="admin-topbar">
+        <button class="icon-button topbar-menu" type="button" @onclick="ToggleDrawerAsync" aria-label="切换导航">
+            <i class="bi bi-list"></i>
+        </button>
+        <div class="topbar-spacer"></div>
+        <button class="icon-button topbar-theme" type="button" @onclick="ToggleThemeAsync" aria-label="切换深浅主题" title="@(_isDarkMode ? "切换到浅色主题" : "切换到深色主题")">
+            <i class="bi @(_isDarkMode ? "bi-sun-fill" : "bi-moon-fill")"></i>
+        </button>
+        <AuthorizeView>
+            <Authorized>
+                <span class="admin-user-badge">@context.User.Identity?.Name</span>
+                <form method="post" action="/admin/logout" class="logout-form">
+                    <input type="hidden" name="__RequestVerificationToken" value="@Token" />
+                    <button class="icon-button" type="submit" aria-label="退出登录" title="退出登录">
+                        <i class="bi bi-box-arrow-right"></i>
+                    </button>
+                </form>
+            </Authorized>
+        </AuthorizeView>
+    </header>
+
+    <aside class="admin-sidebar">
+        <a class="admin-brand" href="/admin" aria-label="MailServer 管理后台">
+            <span class="admin-brand-mark">M</span>
+            <span class="admin-brand-copy"><strong>MailServer</strong><small>管理后台</small></span>
+        </a>
+        @Navigation
+    </aside>
+    <button class="drawer-scrim" type="button" aria-label="关闭导航" @onclick="CloseMobileDrawer"></button>
+
+    <main class="admin-main">
+        <section class="admin-content">
+            @if (Http.HttpContext is { Request.IsHttps: false, Connection.RemoteIpAddress: { } remote }
+                 && !System.Net.IPAddress.IsLoopback(remote))
+            {
+                <div class="alert alert-warning security-alert" role="alert">
+                    <i class="bi bi-exclamation-triangle"></i>
+                    当前未启用 HTTPS 加密，生产环境存在安全风险。
+                </div>
+            }
+            @ChildContent
+        </section>
+    </main>
+</div>
+<ToastHost />
+
+@code {
+    [Parameter, EditorRequired] public RenderFragment Navigation { get; set; } = null!;
+    [Parameter, EditorRequired] public RenderFragment ChildContent { get; set; } = null!;
+
+    private bool _isDarkMode;
+    private bool _mobileDrawerOpen;
+    private bool _sidebarCollapsed;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender)
+        {
+            return;
+        }
+
+        var current = await JS.InvokeAsync<string>("mailserverTheme.current");
+        _isDarkMode = string.Equals(current, "dark", StringComparison.OrdinalIgnoreCase);
+        StateHasChanged();
+    }
+
+    private string ShellClass =>
+        $"{(_mobileDrawerOpen ? "drawer-open" : "drawer-closed")} {(_sidebarCollapsed ? "sidebar-collapsed" : "sidebar-expanded")}";
+
+    private async Task ToggleDrawerAsync()
+    {
+        var isNarrow = await JS.InvokeAsync<bool>("mailserverLayout.isNarrow");
+        if (isNarrow)
+        {
+            _mobileDrawerOpen = !_mobileDrawerOpen;
+            return;
+        }
+
+        _sidebarCollapsed = !_sidebarCollapsed;
+    }
+
+    private void CloseMobileDrawer() => _mobileDrawerOpen = false;
+
+    private async Task ToggleThemeAsync()
+    {
+        _isDarkMode = !_isDarkMode;
+        await JS.InvokeVoidAsync("mailserverTheme.set", _isDarkMode ? "dark" : "light");
+    }
+
+    private string Token => Http.HttpContext is null
+        ? string.Empty
+        : Antiforgery.GetAndStoreTokens(Http.HttpContext).RequestToken ?? string.Empty;
+}

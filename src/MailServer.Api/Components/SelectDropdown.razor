@@ -1,0 +1,135 @@
+@typeparam TValue
+@implements IAsyncDisposable
+@inject IJSRuntime JS
+
+<div class="admin-select @CssClass @(_open ? "open" : null)" @ref="_root">
+    <button class="admin-select-trigger" type="button" disabled="@Disabled"
+            aria-label="@AriaLabel" aria-haspopup="listbox" aria-expanded="@_open"
+            @onclick="ToggleOpen">
+        <span>@SelectedLabel</span>
+        <i class="bi bi-chevron-down" aria-hidden="true"></i>
+    </button>
+    @if (_open)
+    {
+        <div class="admin-select-menu" role="listbox" aria-label="@AriaLabel" @onclick:stopPropagation>
+            @foreach (var option in Options)
+            {
+                var selected = IsSelected(option.Value);
+                <button class="admin-select-option @(selected ? "selected" : null)" type="button"
+                        role="option" aria-selected="@selected" disabled="@option.Disabled"
+                        @onclick="() => SelectAsync(option.Value)">
+                    <span class="admin-select-option-mark" aria-hidden="true">
+                        @if (selected)
+                        {
+                            <i class="bi bi-check-lg"></i>
+                        }
+                    </span>
+                    <span>@option.Label</span>
+                </button>
+            }
+        </div>
+    }
+</div>
+
+@code {
+    [Parameter] public TValue? Value { get; set; }
+    [Parameter] public EventCallback<TValue?> ValueChanged { get; set; }
+    [Parameter] public IReadOnlyList<AdminSelectOption<TValue>> Options { get; set; } = [];
+    [Parameter] public string Placeholder { get; set; } = "请选择";
+    [Parameter] public string? AriaLabel { get; set; }
+    [Parameter] public string? CssClass { get; set; }
+    [Parameter] public bool Disabled { get; set; }
+
+    private bool _open;
+    private ElementReference _root;
+    private DotNetObjectReference<SelectDropdown<TValue>>? _dotNetReference;
+    private string? _dropdownId;
+
+    private string SelectedLabel => Options.FirstOrDefault(option => IsSelected(option.Value))?.Label ?? Placeholder;
+
+    private bool IsSelected(TValue value) => EqualityComparer<TValue?>.Default.Equals(Value, value);
+
+    private async Task ToggleOpen()
+    {
+        if (Disabled)
+        {
+            return;
+        }
+
+        if (_open)
+        {
+            await CloseAsync();
+            return;
+        }
+
+        _open = true;
+        await RegisterAsync();
+    }
+
+    private async Task CloseAsync()
+    {
+        _open = false;
+        await UnregisterAsync();
+    }
+
+    [JSInvokable]
+    public async Task CloseFromOutsideAsync()
+    {
+        if (!_open)
+        {
+            return;
+        }
+
+        _open = false;
+        await UnregisterAsync();
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task SelectAsync(TValue value)
+    {
+        if (Disabled)
+        {
+            return;
+        }
+
+        _open = false;
+        await UnregisterAsync();
+        if (IsSelected(value))
+        {
+            return;
+        }
+
+        Value = value;
+        await ValueChanged.InvokeAsync(value);
+    }
+
+    private async Task RegisterAsync()
+    {
+        _dotNetReference ??= DotNetObjectReference.Create(this);
+        _dropdownId = await JS.InvokeAsync<string>("mailserverDropdowns.register", _root, _dotNetReference);
+    }
+
+    private async Task UnregisterAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_dropdownId))
+        {
+            return;
+        }
+
+        try
+        {
+            await JS.InvokeVoidAsync("mailserverDropdowns.unregister", _dropdownId);
+        }
+        catch (JSDisconnectedException)
+        {
+        }
+
+        _dropdownId = null;
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        await UnregisterAsync();
+        _dotNetReference?.Dispose();
+    }
+}

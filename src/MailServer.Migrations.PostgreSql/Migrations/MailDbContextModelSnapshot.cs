@@ -61,7 +61,15 @@ namespace MailServer.Migrations.PostgreSql.Migrations
                     b.Property<DateTimeOffset>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<string>("CreatedBy")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
                     b.Property<DateTimeOffset?>("ExpiresAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTimeOffset?>("LastUsedAt")
                         .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Name")
@@ -77,17 +85,14 @@ namespace MailServer.Migrations.PostgreSql.Migrations
                     b.Property<DateTimeOffset?>("RevokedAt")
                         .HasColumnType("timestamp with time zone");
 
-                    b.Property<string>("Scopes")
-                        .IsRequired()
-                        .HasMaxLength(1024)
-                        .HasColumnType("character varying(1024)");
-
                     b.Property<string>("SecretHash")
                         .IsRequired()
                         .HasMaxLength(128)
                         .HasColumnType("character varying(128)");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("LastUsedAt");
 
                     b.HasIndex("Prefix")
                         .IsUnique();
@@ -179,6 +184,9 @@ namespace MailServer.Migrations.PostgreSql.Migrations
                     b.Property<DateTimeOffset>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<int>("ForwardDepth")
+                        .HasColumnType("integer");
+
                     b.Property<string>("LastError")
                         .HasColumnType("text");
 
@@ -195,10 +203,16 @@ namespace MailServer.Migrations.PostgreSql.Migrations
                     b.Property<DateTimeOffset>("NextAttemptAt")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<Guid?>("OriginRuleId")
+                        .HasColumnType("uuid");
+
                     b.Property<string>("Recipient")
                         .IsRequired()
                         .HasMaxLength(320)
                         .HasColumnType("character varying(320)");
+
+                    b.Property<Guid?>("RouteDomainId")
+                        .HasColumnType("uuid");
 
                     b.Property<string>("RouteMode")
                         .IsRequired()
@@ -222,9 +236,238 @@ namespace MailServer.Migrations.PostgreSql.Migrations
 
                     b.HasIndex("MessageId");
 
+                    b.HasIndex("OriginRuleId");
+
+                    b.HasIndex("RouteDomainId");
+
                     b.HasIndex("Status", "NextAttemptAt");
 
                     b.ToTable("delivery_jobs", (string)null);
+                });
+
+            modelBuilder.Entity("MailServer.Domain.DomainCertificate", b =>
+                {
+                    b.Property<Guid>("DomainId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("CertificatePath")
+                        .IsRequired()
+                        .HasMaxLength(2048)
+                        .HasColumnType("character varying(2048)");
+
+                    b.Property<string>("Issuer")
+                        .IsRequired()
+                        .HasMaxLength(1024)
+                        .HasColumnType("character varying(1024)");
+
+                    b.Property<DateTimeOffset>("NotAfter")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTimeOffset>("NotBefore")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("PrivateKeyPath")
+                        .IsRequired()
+                        .HasMaxLength(2048)
+                        .HasColumnType("character varying(2048)");
+
+                    b.Property<string>("Source")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<string>("Subject")
+                        .IsRequired()
+                        .HasMaxLength(1024)
+                        .HasColumnType("character varying(1024)");
+
+                    b.Property<string>("SubjectAlternativeNames")
+                        .IsRequired()
+                        .HasMaxLength(4096)
+                        .HasColumnType("character varying(4096)");
+
+                    b.Property<string>("Thumbprint")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("DomainId");
+
+                    b.ToTable("domain_certificates", (string)null);
+                });
+
+            modelBuilder.Entity("MailServer.Domain.DomainDnsCheck", b =>
+                {
+                    b.Property<Guid>("DomainId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset?>("CheckedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("DetailsJson")
+                        .IsRequired()
+                        .HasMaxLength(32768)
+                        .HasColumnType("character varying(32768)");
+
+                    b.Property<string>("LastError")
+                        .HasMaxLength(4096)
+                        .HasColumnType("character varying(4096)");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.HasKey("DomainId");
+
+                    b.ToTable("domain_dns_checks", (string)null);
+                });
+
+            modelBuilder.Entity("MailServer.Domain.DomainDnsSettings", b =>
+                {
+                    b.Property<Guid>("DomainId")
+                        .HasColumnType("uuid");
+
+                    b.Property<bool>("DaneEnabled")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("DaneTlsaRecords")
+                        .IsRequired()
+                        .HasMaxLength(8192)
+                        .HasColumnType("character varying(8192)");
+
+                    b.Property<string>("DmarcAggregateReportUris")
+                        .IsRequired()
+                        .HasMaxLength(4096)
+                        .HasColumnType("character varying(4096)");
+
+                    b.Property<string>("DmarcDkimAlignment")
+                        .IsRequired()
+                        .HasMaxLength(4)
+                        .HasColumnType("character varying(4)");
+
+                    b.Property<string>("DmarcFailureOptions")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<string>("DmarcForensicReportUris")
+                        .IsRequired()
+                        .HasMaxLength(4096)
+                        .HasColumnType("character varying(4096)");
+
+                    b.Property<int>("DmarcPercentage")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("DmarcPolicy")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)");
+
+                    b.Property<string>("DmarcSpfAlignment")
+                        .IsRequired()
+                        .HasMaxLength(4)
+                        .HasColumnType("character varying(4)");
+
+                    b.Property<string>("DmarcSubdomainPolicy")
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)");
+
+                    b.Property<int>("MtaStsMaxAgeSeconds")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("MtaStsMode")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)");
+
+                    b.Property<string>("MtaStsMxPatterns")
+                        .IsRequired()
+                        .HasMaxLength(4096)
+                        .HasColumnType("character varying(4096)");
+
+                    b.Property<string>("MtaStsPolicyId")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<string>("SpfAllPolicy")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)");
+
+                    b.Property<string>("SpfCustomMechanisms")
+                        .IsRequired()
+                        .HasMaxLength(4096)
+                        .HasColumnType("character varying(4096)");
+
+                    b.Property<bool>("SpfIncludeA")
+                        .HasColumnType("boolean");
+
+                    b.Property<bool>("SpfIncludeMx")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("SpfIncludes")
+                        .IsRequired()
+                        .HasMaxLength(4096)
+                        .HasColumnType("character varying(4096)");
+
+                    b.Property<string>("SpfIpv4")
+                        .IsRequired()
+                        .HasMaxLength(4096)
+                        .HasColumnType("character varying(4096)");
+
+                    b.Property<string>("SpfIpv6")
+                        .IsRequired()
+                        .HasMaxLength(4096)
+                        .HasColumnType("character varying(4096)");
+
+                    b.Property<string>("TlsReportUris")
+                        .IsRequired()
+                        .HasMaxLength(4096)
+                        .HasColumnType("character varying(4096)");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("DomainId");
+
+                    b.ToTable("domain_dns_settings", (string)null);
+                });
+
+            modelBuilder.Entity("MailServer.Domain.FirewallRule", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Cidr")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<bool>("IsEnabled")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("Note")
+                        .HasMaxLength(512)
+                        .HasColumnType("character varying(512)");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Cidr")
+                        .IsUnique();
+
+                    b.ToTable("firewall_rules", (string)null);
                 });
 
             modelBuilder.Entity("MailServer.Domain.MailAccount", b =>
@@ -273,22 +516,34 @@ namespace MailServer.Migrations.PostgreSql.Migrations
                         .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("DestinationAddress")
-                        .IsRequired()
                         .HasMaxLength(320)
                         .HasColumnType("character varying(320)");
 
                     b.Property<Guid>("DomainId")
                         .HasColumnType("uuid");
 
+                    b.Property<bool>("IsEnabled")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("Mode")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
                     b.Property<string>("SourceLocalPart")
                         .IsRequired()
                         .HasMaxLength(128)
                         .HasColumnType("character varying(128)");
 
+                    b.Property<Guid?>("TargetAccountId")
+                        .HasColumnType("uuid");
+
                     b.HasKey("Id");
 
                     b.HasIndex("DomainId", "SourceLocalPart")
                         .IsUnique();
+
+                    b.HasIndex("TargetAccountId", "DomainId");
 
                     b.ToTable("mail_aliases", (string)null);
                 });
@@ -302,31 +557,173 @@ namespace MailServer.Migrations.PostgreSql.Migrations
                     b.Property<DateTimeOffset>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<bool>("DirectDeliverSameDomain")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(true);
+
                     b.Property<string>("DkimPrivateKeyPath")
-                        .HasColumnType("text");
+                        .HasMaxLength(2048)
+                        .HasColumnType("character varying(2048)");
+
+                    b.Property<string>("DkimPublicKey")
+                        .HasMaxLength(4096)
+                        .HasColumnType("character varying(4096)");
 
                     b.Property<string>("DkimSelector")
-                        .HasColumnType("text");
+                        .HasMaxLength(63)
+                        .HasColumnType("character varying(63)");
 
                     b.Property<bool>("IsActive")
                         .HasColumnType("boolean");
+
+                    b.Property<string>("MailHostName")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
 
                     b.Property<string>("Name")
                         .IsRequired()
                         .HasMaxLength(255)
                         .HasColumnType("character varying(255)");
 
+                    b.Property<string>("OutboundIpAddresses")
+                        .HasMaxLength(1024)
+                        .HasColumnType("character varying(1024)");
+
                     b.Property<string>("OutboundMode")
                         .IsRequired()
                         .HasMaxLength(32)
                         .HasColumnType("character varying(32)");
 
+                    b.Property<long>("QuotaBytes")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasDefaultValue(10737418240L);
+
+                    b.Property<string>("SmtpHostName")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
                     b.HasKey("Id");
+
+                    b.HasIndex("MailHostName")
+                        .IsUnique();
 
                     b.HasIndex("Name")
                         .IsUnique();
 
                     b.ToTable("mail_domains", (string)null);
+                });
+
+            modelBuilder.Entity("MailServer.Domain.MailRule", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Direction")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<Guid>("DomainId")
+                        .HasColumnType("uuid");
+
+                    b.Property<bool>("IsEnabled")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("MatchMode")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
+
+                    b.Property<int>("Priority")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("TargetMailboxName")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("DomainId", "Direction", "Priority");
+
+                    b.ToTable("mail_rules", (string)null);
+                });
+
+            modelBuilder.Entity("MailServer.Domain.MailRuleAction", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Kind")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<int>("Position")
+                        .HasColumnType("integer");
+
+                    b.Property<Guid>("RuleId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("ValuesJson")
+                        .IsRequired()
+                        .HasMaxLength(4096)
+                        .HasColumnType("character varying(4096)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("RuleId", "Position");
+
+                    b.ToTable("mail_rule_actions", (string)null);
+                });
+
+            modelBuilder.Entity("MailServer.Domain.MailRuleCondition", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Field")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<string>("Operator")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<int>("Position")
+                        .HasColumnType("integer");
+
+                    b.Property<Guid>("RuleId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("ValuesJson")
+                        .IsRequired()
+                        .HasMaxLength(4096)
+                        .HasColumnType("character varying(4096)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("RuleId", "Position");
+
+                    b.ToTable("mail_rule_conditions", (string)null);
                 });
 
             modelBuilder.Entity("MailServer.Domain.Mailbox", b =>
@@ -399,6 +796,182 @@ namespace MailServer.Migrations.PostgreSql.Migrations
                     b.ToTable("mailbox_messages", (string)null);
                 });
 
+            modelBuilder.Entity("MailServer.Domain.MtaStsPolicyCache", b =>
+                {
+                    b.Property<string>("Domain")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<DateTimeOffset>("ExpiresAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTimeOffset>("FetchedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("LastError")
+                        .HasMaxLength(4096)
+                        .HasColumnType("character varying(4096)");
+
+                    b.Property<DateTimeOffset?>("LastRefreshAttemptAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("MaxAgeSeconds")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Mode")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)");
+
+                    b.Property<string>("MxPatterns")
+                        .IsRequired()
+                        .HasMaxLength(4096)
+                        .HasColumnType("character varying(4096)");
+
+                    b.Property<string>("PolicyId")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.HasKey("Domain");
+
+                    b.HasIndex("ExpiresAt");
+
+                    b.ToTable("mta_sts_policy_cache", (string)null);
+                });
+
+            modelBuilder.Entity("MailServer.Domain.PermissionGrant", b =>
+                {
+                    b.Property<string>("SubjectType")
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<Guid>("SubjectId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("PermissionCode")
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
+
+                    b.Property<string>("ResourceType")
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasDefaultValue("");
+
+                    b.Property<string>("ResourceKey")
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)")
+                        .HasDefaultValue("");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("CreatedBy")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.HasKey("SubjectType", "SubjectId", "PermissionCode", "ResourceType", "ResourceKey");
+
+                    b.HasIndex("PermissionCode", "ResourceType", "ResourceKey");
+
+                    b.ToTable("permission_grants", (string)null);
+                });
+
+            modelBuilder.Entity("MailServer.Domain.SentCopyJob", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("AccountId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid?>("ClientMailboxMessageId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset?>("CompletedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTimeOffset>("DeduplicateUntil")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("IdentityKey")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<Guid>("MessageId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset>("ReadyAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid?>("RuleId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid?>("ServerMailboxMessageId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<string>("TargetMailboxName")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("MessageId");
+
+                    b.HasIndex("RuleId");
+
+                    b.HasIndex("AccountId", "DeduplicateUntil");
+
+                    b.HasIndex("State", "ReadyAt");
+
+                    b.ToTable("sent_copy_jobs", (string)null);
+                });
+
+            modelBuilder.Entity("MailServer.Domain.SrsAddressMapping", b =>
+                {
+                    b.Property<string>("Token")
+                        .HasMaxLength(96)
+                        .HasColumnType("character varying(96)");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("DomainId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset>("ExpiresAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("ForwardDepth")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("OriginalSender")
+                        .IsRequired()
+                        .HasMaxLength(320)
+                        .HasColumnType("character varying(320)");
+
+                    b.HasKey("Token");
+
+                    b.HasIndex("DomainId");
+
+                    b.HasIndex("ExpiresAt");
+
+                    b.ToTable("srs_address_mappings", (string)null);
+                });
+
             modelBuilder.Entity("MailServer.Domain.StoredMessage", b =>
                 {
                     b.Property<Guid>("Id")
@@ -432,6 +1005,128 @@ namespace MailServer.Migrations.PostgreSql.Migrations
                     b.ToTable("stored_messages", (string)null);
                 });
 
+            modelBuilder.Entity("MailServer.Domain.SystemSetting", b =>
+                {
+                    b.Property<string>("Key")
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
+
+                    b.Property<string>("Value")
+                        .IsRequired()
+                        .HasMaxLength(8192)
+                        .HasColumnType("character varying(8192)");
+
+                    b.HasKey("Key");
+
+                    b.ToTable("system_settings", (string)null);
+                });
+
+            modelBuilder.Entity("MailServer.Domain.TlsDeliveryEvent", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("FailureReason")
+                        .IsRequired()
+                        .HasMaxLength(4096)
+                        .HasColumnType("character varying(4096)");
+
+                    b.Property<string>("MxHost")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<DateTimeOffset>("OccurredAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("PolicyDomain")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<string>("PolicyString")
+                        .IsRequired()
+                        .HasMaxLength(8192)
+                        .HasColumnType("character varying(8192)");
+
+                    b.Property<string>("PolicyType")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<string>("ReceivingIp")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<bool>("Reported")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("ResultType")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("SendingIp")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Reported", "OccurredAt");
+
+                    b.ToTable("tls_delivery_events", (string)null);
+                });
+
+            modelBuilder.Entity("MailServer.Domain.TlsReportDelivery", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("Attempts")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTimeOffset?>("CompletedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("LastError")
+                        .HasMaxLength(4096)
+                        .HasColumnType("character varying(4096)");
+
+                    b.Property<DateTimeOffset>("NextAttemptAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTimeOffset>("PeriodEnd")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTimeOffset>("PeriodStart")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("PolicyDomain")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<string>("ReportJson")
+                        .IsRequired()
+                        .HasMaxLength(1048576)
+                        .HasColumnType("character varying(1048576)");
+
+                    b.Property<string>("ReportUri")
+                        .IsRequired()
+                        .HasMaxLength(2048)
+                        .HasColumnType("character varying(2048)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CompletedAt", "NextAttemptAt");
+
+                    b.ToTable("tls_report_deliveries", (string)null);
+                });
+
             modelBuilder.Entity("MailServer.Domain.DeliveryAttempt", b =>
                 {
                     b.HasOne("MailServer.Domain.DeliveryJob", "DeliveryJob")
@@ -451,7 +1146,47 @@ namespace MailServer.Migrations.PostgreSql.Migrations
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
 
+                    b.HasOne("MailServer.Domain.MailDomain", "RouteDomain")
+                        .WithMany()
+                        .HasForeignKey("RouteDomainId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
                     b.Navigation("Message");
+
+                    b.Navigation("RouteDomain");
+                });
+
+            modelBuilder.Entity("MailServer.Domain.DomainCertificate", b =>
+                {
+                    b.HasOne("MailServer.Domain.MailDomain", "Domain")
+                        .WithOne("Certificate")
+                        .HasForeignKey("MailServer.Domain.DomainCertificate", "DomainId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Domain");
+                });
+
+            modelBuilder.Entity("MailServer.Domain.DomainDnsCheck", b =>
+                {
+                    b.HasOne("MailServer.Domain.MailDomain", "Domain")
+                        .WithOne()
+                        .HasForeignKey("MailServer.Domain.DomainDnsCheck", "DomainId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Domain");
+                });
+
+            modelBuilder.Entity("MailServer.Domain.DomainDnsSettings", b =>
+                {
+                    b.HasOne("MailServer.Domain.MailDomain", "Domain")
+                        .WithOne("DnsSettings")
+                        .HasForeignKey("MailServer.Domain.DomainDnsSettings", "DomainId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Domain");
                 });
 
             modelBuilder.Entity("MailServer.Domain.MailAccount", b =>
@@ -473,7 +1208,48 @@ namespace MailServer.Migrations.PostgreSql.Migrations
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
 
+                    b.HasOne("MailServer.Domain.MailAccount", "TargetAccount")
+                        .WithMany()
+                        .HasForeignKey("TargetAccountId", "DomainId")
+                        .HasPrincipalKey("Id", "DomainId")
+                        .OnDelete(DeleteBehavior.NoAction);
+
                     b.Navigation("Domain");
+
+                    b.Navigation("TargetAccount");
+                });
+
+            modelBuilder.Entity("MailServer.Domain.MailRule", b =>
+                {
+                    b.HasOne("MailServer.Domain.MailDomain", "Domain")
+                        .WithMany()
+                        .HasForeignKey("DomainId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Domain");
+                });
+
+            modelBuilder.Entity("MailServer.Domain.MailRuleAction", b =>
+                {
+                    b.HasOne("MailServer.Domain.MailRule", "Rule")
+                        .WithMany("Actions")
+                        .HasForeignKey("RuleId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Rule");
+                });
+
+            modelBuilder.Entity("MailServer.Domain.MailRuleCondition", b =>
+                {
+                    b.HasOne("MailServer.Domain.MailRule", "Rule")
+                        .WithMany("Conditions")
+                        .HasForeignKey("RuleId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Rule");
                 });
 
             modelBuilder.Entity("MailServer.Domain.Mailbox", b =>
@@ -504,6 +1280,57 @@ namespace MailServer.Migrations.PostgreSql.Migrations
                     b.Navigation("Mailbox");
 
                     b.Navigation("Message");
+                });
+
+            modelBuilder.Entity("MailServer.Domain.SentCopyJob", b =>
+                {
+                    b.HasOne("MailServer.Domain.MailAccount", "Account")
+                        .WithMany()
+                        .HasForeignKey("AccountId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("MailServer.Domain.StoredMessage", "Message")
+                        .WithMany()
+                        .HasForeignKey("MessageId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("MailServer.Domain.MailRule", "Rule")
+                        .WithMany()
+                        .HasForeignKey("RuleId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
+                    b.Navigation("Account");
+
+                    b.Navigation("Message");
+
+                    b.Navigation("Rule");
+                });
+
+            modelBuilder.Entity("MailServer.Domain.SrsAddressMapping", b =>
+                {
+                    b.HasOne("MailServer.Domain.MailDomain", "Domain")
+                        .WithMany()
+                        .HasForeignKey("DomainId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Domain");
+                });
+
+            modelBuilder.Entity("MailServer.Domain.MailDomain", b =>
+                {
+                    b.Navigation("Certificate");
+
+                    b.Navigation("DnsSettings");
+                });
+
+            modelBuilder.Entity("MailServer.Domain.MailRule", b =>
+                {
+                    b.Navigation("Actions");
+
+                    b.Navigation("Conditions");
                 });
 #pragma warning restore 612, 618
         }
