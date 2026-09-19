@@ -2,12 +2,9 @@ using System.Text.Json.Serialization;
 
 namespace MailServer.Domain;
 
-public enum OutboundMode
-{
-    Relay = 0,
-    DirectMx = 1
-}
-
+/// <summary>
+/// 外发队列任务状态。Processing 必须配合 LeaseUntil 判断是否可被重新领取。
+/// </summary>
 public enum DeliveryStatus
 {
     Pending = 0,
@@ -52,7 +49,8 @@ public enum MailAliasMode
 public enum MailRuleActionKind
 {
     MoveToFolder = 0,
-    ForwardTo = 1
+    ForwardTo = 1,
+    Reject = 2
 }
 
 public enum MailRuleField
@@ -102,12 +100,29 @@ public enum SentCopyState
     Completed = 3
 }
 
+public enum ScheduledTaskStatus { Idle, Running, Paused, Failed }
+public enum TaskExecutionStatus { Running, Succeeded, Failed, Cancelled }
+public enum CleanupResourceType { Domain, Account, Mailbox, MailboxMessage, ContentFile }
+public enum CleanupQueueStatus { Pending, Processing, Completed, Failed, Restored }
+public enum QuotaLedgerOperation { Add, Remove, Reconcile }
+public enum ClusterNodeRole { Primary, Standby, Witness }
+public enum ClusterNodeStatus { Unknown, Healthy, Unreachable, Synchronizing, ReadOnly }
+public enum ClusterSyncStatus { Idle, Synchronizing, Throttled, Failed, CatchingUp }
+public enum ClusterSnapshotStatus { Pending, Building, Ready, Applying, Completed, Failed }
+public enum ClusterCertificateStatus { Active, Grace, Revoked, Expired }
+public enum ReplicationOperation { Upsert, Delete, Snapshot }
+public enum QuarantineStatus { PendingReview, Released, Deleted }
+public enum MailboxFolderDeletionStatus { Pending, Running, Failed, Completed }
+
 public sealed class SystemSetting
 {
     public required string Key { get; set; }
     public required string Value { get; set; }
 }
 
+/// <summary>
+/// 邮件域名，是账号、别名、证书、DNS 策略和配额的租户边界。
+/// </summary>
 public sealed class MailDomain
 {
     public Guid Id { get; set; } = Guid.NewGuid();
@@ -117,16 +132,22 @@ public sealed class MailDomain
     public string? SmtpHostName { get; set; }
     public string? OutboundIpAddresses { get; set; }
     public long QuotaBytes { get; set; } = 10_737_418_240;
+    public long UsedBytes { get; set; }
     public bool DirectDeliverSameDomain { get; set; } = true;
-    public OutboundMode OutboundMode { get; set; } = OutboundMode.Relay;
     public string? DkimSelector { get; set; }
     public string? DkimPrivateKeyPath { get; set; }
     public string? DkimPublicKey { get; set; }
     public DomainCertificate? Certificate { get; set; }
     public DomainDnsSettings? DnsSettings { get; set; }
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+    public DateTimeOffset? DeletedAt { get; set; }
+    public string? DeletedBy { get; set; }
+    public DateTimeOffset? PurgeAfter { get; set; }
 }
 
+/// <summary>
+/// 域名 TLS 证书元数据。证书文件可能来自上传托管，也可能指向外部路径。
+/// </summary>
 public sealed class DomainCertificate
 {
     public Guid DomainId { get; set; }
@@ -144,6 +165,9 @@ public sealed class DomainCertificate
     public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
 }
 
+/// <summary>
+/// 域名 DNS 安全配置，覆盖 SPF、DMARC、MTA-STS、TLS-RPT 和 DANE。
+/// </summary>
 public sealed class DomainDnsSettings
 {
     public Guid DomainId { get; set; }
@@ -174,6 +198,9 @@ public sealed class DomainDnsSettings
     public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
 }
 
+/// <summary>
+/// MTA-STS 策略缓存，避免每次直连外发都重新拉取远端策略文件。
+/// </summary>
 public sealed class MtaStsPolicyCache
 {
     public required string Domain { get; set; }
@@ -187,6 +214,9 @@ public sealed class MtaStsPolicyCache
     public string? LastError { get; set; }
 }
 
+/// <summary>
+/// TLS 投递事件，用于生成 TLS-RPT 聚合报告。
+/// </summary>
 public sealed class TlsDeliveryEvent
 {
     public Guid Id { get; set; } = Guid.NewGuid();
@@ -202,6 +232,9 @@ public sealed class TlsDeliveryEvent
     public bool Reported { get; set; }
 }
 
+/// <summary>
+/// TLS-RPT 报告投递任务，失败后按队列策略重试。
+/// </summary>
 public sealed class TlsReportDelivery
 {
     public Guid Id { get; set; } = Guid.NewGuid();
@@ -216,6 +249,9 @@ public sealed class TlsReportDelivery
     public string? LastError { get; set; }
 }
 
+/// <summary>
+/// 邮箱账号。LocalPart 与 DomainId 共同决定完整邮箱地址。
+/// </summary>
 public sealed class MailAccount
 {
     public Guid Id { get; set; } = Guid.NewGuid();
@@ -225,9 +261,16 @@ public sealed class MailAccount
     public required string PasswordHash { get; set; }
     public bool IsEnabled { get; set; } = true;
     public long QuotaBytes { get; set; } = 1_073_741_824;
+    public long UsedBytes { get; set; }
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+    public DateTimeOffset? DeletedAt { get; set; }
+    public string? DeletedBy { get; set; }
+    public DateTimeOffset? PurgeAfter { get; set; }
 }
 
+/// <summary>
+/// 域内别名，可指向本地账号或外部地址；Mode 控制是否允许收发双向使用。
+/// </summary>
 public sealed class MailAlias
 {
     public Guid Id { get; set; } = Guid.NewGuid();
@@ -301,6 +344,32 @@ public sealed class Mailbox
     public long UidNext { get; set; } = 1;
     public long HighestModSeq { get; set; } = 1;
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+    public DateTimeOffset? DeletedAt { get; set; }
+    public string? DeletedBy { get; set; }
+    public DateTimeOffset? PurgeAfter { get; set; }
+    public Guid? PendingDeletionJobId { get; set; }
+}
+
+public sealed class MailboxFolderDeletionJob
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid DomainId { get; set; }
+    public MailDomain Domain { get; set; } = null!;
+    public Guid? AccountId { get; set; }
+    public required string FolderName { get; set; }
+    public MailboxFolderDeletionStatus Status { get; set; } = MailboxFolderDeletionStatus.Pending;
+    public int AffectedAccountCount { get; set; }
+    public int AffectedMailboxCount { get; set; }
+    public int AffectedRuleCount { get; set; }
+    public long TotalMessages { get; set; }
+    public long ProcessedMessages { get; set; }
+    public int Attempts { get; set; }
+    public string RequestedBy { get; set; } = "system";
+    public string? LastError { get; set; }
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+    public DateTimeOffset? StartedAt { get; set; }
+    public DateTimeOffset? CompletedAt { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
 }
 
 public sealed class StoredMessage
@@ -324,6 +393,257 @@ public sealed class MailboxMessage
     public string Flags { get; set; } = string.Empty;
     public long ModSeq { get; set; } = 1;
     public DateTimeOffset InternalDate { get; set; } = DateTimeOffset.UtcNow;
+    public DateTimeOffset? ScheduledDeleteAt { get; set; }
+    public DateTimeOffset? DeletedAt { get; set; }
+    public string? DeletedBy { get; set; }
+    public DateTimeOffset? PurgeAfter { get; set; }
+}
+
+public sealed class QuarantineRecord
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid DomainId { get; set; }
+    public MailDomain Domain { get; set; } = null!;
+    public Guid MessageId { get; set; }
+    public StoredMessage Message { get; set; } = null!;
+    public required string Sender { get; set; }
+    public required string RecipientsJson { get; set; }
+    public string RemoteAddress { get; set; } = string.Empty;
+    public string? PluginId { get; set; }
+    public string? PluginName { get; set; }
+    public string Reason { get; set; } = "插件策略要求隔离审核";
+    public QuarantineStatus Status { get; set; } = QuarantineStatus.PendingReview;
+    public DateTimeOffset QuarantinedAt { get; set; } = DateTimeOffset.UtcNow;
+    public string? ReviewedBy { get; set; }
+    public DateTimeOffset? ReviewedAt { get; set; }
+    public string? ReviewNote { get; set; }
+}
+
+public sealed class ScheduledTask
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public required string Type { get; set; }
+    public required string Name { get; set; }
+    public bool IsSystem { get; set; } = true;
+    public bool IsEnabled { get; set; } = true;
+    public bool IsClusterTask { get; set; } = true;
+    public int IntervalMinutes { get; set; } = 60;
+    public int TimeoutSeconds { get; set; } = 600;
+    public int BatchSize { get; set; } = 100;
+    public int MaximumAttempts { get; set; } = 3;
+    public ScheduledTaskStatus Status { get; set; }
+    public DateTimeOffset NextRunAt { get; set; } = DateTimeOffset.UtcNow;
+    public DateTimeOffset? LastRunAt { get; set; }
+    public string SettingsJson { get; set; } = "{}";
+}
+
+public sealed class TaskExecution
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid ScheduledTaskId { get; set; }
+    public ScheduledTask ScheduledTask { get; set; } = null!;
+    public TaskExecutionStatus Status { get; set; } = TaskExecutionStatus.Running;
+    public required string NodeId { get; set; }
+    public DateTimeOffset StartedAt { get; set; } = DateTimeOffset.UtcNow;
+    public DateTimeOffset? CompletedAt { get; set; }
+    public int ProcessedCount { get; set; }
+    public long ReleasedBytes { get; set; }
+    public int Attempt { get; set; } = 1;
+    public string? Error { get; set; }
+}
+
+public sealed class TaskLease
+{
+    public Guid ScheduledTaskId { get; set; }
+    public required string Owner { get; set; }
+    public DateTimeOffset ExpiresAt { get; set; }
+}
+
+public sealed class CleanupQueueItem
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public CleanupResourceType ResourceType { get; set; }
+    public Guid? ResourceId { get; set; }
+    public string? ContentKey { get; set; }
+    public Guid? AccountId { get; set; }
+    public Guid? DomainId { get; set; }
+    public long EstimatedBytes { get; set; }
+    public CleanupQueueStatus Status { get; set; } = CleanupQueueStatus.Pending;
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+    public DateTimeOffset PurgeAfter { get; set; }
+    public DateTimeOffset? CompletedAt { get; set; }
+    public int Attempts { get; set; }
+    public string? LastError { get; set; }
+}
+
+public sealed class QuotaLedgerEntry
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public required string IdempotencyKey { get; set; }
+    public Guid AccountId { get; set; }
+    public Guid DomainId { get; set; }
+    public Guid? MailboxMessageId { get; set; }
+    public QuotaLedgerOperation Operation { get; set; }
+    public long Bytes { get; set; }
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+}
+
+public sealed class ClusterNode
+{
+    public required string Id { get; set; }
+    public required string Name { get; set; }
+    public ClusterNodeRole Role { get; set; }
+    public ClusterNodeStatus Status { get; set; }
+    public string Endpoint { get; set; } = string.Empty;
+    public string Version { get; set; } = string.Empty;
+    public DateTimeOffset LastHeartbeatAt { get; set; }
+    public long AppliedSequence { get; set; }
+    public long SafeSequence { get; set; }
+    public int ProtocolVersion { get; set; } = 1;
+    public string? CertificateThumbprint { get; set; }
+    public string? PluginPackageSetHash { get; set; }
+    public int InitializationProgress { get; set; }
+    public string? LastError { get; set; }
+    public DateTimeOffset JoinedAt { get; set; } = DateTimeOffset.UtcNow;
+    public DateTimeOffset? RevokedAt { get; set; }
+}
+
+public sealed class ClusterConfiguration
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public required string Name { get; set; }
+    public required string PrimaryNodeId { get; set; }
+    public string? ClusterCaThumbprint { get; set; }
+    public string? ProtectedCaPrivateKeyPem { get; set; }
+    public string? CaCertificatePem { get; set; }
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+    public required string CreatedBy { get; set; }
+}
+
+public sealed class ClusterCertificateAuthority
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public required string Thumbprint { get; set; }
+    public required string CertificatePem { get; set; }
+    public required string ProtectedPrivateKeyPem { get; set; }
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+    public DateTimeOffset NotBefore { get; set; }
+    public DateTimeOffset NotAfter { get; set; }
+    public string CreatedBy { get; set; } = "system";
+}
+
+public sealed class ClusterJoinInvitation
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public required string TokenHash { get; set; }
+    public ClusterNodeRole Role { get; set; }
+    public DateTimeOffset ExpiresAt { get; set; }
+    public DateTimeOffset? UsedAt { get; set; }
+    public DateTimeOffset? RevokedAt { get; set; }
+    public required string CreatedBy { get; set; }
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+}
+
+public sealed class ClusterNodeCertificate
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public required string NodeId { get; set; }
+    public required string Thumbprint { get; set; }
+    public required string CertificatePem { get; set; }
+    public ClusterCertificateStatus Status { get; set; } = ClusterCertificateStatus.Active;
+    public DateTimeOffset NotBefore { get; set; }
+    public DateTimeOffset NotAfter { get; set; }
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+    public DateTimeOffset? GraceUntil { get; set; }
+    public DateTimeOffset? RevokedAt { get; set; }
+}
+
+public sealed class ClusterCertificateRevocation
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public required string Thumbprint { get; set; }
+    public required string NodeId { get; set; }
+    public string Reason { get; set; } = "revoked";
+    public DateTimeOffset RevokedAt { get; set; } = DateTimeOffset.UtcNow;
+}
+
+public sealed class ClusterPluginPackage
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public required string PluginId { get; set; }
+    public required string Version { get; set; }
+    public required string ManifestHash { get; set; }
+    public required string PackageHash { get; set; }
+    public DateTimeOffset ScannedAt { get; set; } = DateTimeOffset.UtcNow;
+}
+
+public sealed class ClusterPluginPackageFile
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public required string PluginId { get; set; }
+    public required string RelativePath { get; set; }
+    public required string ContentHash { get; set; }
+    public long Length { get; set; }
+    public DateTimeOffset ScannedAt { get; set; } = DateTimeOffset.UtcNow;
+}
+
+public sealed class ClusterSnapshot
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public required string NodeId { get; set; }
+    public long BaseSequence { get; set; }
+    public ClusterSnapshotStatus Status { get; set; } = ClusterSnapshotStatus.Pending;
+    public int TotalItems { get; set; }
+    public int CompletedItems { get; set; }
+    public string? LastError { get; set; }
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+    public DateTimeOffset? CompletedAt { get; set; }
+}
+
+public sealed class ReplicationLog
+{
+    public long Sequence { get; set; }
+    public Guid BatchId { get; set; }
+    public required string EntityType { get; set; }
+    public required string EntityKey { get; set; }
+    public ReplicationOperation Operation { get; set; }
+    public string PayloadJson { get; set; } = "{}";
+    public string? ContentKey { get; set; }
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+}
+
+public sealed class ReplicationCursor
+{
+    public required string NodeId { get; set; }
+    public long LastAppliedSequence { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
+    public string? LastError { get; set; }
+    public DateTimeOffset? LastAttemptAt { get; set; }
+    public DateTimeOffset? LastSuccessAt { get; set; }
+    public long LastSuccessSequence { get; set; }
+    public int LastBatchCount { get; set; }
+    public int LastContentDownloads { get; set; }
+    public long LastDurationMilliseconds { get; set; }
+    public ClusterSyncStatus SyncStatus { get; set; } = ClusterSyncStatus.Idle;
+    public string? PauseReason { get; set; }
+    public string? LastDetailJson { get; set; }
+}
+
+public sealed class ClusterLease
+{
+    public required string Name { get; set; }
+    public required string OwnerNodeId { get; set; }
+    public long Term { get; set; }
+    public DateTimeOffset ExpiresAt { get; set; }
+}
+
+public sealed class ClusterEvent
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public required string Type { get; set; }
+    public required string NodeId { get; set; }
+    public string Detail { get; set; } = string.Empty;
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
 }
 
 public sealed class SentCopyJob
@@ -355,7 +675,6 @@ public sealed class DeliveryJob
     public required string Recipient { get; set; }
     public Guid? RouteDomainId { get; set; }
     public MailDomain? RouteDomain { get; set; }
-    public OutboundMode RouteMode { get; set; }
     public DeliveryStatus Status { get; set; } = DeliveryStatus.Pending;
     public int Attempts { get; set; }
     public DateTimeOffset NextAttemptAt { get; set; } = DateTimeOffset.UtcNow;
@@ -387,6 +706,16 @@ public sealed class DeliveryAttempt
     public bool Succeeded { get; set; }
     public bool PermanentFailure { get; set; }
     public string? RemoteHost { get; set; }
+    public string? RemoteAddress { get; set; }
+    public string Stage { get; set; } = "SMTP";
+    public string? SmtpStatusCode { get; set; }
+    public string? EnhancedStatusCode { get; set; }
+    public string? TlsProtocol { get; set; }
+    public string? TlsCipherSuite { get; set; }
+    public long DurationMilliseconds { get; set; }
+    public string? FailureCategory { get; set; }
+    public DateTimeOffset? NextRetryAt { get; set; }
+    public string? SessionSummary { get; set; }
     public string? Response { get; set; }
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
 }
@@ -449,5 +778,35 @@ public sealed class AuditRecord
     public required string Resource { get; set; }
     public string? Detail { get; set; }
     public string? RemoteAddress { get; set; }
+    public AuditCategory? Category { get; set; }
+    public AuditStatus? Status { get; set; }
+    public string? NodeId { get; set; }
+    public string? RequestId { get; set; }
+    public string? RelatedId { get; set; }
+    public long? DurationMilliseconds { get; set; }
+    public string? ChangeSummaryJson { get; set; }
+    public string? RawJson { get; set; }
+    public string? PluginId { get; set; }
+    public string? PluginName { get; set; }
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+}
+
+public enum AuditCategory
+{
+    Create,
+    Update,
+    Delete,
+    BackgroundTask,
+    Node,
+    Security,
+    Plugin,
+    Other
+}
+
+public enum AuditStatus
+{
+    Running,
+    Succeeded,
+    Failed,
+    Warning
 }

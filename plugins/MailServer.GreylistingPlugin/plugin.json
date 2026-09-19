@@ -1,10 +1,10 @@
 {
   "id": "mailserver-greylisting",
   "system": true,
-  "displayName": "Greylisting",
-  "description": "Temporarily defers first-time SMTP sender/IP/recipient combinations and accepts them after a normal retry.",
+  "displayName": "灰名单",
+  "description": "首次遇到新的 SMTP 发件 IP、发件人和收件人组合时临时延迟，正常重试后自动放行。",
   "version": "1.0.0",
-  "contractVersion": "1.0",
+  "contractVersion": "2.0",
   "entryAssembly": "MailServer.GreylistingPlugin.dll",
   "order": 20,
   "hosts": [ "smtp" ],
@@ -15,8 +15,8 @@
     {
       "key": "minimumRetryMinutes",
       "type": "Integer",
-      "label": "Minimum retry wait (minutes)",
-      "description": "First-time combinations are deferred until this delay has elapsed.",
+      "label": "最短重试等待（分钟）",
+      "description": "首次出现的组合在等待时间到达前会返回临时失败。",
       "defaultValue": 5,
       "minimum": 1,
       "maximum": 1440
@@ -24,8 +24,8 @@
     {
       "key": "recordExpiryDays",
       "type": "Integer",
-      "label": "Record expiry (days)",
-      "description": "Greylist records older than this are removed and must pass greylisting again.",
+      "label": "记录有效期（天）",
+      "description": "超过有效期的灰名单记录会被移除，下次需要重新通过灰名单。",
       "defaultValue": 30,
       "minimum": 1,
       "maximum": 365
@@ -33,20 +33,35 @@
     {
       "key": "includeRemoteIp",
       "type": "Boolean",
-      "label": "Match remote IP",
+      "label": "匹配远端 IP",
       "defaultValue": true
     },
     {
       "key": "includeSender",
       "type": "Boolean",
-      "label": "Match envelope sender",
+      "label": "匹配 Envelope 发件人",
       "defaultValue": true
     },
     {
       "key": "includeRecipients",
       "type": "Boolean",
-      "label": "Match recipient set",
+      "label": "匹配收件人集合",
       "defaultValue": true
+    },
+    {
+      "key": "bypassLocalDomains",
+      "type": "Boolean",
+      "label": "默认放行本地域名",
+      "description": "发件人或收件人属于本系统已启用域名时，不进入灰名单。",
+      "defaultValue": true
+    },
+    {
+      "key": "bypassDomains",
+      "type": "Text",
+      "label": "放行域名列表",
+      "description": "命中 Envelope 发件人域名或收件人域名时直接放行；支持逗号、空格或换行分隔。",
+      "defaultValue": "",
+      "placeholder": "example.com, partner.test"
     }
   ]
 }

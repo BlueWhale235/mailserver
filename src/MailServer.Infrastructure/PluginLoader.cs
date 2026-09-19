@@ -1,30 +1,52 @@
 using System.Reflection;
 using System.Runtime.Loader;
+using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using MailServer.Domain;
 using MailServer.PluginSdk;
+using MailServer.PluginSdk.Auditing;
+using MailServer.PluginSdk.Delivery;
+using MailServer.PluginSdk.Imap;
+using MailServer.PluginSdk.Security;
+using MailServer.PluginSdk.Smtp;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Hosting;
+using Microsoft.EntityFrameworkCore;
 
 namespace MailServer.Infrastructure;
 
+/// <summary>
+/// 已发现插件的宿主视图。Assembly 为空表示仅发现清单，或当前 host 不激活该插件。
+/// </summary>
 public sealed record LoadedPlugin(
     PluginManifest Manifest,
     Assembly? Assembly,
     bool IsHostActive,
     string? LoadError = null);
 
+/// <summary>
+/// 插件目录，记录发现结果、搜索路径和被跳过的源码目录，供管理后台和诊断日志使用。
+/// </summary>
 public sealed class PluginCatalog
 {
     private readonly List<LoadedPlugin> _plugins = [];
+    private readonly List<string> _skippedSourceDirectories = [];
     public IReadOnlyList<LoadedPlugin> Plugins => _plugins;
+    public IReadOnlyList<string> SearchPaths { get; internal set; } = [];
+    public IReadOnlyList<string> SkippedSourceDirectories => _skippedSourceDirectories;
     internal void Add(LoadedPlugin plugin) => _plugins.Add(plugin);
+    internal void AddSkippedSourceDirectory(string path) => _skippedSourceDirectories.Add(path);
     internal PluginManifest? FindManifest(Assembly assembly) =>
         _plugins.FirstOrDefault(x => x.Assembly == assembly)?.Manifest;
 }
 
+/// <summary>
+/// 插件发现与注册入口。宿主按 plugin.json 发现已发布插件，再把插件服务注册进 DI。
+/// </summary>
 public static class PluginServiceCollectionExtensions
 {
     public static IServiceCollection AddMailServerPlugins(
@@ -34,24 +56,27 @@ public static class PluginServiceCollectionExtensions
     {
         var path = configuration[$"{PluginOptions.SectionName}:Path"] ?? "plugins";
         var catalog = new PluginCatalog();
-        var roots = new[] { path }
-            .Select(Path.GetFullPath)
+        var roots = new[] { ResolvePluginPath(path) }
             .Distinct(StringComparer.OrdinalIgnoreCase)
-            .Where(Directory.Exists)
             .ToArray();
-        if (roots.Length == 0)
+        catalog.SearchPaths = roots;
+        RegisterCatalogServices(services, catalog);
+        var existingRoots = roots.Where(Directory.Exists).ToArray();
+        if (existingRoots.Length == 0)
         {
-            services.AddSingleton(catalog);
-            services.TryAddSingleton<IPluginSettingsProvider, ManifestDefaultPluginSettingsProvider>();
-            services.AddSingleton<PluginPipeline>();
             return services;
         }
 
         var seenIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var manifestPath in roots.SelectMany(root =>
-                     Directory.EnumerateFiles(root, "plugin.json", SearchOption.AllDirectories))
-                 .Where(IsInstalledPluginManifest))
+        foreach (var manifestPath in existingRoots.SelectMany(root =>
+                     Directory.EnumerateFiles(root, "plugin.json", SearchOption.AllDirectories)))
         {
+            if (!IsInstalledPluginManifest(manifestPath))
+            {
+                // 源码目录中的 plugin.json 不直接加载，避免开发项目引用与已发布插件混在一起。
+                catalog.AddSkippedSourceDirectory(Path.GetDirectoryName(manifestPath)!);
+                continue;
+            }
             var manifest = JsonSerializer.Deserialize<PluginManifest>(
                 File.ReadAllText(manifestPath),
                 new JsonSerializerOptions
@@ -65,6 +90,7 @@ public static class PluginServiceCollectionExtensions
                 throw new InvalidDataException($"Duplicate plugin id {manifest.Id}.");
             if (!string.Equals(manifest.ContractVersion, PluginContract.Version, StringComparison.Ordinal))
             {
+                // 契约版本不匹配时立即失败，避免运行时才出现上下文字段缺失或接口签名不一致。
                 throw new InvalidOperationException(
                     $"Plugin {manifest.Id} requires contract {manifest.ContractVersion}; host supports {PluginContract.Version}.");
             }
@@ -74,6 +100,7 @@ public static class PluginServiceCollectionExtensions
                 && manifest.Hosts.Length > 0
                 && !manifest.Hosts.Contains(hostName, StringComparer.OrdinalIgnoreCase))
             {
+                // 插件可以声明只运行在 api/smtp/imap/worker 等宿主，未激活时仍进入目录供后台展示。
                 catalog.Add(new LoadedPlugin(
                     manifest,
                     null,
@@ -86,15 +113,17 @@ public static class PluginServiceCollectionExtensions
             {
                 if (!File.Exists(assemblyPath))
                     throw new FileNotFoundException($"Entry assembly was not found: {manifest.EntryAssembly}", assemblyPath);
+                var pluginAssemblyName = AssemblyName.GetAssemblyName(assemblyPath);
                 var assembly = AppDomain.CurrentDomain.GetAssemblies().FirstOrDefault(candidate =>
                                    !candidate.IsDynamic
-                                   && string.Equals(candidate.Location, assemblyPath, StringComparison.OrdinalIgnoreCase))
+                                   && string.Equals(candidate.FullName, pluginAssemblyName.FullName, StringComparison.Ordinal))
                                ?? new PluginLoadContext(assemblyPath).LoadFromAssemblyPath(assemblyPath);
                 var pluginType = assembly.GetTypes()
                     .SingleOrDefault(type => !type.IsAbstract && typeof(IMailServerPlugin).IsAssignableFrom(type))
                     ?? throw new InvalidOperationException($"Plugin {manifest.Id} has no IMailServerPlugin implementation.");
                 var plugin = (IMailServerPlugin?)Activator.CreateInstance(pluginType)
                     ?? throw new InvalidOperationException($"Plugin {manifest.Id} could not be created.");
+                // 插件只通过 ConfigureServices 扩展宿主能力，具体调用顺序由 PluginPipeline 统一控制。
                 plugin.ConfigureServices(services);
                 catalog.Add(new LoadedPlugin(manifest, assembly, true));
             }
@@ -105,15 +134,25 @@ public static class PluginServiceCollectionExtensions
             }
         }
 
+        return services;
+    }
+
+    internal static string ResolvePluginPath(string path) =>
+        Path.GetFullPath(path, AppContext.BaseDirectory);
+
+    private static void RegisterCatalogServices(IServiceCollection services, PluginCatalog catalog)
+    {
         services.AddSingleton(catalog);
         services.TryAddSingleton<IPluginSettingsProvider, ManifestDefaultPluginSettingsProvider>();
         services.AddSingleton<PluginPipeline>();
-        return services;
+        services.TryAddEnumerable(
+            ServiceDescriptor.Singleton<IHostedService, PluginCatalogDiagnosticsHostedService>());
     }
 
     private static bool IsInstalledPluginManifest(string manifestPath)
     {
         var directory = Path.GetDirectoryName(manifestPath)!;
+        // 发布后的插件目录不应包含 csproj；这条规则保护开发源码不会被误当成运行时插件加载。
         return !Directory.EnumerateFiles(directory, "*.csproj", SearchOption.TopDirectoryOnly).Any();
     }
 
@@ -135,6 +174,96 @@ public static class PluginServiceCollectionExtensions
     }
 }
 
+/// <summary>
+/// 插件发现诊断服务，只输出加载状态，不参与插件执行。
+/// </summary>
+internal sealed class PluginCatalogDiagnosticsHostedService(
+    PluginCatalog catalog,
+    IDbContextFactory<MailDbContext> dbFactory,
+    ILogger<PluginCatalogDiagnosticsHostedService> logger) : IHostedService
+{
+    public async Task StartAsync(CancellationToken cancellationToken)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+        foreach (var path in catalog.SearchPaths)
+        {
+            if (Directory.Exists(path))
+                logger.LogInformation("Plugin discovery scanning {PluginPath}.", path);
+            else
+                logger.LogWarning("Plugin discovery path does not exist: {PluginPath}.", path);
+        }
+        foreach (var path in catalog.SkippedSourceDirectories)
+            logger.LogWarning(
+                "Plugin manifest under {PluginPath} was skipped because the directory contains a project file; publish the plugin before installing it.",
+                path);
+        foreach (var plugin in catalog.Plugins)
+        {
+            if (plugin.LoadError is not null)
+            {
+                logger.LogError(
+                    "Plugin {PluginId} could not be loaded for host activation={HostActive}: {LoadError}",
+                    plugin.Manifest.Id,
+                    plugin.IsHostActive,
+                    plugin.LoadError);
+                db.AuditRecords.Add(new AuditRecord
+                {
+                    Actor = "system",
+                    Action = "plugin.load.failed",
+                    Resource = $"plugin:{plugin.Manifest.Id}",
+                    Detail = plugin.LoadError,
+                    Category = AuditCategory.Plugin,
+                    Status = AuditStatus.Failed,
+                    PluginId = plugin.Manifest.Id,
+                    PluginName = plugin.Manifest.DisplayName ?? plugin.Manifest.Id,
+                    RawJson = AuditLogService.SafeJson(new
+                    {
+                        pluginId = plugin.Manifest.Id,
+                        pluginName = plugin.Manifest.DisplayName ?? plugin.Manifest.Id,
+                        plugin.Manifest.Version,
+                        plugin.IsHostActive,
+                        plugin.LoadError
+                    })
+                });
+            }
+            else if (plugin.IsHostActive)
+            {
+                logger.LogInformation("Plugin {PluginId} loaded successfully.", plugin.Manifest.Id);
+                db.AuditRecords.Add(new AuditRecord
+                {
+                    Actor = "system",
+                    Action = "plugin.load.succeeded",
+                    Resource = $"plugin:{plugin.Manifest.Id}",
+                    Detail = plugin.Manifest.Version,
+                    Category = AuditCategory.Plugin,
+                    Status = AuditStatus.Succeeded,
+                    PluginId = plugin.Manifest.Id,
+                    PluginName = plugin.Manifest.DisplayName ?? plugin.Manifest.Id,
+                    RawJson = AuditLogService.SafeJson(new
+                    {
+                        pluginId = plugin.Manifest.Id,
+                        pluginName = plugin.Manifest.DisplayName ?? plugin.Manifest.Id,
+                        plugin.Manifest.Version,
+                        plugin.IsHostActive
+                    })
+                });
+            }
+            else
+                logger.LogInformation("Plugin {PluginId} was discovered but does not run in this host.", plugin.Manifest.Id);
+        }
+        logger.LogInformation(
+            "Plugin discovery completed: discovered={DiscoveredCount}, active={ActiveCount}.",
+            catalog.Plugins.Count,
+            catalog.Plugins.Count(x => x.IsHostActive && x.LoadError is null));
+        if (db.ChangeTracker.HasChanges())
+            await db.SaveChangesAsync(cancellationToken);
+    }
+
+    public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+}
+
+/// <summary>
+/// 当数据库插件设置服务尚未注册时，从清单默认值构造设置快照。
+/// </summary>
 internal sealed class ManifestDefaultPluginSettingsProvider(PluginCatalog catalog) : IPluginSettingsProvider
 {
     public Task<PluginSettingsSnapshot> GetAsync(string pluginId, CancellationToken cancellationToken)
@@ -147,11 +276,15 @@ internal sealed class ManifestDefaultPluginSettingsProvider(PluginCatalog catalo
     }
 }
 
+/// <summary>
+/// 插件执行流水线。它负责排序、启用状态、超时、失败策略和上下文设置注入。
+/// </summary>
 public sealed class PluginPipeline(
     IServiceProvider services,
     PluginCatalog catalog,
     IPluginSettingsProvider settingsProvider,
-    ILogger<PluginPipeline> logger)
+    ILogger<PluginPipeline> logger,
+    AuditLogService? audit = null)
 {
     public Task<PluginDecision> OnConnectionAsync(ConnectionContext context, CancellationToken cancellationToken) =>
         RunConfiguredAsync(
@@ -186,6 +319,7 @@ public sealed class PluginPipeline(
         AuthenticationContext context,
         CancellationToken cancellationToken)
     {
+        // 认证插件按声明机制过滤，未处理时继续尝试后续插件或宿主内置认证。
         foreach (var middleware in await Ordered(services.GetServices<IAuthenticationMiddleware>(), cancellationToken))
         {
             if (!middleware.GetMechanisms(context.Protocol).Contains(context.Mechanism, StringComparer.OrdinalIgnoreCase)) continue;
@@ -196,15 +330,20 @@ public sealed class PluginPipeline(
             if (!settings.Enabled) continue;
             try
             {
+                var stopwatch = Stopwatch.StartNew();
                 var invocation = middleware.AuthenticateAsync(context with { Settings = settings }, cancellationToken);
                 var result = manifest is null
                     ? await invocation
                     : await invocation.WaitAsync(TimeSpan.FromMilliseconds(manifest.TimeoutMilliseconds), cancellationToken);
+                stopwatch.Stop();
+                if (result.Status != AuthenticationStatus.NotHandled)
+                    await RecordAuthenticationAsync(manifest, result, stopwatch.ElapsedMilliseconds, cancellationToken);
                 if (result.Status != AuthenticationStatus.NotHandled) return result;
             }
             catch (Exception exception)
             {
                 logger.LogError(exception, "Authentication plugin {Plugin} failed", middleware.GetType().FullName);
+                await RecordPluginErrorAsync("authentication", manifest, exception, cancellationToken);
                 if (string.Equals(manifest?.FailureMode, "reject", StringComparison.OrdinalIgnoreCase))
                     return AuthenticationResult.Failure("Authentication provider failed.");
             }
@@ -227,8 +366,12 @@ public sealed class PluginPipeline(
             (middleware, settings) => middleware.InvokeAsync(context with { Settings = settings }, cancellationToken),
             cancellationToken);
 
-    public async Task<PluginDecision> OnMessageAsync(MessageAcceptanceContext context, CancellationToken cancellationToken)
+    public async Task<PluginDecision> OnMessageAsync(MessageAcceptanceContext context, CancellationToken cancellationToken) =>
+        (await OnMessageWithSourceAsync(context, cancellationToken)).Decision;
+
+    public async Task<PluginDecisionResult> OnMessageWithSourceAsync(MessageAcceptanceContext context, CancellationToken cancellationToken)
     {
+        // 消息准入需要保留触发插件信息，隔离审核和日志展示会用到插件 ID/名称。
         foreach (var middleware in await Ordered(services.GetServices<IMessageAcceptanceMiddleware>(), cancellationToken))
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -239,21 +382,31 @@ public sealed class PluginPipeline(
             if (!settings.Enabled) continue;
             try
             {
+                var stopwatch = Stopwatch.StartNew();
                 var invocation = middleware.InvokeAsync(context with { Settings = settings }, cancellationToken);
                 var decision = manifest is null
                     ? await invocation
                     : await invocation.WaitAsync(TimeSpan.FromMilliseconds(manifest.TimeoutMilliseconds), cancellationToken);
-                if (decision.Kind != PluginDecisionKind.Continue) return decision;
+                stopwatch.Stop();
+                if (decision.Kind != PluginDecisionKind.Continue)
+                {
+                    await RecordDecisionAsync("message-acceptance", manifest, decision, stopwatch.ElapsedMilliseconds, cancellationToken);
+                    return new PluginDecisionResult(decision, manifest?.Id, manifest?.DisplayName ?? manifest?.Id);
+                }
             }
             catch (Exception exception)
             {
                 logger.LogError(exception, "Message acceptance plugin {Plugin} failed", middleware.GetType().FullName);
+                await RecordPluginErrorAsync("message-acceptance", manifest, exception, cancellationToken);
                 if (string.Equals(manifest?.FailureMode, "reject", StringComparison.OrdinalIgnoreCase))
-                    return new PluginDecision(PluginDecisionKind.Reject, "Message policy plugin failed.");
+                    return new PluginDecisionResult(
+                        new PluginDecision(PluginDecisionKind.Reject, "Message policy plugin failed."),
+                        manifest?.Id,
+                        manifest?.DisplayName ?? manifest?.Id);
             }
         }
 
-        return PluginDecision.Continue();
+        return new PluginDecisionResult(PluginDecision.Continue(), null, null);
     }
 
     public async Task<PluginDecision> OnMessageContentAsync(
@@ -272,20 +425,28 @@ public sealed class PluginPipeline(
             if (!settings.Enabled) continue;
             try
             {
+                // 内容检查会反复读取同一个内存/文件流，调用前后复位 Position 是插件兼容性的关键。
                 content.Position = 0;
+                var stopwatch = Stopwatch.StartNew();
                 var invocation = middleware.InvokeAsync(
                     new MessageContentContext(sender, recipients, bodyType, content.Length, content, settings),
                     cancellationToken);
                 var decision = manifest is null
                     ? await invocation
                     : await invocation.WaitAsync(TimeSpan.FromMilliseconds(manifest.TimeoutMilliseconds), cancellationToken);
+                stopwatch.Stop();
                 content.Position = 0;
-                if (decision.Kind != PluginDecisionKind.Continue) return decision;
+                if (decision.Kind != PluginDecisionKind.Continue)
+                {
+                    await RecordDecisionAsync("message-content", manifest, decision, stopwatch.ElapsedMilliseconds, cancellationToken);
+                    return decision;
+                }
             }
             catch (Exception exception)
             {
                 content.Position = 0;
                 logger.LogError(exception, "Message content plugin {Plugin} failed", middleware.GetType().FullName);
+                await RecordPluginErrorAsync("message-content", manifest, exception, cancellationToken);
                 if (string.Equals(manifest?.FailureMode, "reject", StringComparison.OrdinalIgnoreCase))
                     return new PluginDecision(PluginDecisionKind.Reject, "Message content validation failed.");
             }
@@ -348,18 +509,23 @@ public sealed class PluginPipeline(
                 if (manifest is not null
                     && !(await settingsProvider.GetAsync(manifest.Id, cancellationToken)).Enabled)
                     continue;
+                // 带 manifest 的插件受超时保护；宿主内部中间件没有清单，按普通服务调用。
+                var stopwatch = Stopwatch.StartNew();
                 var invocation = invoke(middleware);
                 var decision = manifest is null
                     ? await invocation
                     : await invocation.WaitAsync(TimeSpan.FromMilliseconds(manifest.TimeoutMilliseconds), cancellationToken);
+                stopwatch.Stop();
                 if (decision.Kind != PluginDecisionKind.Continue)
                 {
+                    await RecordDecisionAsync(typeof(T).Name, manifest, decision, stopwatch.ElapsedMilliseconds, cancellationToken);
                     return decision;
                 }
             }
             catch (Exception exception)
             {
                 logger.LogError(exception, "Plugin middleware {Plugin} failed", middleware?.GetType().FullName);
+                await RecordPluginErrorAsync(typeof(T).Name, manifest, exception, cancellationToken);
                 if (string.Equals(manifest?.FailureMode, "reject", StringComparison.OrdinalIgnoreCase))
                 {
                     return new PluginDecision(PluginDecisionKind.Reject, "Policy plugin failed.");
@@ -385,15 +551,22 @@ public sealed class PluginPipeline(
             if (!settings.Enabled) continue;
             try
             {
+                var stopwatch = Stopwatch.StartNew();
                 var invocation = invoke(middleware, settings);
                 var decision = manifest is null
                     ? await invocation
                     : await invocation.WaitAsync(TimeSpan.FromMilliseconds(manifest.TimeoutMilliseconds), cancellationToken);
-                if (decision.Kind != PluginDecisionKind.Continue) return decision;
+                stopwatch.Stop();
+                if (decision.Kind != PluginDecisionKind.Continue)
+                {
+                    await RecordDecisionAsync(typeof(T).Name, manifest, decision, stopwatch.ElapsedMilliseconds, cancellationToken);
+                    return decision;
+                }
             }
             catch (Exception exception)
             {
                 logger.LogError(exception, "Plugin middleware {Plugin} failed", middleware?.GetType().FullName);
+                await RecordPluginErrorAsync(typeof(T).Name, manifest, exception, cancellationToken);
                 if (string.Equals(manifest?.FailureMode, "reject", StringComparison.OrdinalIgnoreCase))
                     return new PluginDecision(PluginDecisionKind.Reject, "Policy plugin failed.");
             }
@@ -432,14 +605,92 @@ public sealed class PluginPipeline(
             }
             catch (Exception exception)
             {
+                // 通知型插件不应影响主业务结果，异常只进入日志。
                 logger.LogError(exception, "Plugin notification {EventName} failed in {Plugin}", eventName, middleware?.GetType().FullName);
             }
         }
     }
 
+    private async Task RecordDecisionAsync(
+        string stage,
+        PluginManifest? manifest,
+        PluginDecision decision,
+        long elapsedMilliseconds,
+        CancellationToken cancellationToken)
+    {
+        if (audit is null || manifest is null || decision.Kind == PluginDecisionKind.Continue) return;
+        await audit.RecordPluginDecisionAsync(
+            new PluginAuditEvent(
+                stage,
+                MapDecision(decision.Kind),
+                decision.Message,
+                manifest.Id,
+                manifest.DisplayName ?? manifest.Id,
+                $"plugin:{manifest.Id}",
+                null,
+                null,
+                null,
+                elapsedMilliseconds),
+            cancellationToken);
+    }
+
+    private async Task RecordAuthenticationAsync(
+        PluginManifest? manifest,
+        AuthenticationResult result,
+        long elapsedMilliseconds,
+        CancellationToken cancellationToken)
+    {
+        if (audit is null || manifest is null || result.Status is AuthenticationStatus.NotHandled or AuthenticationStatus.Success) return;
+        await audit.RecordPluginDecisionAsync(
+            new PluginAuditEvent(
+                "authentication",
+                PluginDecisionKindName.Reject,
+                result.Message,
+                manifest.Id,
+                manifest.DisplayName ?? manifest.Id,
+                $"plugin:{manifest.Id}",
+                null,
+                null,
+                null,
+                elapsedMilliseconds),
+            cancellationToken);
+    }
+
+    private async Task RecordPluginErrorAsync(
+        string stage,
+        PluginManifest? manifest,
+        Exception exception,
+        CancellationToken cancellationToken)
+    {
+        if (audit is null || manifest is null) return;
+        await audit.RecordPluginDecisionAsync(
+            new PluginAuditEvent(
+                stage,
+                PluginDecisionKindName.Error,
+                exception is TimeoutException ? "Plugin execution timed out." : exception.Message,
+                manifest.Id,
+                manifest.DisplayName ?? manifest.Id,
+                $"plugin:{manifest.Id}",
+                null,
+                null,
+                null,
+                null,
+                Failed: true),
+            cancellationToken);
+    }
+
+    private static PluginDecisionKindName MapDecision(PluginDecisionKind kind) => kind switch
+    {
+        PluginDecisionKind.Reject => PluginDecisionKindName.Reject,
+        PluginDecisionKind.Defer => PluginDecisionKindName.Defer,
+        PluginDecisionKind.Quarantine => PluginDecisionKindName.Quarantine,
+        _ => PluginDecisionKindName.Modify
+    };
+
     private async Task<IReadOnlyList<T>> Ordered<T>(IEnumerable<T> middlewares, CancellationToken cancellationToken)
     {
         var items = middlewares.ToArray();
+        // 管理后台保存的排序优先于清单 Order；未保存时回退到清单顺序和插件 ID。
         var orders = settingsProvider is PluginSettingsService pluginSettings
             ? (await pluginSettings.GetOrderedManifestsAsync(cancellationToken))
                 .Select((manifest, index) => new { manifest.Id, Index = index })

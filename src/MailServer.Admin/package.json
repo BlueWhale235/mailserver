@@ -1,0 +1,36 @@
+{
+  "name": "mailserver-admin",
+  "private": true,
+  "version": "2.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "vue-tsc --noEmit && vite build",
+    "test": "vitest run",
+    "lint": "eslint . --max-warnings=0",
+    "preview": "vite preview --host 0.0.0.0"
+  },
+  "dependencies": {
+    "@mdi/font": "latest",
+    "echarts": "latest",
+    "pinia": "latest",
+    "vue": "latest",
+    "vue-echarts": "latest",
+    "vue-router": "latest",
+    "vuetify": "latest"
+  },
+  "devDependencies": {
+    "@eslint/js": "latest",
+    "@types/node": "latest",
+    "@vitejs/plugin-vue": "latest",
+    "@vue/test-utils": "latest",
+    "eslint": "latest",
+    "eslint-plugin-vue": "latest",
+    "jsdom": "latest",
+    "typescript": "latest",
+    "typescript-eslint": "latest",
+    "vite": "latest",
+    "vitest": "latest",
+    "vue-tsc": "latest"
+  }
+}

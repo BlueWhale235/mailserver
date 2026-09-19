@@ -72,6 +72,11 @@ public sealed record MailRuleMatch(
     string TargetMailboxName,
     IReadOnlyList<MailRuleActionView> Actions);
 
+/// <summary>
+/// 发信规则命中「拒绝发信」后的结果，Reason 可回传给发信客户端。
+/// </summary>
+public sealed record MailRuleRejection(Guid RuleId, string RuleName, string? Reason);
+
 public sealed partial class MailRuleService(
     IDbContextFactory<MailDbContext> dbFactory,
     ILogger<MailRuleService> logger)
@@ -105,7 +110,7 @@ public sealed partial class MailRuleService(
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         var totalAccounts = await db.Accounts.CountAsync(x => x.DomainId == domainId && x.IsEnabled, cancellationToken);
         var mailboxRows = await db.Mailboxes.AsNoTracking()
-            .Where(x => x.Account.DomainId == domainId && x.Account.IsEnabled)
+            .Where(x => x.Account.DomainId == domainId && x.Account.IsEnabled && x.PendingDeletionJobId == null)
             .Select(x => new { x.Name, x.AccountId })
             .ToListAsync(cancellationToken);
         var rows = mailboxRows
@@ -301,6 +306,47 @@ public sealed partial class MailRuleService(
         return null;
     }
 
+    /// <summary>
+    /// 发信规则里的「拒绝发信」动作在 SMTP DATA 阶段生效。返回首个命中规则，
+    /// 调用方据此在落库前用 550 拒绝整封信。
+    /// </summary>
+    public async Task<MailRuleRejection?> EvaluateOutgoingRejectionAsync(
+        Guid accountId,
+        MailRuleFacts facts,
+        CancellationToken cancellationToken)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+        var domainId = await db.Accounts.Where(x => x.Id == accountId)
+            .Select(x => (Guid?)x.DomainId)
+            .SingleOrDefaultAsync(cancellationToken);
+        if (domainId is null) return null;
+        var rules = await db.MailRules.AsNoTracking()
+            .Include(x => x.Conditions)
+            .Include(x => x.Actions)
+            .AsSplitQuery()
+            .Where(x => x.DomainId == domainId && x.Direction == MailRuleDirection.Outgoing && x.IsEnabled)
+            .OrderBy(x => x.Priority)
+            .ThenBy(x => x.CreatedAt)
+            .ToListAsync(cancellationToken);
+        foreach (var rule in rules)
+        {
+            var results = rule.Conditions.OrderBy(x => x.Position).Select(x => Matches(x, facts)).ToArray();
+            var matched = rule.MatchMode == MailRuleMatchMode.All ? results.All(x => x) : results.Any(x => x);
+            if (!matched) continue;
+            var reject = rule.Actions.OrderBy(x => x.Position).FirstOrDefault(x => x.Kind == MailRuleActionKind.Reject);
+            if (reject is null) continue;
+            var reason = DeserializeValues(reject.ValuesJson).FirstOrDefault();
+            logger.LogInformation(
+                "Outgoing mail rule {RuleId} rejected a message for domain {DomainId}: {Reason}",
+                rule.Id,
+                domainId,
+                reason ?? string.Empty);
+            return new MailRuleRejection(rule.Id, rule.Name, reason);
+        }
+
+        return null;
+    }
+
     public static MailRuleFacts BuildFacts(
         MimeMessage message,
         string envelopeSender,
@@ -367,12 +413,35 @@ public sealed partial class MailRuleService(
         var source = candidates.Where(x => !string.IsNullOrWhiteSpace(x)).ToArray();
         return operation switch
         {
-            MailRuleOperator.ContainsAny => values.Any(value => source.Any(candidate => candidate.Contains(value, StringComparison.OrdinalIgnoreCase))),
-            MailRuleOperator.ContainsAll => values.All(value => source.Any(candidate => candidate.Contains(value, StringComparison.OrdinalIgnoreCase))),
-            MailRuleOperator.EqualsAny => values.Any(value => source.Any(candidate => string.Equals(candidate, value, StringComparison.OrdinalIgnoreCase))),
-            MailRuleOperator.NotContainsAny => values.All(value => source.All(candidate => !candidate.Contains(value, StringComparison.OrdinalIgnoreCase))),
+            MailRuleOperator.ContainsAny => values.Any(value => source.Any(candidate => MatchValue(candidate, value, contains: true))),
+            MailRuleOperator.ContainsAll => values.All(value => source.Any(candidate => MatchValue(candidate, value, contains: true))),
+            MailRuleOperator.EqualsAny => values.Any(value => source.Any(candidate => MatchValue(candidate, value, contains: false))),
+            MailRuleOperator.NotContainsAny => values.All(value => source.All(candidate => !MatchValue(candidate, value, contains: true))),
             _ => false
         };
+    }
+
+    /// <summary>
+    /// 匹配模式支持 * 与 ? 通配符；没有通配符时 Contains 走子串匹配，
+    /// Equals 走整串比较，保持与历史规则兼容。
+    /// </summary>
+    private static bool MatchValue(string candidate, string pattern, bool contains)
+    {
+        if (!pattern.Contains('*') && !pattern.Contains('?'))
+        {
+            return contains
+                ? candidate.Contains(pattern, StringComparison.OrdinalIgnoreCase)
+                : string.Equals(candidate, pattern, StringComparison.OrdinalIgnoreCase);
+        }
+
+        var regex = "^" + Regex.Escape(pattern)
+            .Replace("\\*", ".*", StringComparison.Ordinal)
+            .Replace("\\?", ".", StringComparison.Ordinal) + "$";
+        return Regex.IsMatch(
+            candidate,
+            regex,
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant,
+            TimeSpan.FromMilliseconds(200));
     }
 
     private static bool MatchNumber(long candidate, MailRuleOperator operation, IReadOnlyList<string> values)
@@ -412,6 +481,7 @@ public sealed partial class MailRuleService(
         if (name.Length is < 1 or > 128) throw new FormatException("Rule name must contain 1 to 128 characters.");
         if (input.Conditions.Count is < 1 or > 20) throw new FormatException("A rule must contain 1 to 20 conditions.");
         var actions = ValidateActions(input.Direction, input.Actions, input.TargetMailboxName);
+        // 目标文件夹不再是独立表单字段：收信规则取移动动作，发信规则的 Sent 副本固定写回 Sent。
         var target = actions.FirstOrDefault(x => x.Kind == MailRuleActionKind.MoveToFolder)?.Values[0]
                      ?? (input.Direction == MailRuleDirection.Incoming ? "INBOX" : "Sent");
         var conditions = input.Conditions.Select(ValidateCondition).ToArray();
@@ -430,6 +500,7 @@ public sealed partial class MailRuleService(
         var result = new List<MailRuleActionInput>();
         var moveCount = 0;
         var forwardCount = 0;
+        var rejectCount = 0;
         foreach (var action in supplied)
         {
             var values = action.Values.Select(x => x.Trim()).Where(x => x.Length > 0)
@@ -437,18 +508,26 @@ public sealed partial class MailRuleService(
             switch (action.Kind)
             {
                 case MailRuleActionKind.MoveToFolder:
+                    // 收信规则决定投递文件夹；发信规则决定 Sent 副本的落盘文件夹。
                     if (++moveCount > 1 || values.Length != 1)
                         throw new FormatException("A rule may contain one move action.");
                     values = [MailboxNames.Normalize(values[0])];
                     break;
                 case MailRuleActionKind.ForwardTo:
-                    if (direction != MailRuleDirection.Incoming)
-                        throw new FormatException("Forward actions are only available for incoming rules.");
+                    // 收信规则转发入站邮件；发信规则把外发副本额外转发到目标地址。
                     forwardCount += values.Length;
                     if (values.Length < 1 || forwardCount > 20
                         || values.Any(value => !AddressParser.TrySplit(value, out _, out _)))
                         throw new FormatException("Forward targets must contain 1 to 20 valid email addresses.");
                     values = values.Select(AddressParser.Normalize).ToArray();
+                    break;
+                case MailRuleActionKind.Reject:
+                    if (direction != MailRuleDirection.Outgoing)
+                        throw new FormatException("Reject actions are only available for outgoing rules.");
+                    if (++rejectCount > 1 || values.Length > 1)
+                        throw new FormatException("A rule may contain one reject action with an optional reason.");
+                    if (values.Length == 1 && values[0].Length > 255)
+                        throw new FormatException("Reject reason must be at most 255 characters.");
                     break;
                 default:
                     throw new FormatException("Unknown mail rule action.");

@@ -170,6 +170,45 @@ public sealed class SystemSettingsService(
         return new MailboxSettingsView(normalized);
     }
 
+    public async Task<MailboxSettingsView> GetDomainMailboxSettingsAsync(
+        Guid domainId,
+        CancellationToken cancellationToken)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+        if (!await db.Domains.AsNoTracking().AnyAsync(x => x.Id == domainId, cancellationToken))
+            throw new KeyNotFoundException("Domain not found.");
+        var value = await db.SystemSettings.AsNoTracking()
+            .Where(x => x.Key == DomainMailboxFoldersKey(domainId))
+            .Select(x => x.Value)
+            .SingleOrDefaultAsync(cancellationToken);
+        if (value is not null) return new MailboxSettingsView(ReadMailboxFolders(value));
+        return await GetMailboxSettingsAsync(cancellationToken);
+    }
+
+    public async Task<MailboxSettingsView> SaveDomainMailboxSettingsAsync(
+        Guid domainId,
+        MailboxSettingsView settings,
+        CancellationToken cancellationToken)
+    {
+        var normalized = MailboxNames.NormalizeDefaults(settings.DefaultFolders);
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+        if (!await db.Domains.AsNoTracking().AnyAsync(x => x.Id == domainId, cancellationToken))
+            throw new KeyNotFoundException("Domain not found.");
+        await UpsertAsync(
+            db,
+            DomainMailboxPrefix(domainId),
+            MailboxFoldersKey,
+            JsonSerializer.Serialize(normalized),
+            cancellationToken);
+        await db.SaveChangesAsync(cancellationToken);
+        return new MailboxSettingsView(normalized);
+    }
+
+    internal static string DomainMailboxFoldersKey(Guid domainId) =>
+        DomainMailboxPrefix(domainId) + MailboxFoldersKey;
+
+    private static string DomainMailboxPrefix(Guid domainId) => $"{MailboxPrefix}{domainId:N}:";
+
     public async Task<CertificateSelectionSettingsView> GetCertificateSelectionSettingsAsync(
         CancellationToken cancellationToken)
     {

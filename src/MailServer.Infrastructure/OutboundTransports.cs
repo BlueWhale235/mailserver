@@ -12,108 +12,13 @@ using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
 using System.Text;
+using System.Diagnostics;
 
 namespace MailServer.Infrastructure;
 
-public sealed class RelaySmtpTransport(
-    IOptions<RelayOptions> options,
-    IDbContextFactory<MailDbContext> dbFactory,
-    SrsService srs,
-    ILogger<RelaySmtpTransport> logger) : IOutboundTransport
-{
-    private readonly RelayOptions _options = options.Value;
-
-    public OutboundMode Mode => OutboundMode.Relay;
-
-    public async Task<DeliveryResult> DeliverAsync(
-        DeliveryJob job,
-        Stream content,
-        CancellationToken cancellationToken)
-    {
-        try
-        {
-            var message = await OutboundMessage.LoadAndSignAsync(content, job, dbFactory, srs, cancellationToken);
-            var profile = await OutboundDeliveryProfile.ResolveAsync(dbFactory, job, cancellationToken);
-            using var client = new SmtpClient();
-            client.LocalDomain = profile.HeloName;
-            logger.LogInformation(
-                "Relay delivery job {JobId} connecting to {Host}:{Port}: sender={Sender}, recipient={Recipient}, security={Security}, helo={HeloName}, sourceIps={SourceIps}.",
-                job.Id,
-                _options.Host,
-                _options.Port,
-                job.Sender,
-                job.Recipient,
-                _options.EffectiveSecurity,
-                profile.HeloName,
-                string.Join(',', profile.SourceAddresses.Select(x => x.ToString())));
-            await OutboundDeliveryProfile.ConnectAsync(
-                client,
-                _options.Host,
-                _options.Port,
-                ResolveSecureSocketOptions(_options),
-                profile.SourceAddresses,
-                cancellationToken);
-            if (!string.IsNullOrWhiteSpace(_options.UserName))
-            {
-                await client.AuthenticateAsync(_options.UserName, _options.Password ?? string.Empty, cancellationToken);
-            }
-
-            var response = await client.SendAsync(
-                message,
-                ParseSender(job.Sender),
-                [MailboxAddress.Parse(job.Recipient)],
-                cancellationToken);
-            await client.DisconnectAsync(true, cancellationToken);
-            logger.LogInformation(
-                "Relay delivery job {JobId} succeeded via {Host}: recipient={Recipient}, response={Response}.",
-                job.Id,
-                _options.Host,
-                job.Recipient,
-                response);
-            return DeliveryResult.Success(response, _options.Host);
-        }
-        catch (SmtpCommandException exception)
-        {
-            logger.LogWarning(
-                exception,
-                "Relay rejected delivery job {JobId}: sender={Sender}, recipient={Recipient}, host={Host}.",
-                job.Id,
-                job.Sender,
-                job.Recipient,
-                _options.Host);
-            var permanent = (int)exception.StatusCode >= 500;
-            return permanent
-                ? DeliveryResult.Permanent(exception.Message, _options.Host)
-                : DeliveryResult.Temporary(exception.Message, _options.Host);
-        }
-        catch (Exception exception) when (exception is not OperationCanceledException)
-        {
-            logger.LogWarning(
-                exception,
-                "Relay delivery job {JobId} failed: sender={Sender}, recipient={Recipient}, host={Host}.",
-                job.Id,
-                job.Sender,
-                job.Recipient,
-                _options.Host);
-            return DeliveryResult.Temporary(exception.Message, _options.Host);
-        }
-    }
-
-    private static MailboxAddress ParseSender(string sender) =>
-        string.IsNullOrWhiteSpace(sender) ? new MailboxAddress(string.Empty, "postmaster@localhost") : MailboxAddress.Parse(sender);
-
-    internal static SecureSocketOptions ResolveSecureSocketOptions(RelayOptions options) =>
-        options.EffectiveSecurity switch
-        {
-            RelaySecurity.Auto => SecureSocketOptions.Auto,
-            RelaySecurity.Plain => SecureSocketOptions.None,
-            RelaySecurity.StartTls => SecureSocketOptions.StartTls,
-            RelaySecurity.StartTlsWhenAvailable => SecureSocketOptions.StartTlsWhenAvailable,
-            RelaySecurity.ImplicitTls => SecureSocketOptions.SslOnConnect,
-            _ => throw new ArgumentOutOfRangeException(nameof(options), options.EffectiveSecurity, null)
-        };
-}
-
+/// <summary>
+/// 直接查询收件域 MX 并投递到 25 端口的传输实现，同时处理 MTA-STS、DANE 和 TLS-RPT 记录。
+/// </summary>
 public sealed class DirectMxTransport(
     LookupClient lookupClient,
     IDbContextFactory<MailDbContext> dbFactory,
@@ -124,26 +29,35 @@ public sealed class DirectMxTransport(
     internal const int DeliveryPort = 25;
     internal const SecureSocketOptions DeliverySecurity = SecureSocketOptions.StartTlsWhenAvailable;
 
-    public OutboundMode Mode => OutboundMode.DirectMx;
-
     public async Task<DeliveryResult> DeliverAsync(
         DeliveryJob job,
         Stream content,
         CancellationToken cancellationToken)
     {
+        var stopwatch = Stopwatch.StartNew();
         if (!AddressParser.TrySplit(job.Recipient, out _, out var domain))
         {
-            return DeliveryResult.Permanent("Invalid recipient address.");
+            return DeliveryResult.Permanent("Invalid recipient address.", diagnostic: new DeliveryDiagnostic("SMTP", DurationMilliseconds: stopwatch.ElapsedMilliseconds, FailureCategory: "invalid-recipient"));
         }
 
         IReadOnlyList<string> hosts;
         var mxDnssecAuthenticated = false;
         try
         {
+            // MX 解析失败通常是临时性 DNS 问题；没有 MX 时按 SMTP 标准回退到域名本身。
             var response = await lookupClient.QueryAsync(domain, QueryType.MX, cancellationToken: cancellationToken);
             mxDnssecAuthenticated = transportSecurity.IsTrustedDnssecResponse(response);
-            hosts = response.Answers.MxRecords()
-                .OrderBy(x => x.Preference)
+            var mxRecords = response.Answers.MxRecords().ToArray();
+            if (mxRecords.Any(x => x.Exchange.Value == "."))
+            {
+                return DeliveryResult.Permanent(
+                    "Recipient domain publishes Null MX and does not accept email.",
+                    diagnostic: new DeliveryDiagnostic("DNS", DurationMilliseconds: stopwatch.ElapsedMilliseconds, FailureCategory: "null-mx"));
+            }
+            hosts = mxRecords
+                .GroupBy(x => x.Preference)
+                .OrderBy(group => group.Key)
+                .SelectMany(group => group.OrderBy(_ => Random.Shared.Next()))
                 .Select(x => x.Exchange.Value.TrimEnd('.'))
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToArray();
@@ -160,7 +74,7 @@ public sealed class DirectMxTransport(
                 job.Id,
                 job.Recipient,
                 domain);
-            return DeliveryResult.Temporary($"MX lookup failed: {exception.Message}");
+            return DeliveryResult.Temporary($"MX lookup failed: {exception.Message}", diagnostic: new DeliveryDiagnostic("DNS", DurationMilliseconds: stopwatch.ElapsedMilliseconds, FailureCategory: "dns-error"));
         }
 
         logger.LogInformation(
@@ -175,6 +89,7 @@ public sealed class DirectMxTransport(
                 0,
                 Math.Min(messageBytes.Length, 64 * 1024))
             .Contains("TLS-Report-Submitter:", StringComparison.OrdinalIgnoreCase);
+        // TLS 报告本身不再触发 TLS-RPT 事件，避免报告投递失败形成反馈循环。
         Task RecordTlsEventAsync(
             string mxHost,
             string policyType,
@@ -190,6 +105,7 @@ public sealed class DirectMxTransport(
         DeliveryResult? lastResult = null;
         foreach (var host in hosts)
         {
+            // DANE 只有在 MX 查询具备可信 DNSSEC 结果时才启用；否则优先使用 MTA-STS 策略。
             var danePolicy = mxDnssecAuthenticated
                 ? await transportSecurity.ResolveDaneAsync(host, cancellationToken)
                 : null;
@@ -201,12 +117,13 @@ public sealed class DirectMxTransport(
                     : string.Empty;
             if (danePolicy is null && stsPolicy is not null && !stsPolicy.MatchesMx(host))
             {
+                // enforce 模式必须阻断不匹配的 MX；testing 模式只记录事件并继续尝试。
                 await RecordTlsEventAsync(
                     host, "sts", policyString, "validation-failure",
                     "MX host does not match the MTA-STS policy.");
                 if (stsPolicy.Mode == "enforce")
                 {
-                    lastResult = DeliveryResult.Temporary("MX host does not match the enforced MTA-STS policy.", host);
+                    lastResult = DeliveryResult.Temporary("MX host does not match the enforced MTA-STS policy.", host, new DeliveryDiagnostic("TLS", DurationMilliseconds: stopwatch.ElapsedMilliseconds, FailureCategory: "mta-sts-policy"));
                     continue;
                 }
             }
@@ -271,10 +188,11 @@ public sealed class DirectMxTransport(
                     DeliveryPort,
                     job.Recipient,
                     response);
-                return DeliveryResult.Success(response, $"{host}:{DeliveryPort}");
+                return DeliveryResult.Success(response, $"{host}:{DeliveryPort}", new DeliveryDiagnostic("SMTP", SmtpStatusCode: "250", DurationMilliseconds: stopwatch.ElapsedMilliseconds, SessionSummary: response));
             }
             catch (SmtpCommandException exception)
             {
+                // 单个 MX 的 5xx 通常代表该主机明确拒绝本次投递，直接返回永久失败。
                 await RecordTlsEventAsync(host, policyType, policyString, "smtp-error", exception.Message);
                 logger.LogWarning(
                     exception,
@@ -286,10 +204,10 @@ public sealed class DirectMxTransport(
                     job.Recipient);
                 if ((int)exception.StatusCode >= 500)
                 {
-                    return DeliveryResult.Permanent(exception.Message, $"{host}:{DeliveryPort}");
+                    return DeliveryResult.Permanent(exception.Message, $"{host}:{DeliveryPort}", new DeliveryDiagnostic("SMTP", SmtpStatusCode: ((int)exception.StatusCode).ToString(), DurationMilliseconds: stopwatch.ElapsedMilliseconds, FailureCategory: "smtp-permanent", SessionSummary: exception.Message));
                 }
 
-                lastResult = DeliveryResult.Temporary(exception.Message, $"{host}:{DeliveryPort}");
+                lastResult = DeliveryResult.Temporary(exception.Message, $"{host}:{DeliveryPort}", new DeliveryDiagnostic("SMTP", SmtpStatusCode: ((int)exception.StatusCode).ToString(), DurationMilliseconds: stopwatch.ElapsedMilliseconds, FailureCategory: "smtp-temporary", SessionSummary: exception.Message));
             }
             catch (Exception exception) when (exception is not OperationCanceledException)
             {
@@ -309,11 +227,14 @@ public sealed class DirectMxTransport(
                     job.Id,
                     job.Sender,
                     job.Recipient);
-                lastResult = DeliveryResult.Temporary(exception.Message, $"{host}:{DeliveryPort}");
+                var stage = exception is System.Security.Authentication.AuthenticationException
+                    || exception is NotSupportedException && exception.Message.Contains("STARTTLS", StringComparison.OrdinalIgnoreCase)
+                    ? "TLS" : "CONNECT";
+                lastResult = DeliveryResult.Temporary(exception.Message, $"{host}:{DeliveryPort}", new DeliveryDiagnostic(stage, DurationMilliseconds: stopwatch.ElapsedMilliseconds, FailureCategory: resultType, SessionSummary: exception.Message));
             }
         }
 
-        return lastResult ?? DeliveryResult.Temporary("No MX host accepted the message.");
+        return lastResult ?? DeliveryResult.Temporary("No MX host accepted the message.", diagnostic: new DeliveryDiagnostic("CONNECT", DurationMilliseconds: stopwatch.ElapsedMilliseconds, FailureCategory: "mx-exhausted"));
     }
 
     private static async Task<byte[]> ReadAllAsync(Stream content, CancellationToken cancellationToken)

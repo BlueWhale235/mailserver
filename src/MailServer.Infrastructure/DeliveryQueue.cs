@@ -5,6 +5,9 @@ using Microsoft.Extensions.Options;
 
 namespace MailServer.Infrastructure;
 
+/// <summary>
+/// 外发队列状态机。Worker 通过租约领取任务，所有重试、完成和删除都在这里集中维护。
+/// </summary>
 public sealed class DeliveryQueue(
     IDbContextFactory<MailDbContext> dbFactory,
     SystemSettingsService settings,
@@ -23,6 +26,7 @@ public sealed class DeliveryQueue(
         await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
         var now = DateTimeOffset.UtcNow;
         var nowTicks = now.UtcDateTime.Ticks;
+        // PostgreSQL/MySQL 使用 SKIP LOCKED 支持多 Worker 并发抢占；SQLite 没有等价语义，只依赖事务串行化。
         var jobs = _provider switch
         {
             DatabaseProvider.PostgreSql => await db.DeliveryJobs
@@ -68,6 +72,7 @@ public sealed class DeliveryQueue(
 
         foreach (var job in jobs)
         {
+            // 租约过期后 Processing 任务可被其它 Worker 重新领取，用于进程崩溃后的自动恢复。
             job.Status = DeliveryStatus.Processing;
             job.LeaseOwner = owner;
             job.LeaseUntil = now.Add(duration);
@@ -93,15 +98,26 @@ public sealed class DeliveryQueue(
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         var job = await db.DeliveryJobs.SingleAsync(x => x.Id == jobId, cancellationToken);
-        db.DeliveryAttempts.Add(new DeliveryAttempt
+        var diagnostic = result.Diagnostic;
+        var attempt = new DeliveryAttempt
         {
             DeliveryJobId = job.Id,
             AttemptNumber = job.Attempts,
             Succeeded = result.Succeeded,
             PermanentFailure = result.PermanentFailure,
             RemoteHost = result.RemoteHost,
-            Response = result.Response
-        });
+            RemoteAddress = diagnostic?.RemoteAddress,
+            Stage = diagnostic?.Stage ?? (result.Succeeded ? "SMTP" : "UNKNOWN"),
+            SmtpStatusCode = diagnostic?.SmtpStatusCode,
+            EnhancedStatusCode = diagnostic?.EnhancedStatusCode,
+            TlsProtocol = diagnostic?.TlsProtocol,
+            TlsCipherSuite = diagnostic?.TlsCipherSuite,
+            DurationMilliseconds = diagnostic?.DurationMilliseconds ?? 0,
+            FailureCategory = diagnostic?.FailureCategory,
+            SessionSummary = Truncate(diagnostic?.SessionSummary, 65_536),
+            Response = Truncate(result.Response, 4_096)
+        };
+        db.DeliveryAttempts.Add(attempt);
 
         job.LeaseOwner = null;
         job.LeaseUntil = null;
@@ -119,8 +135,11 @@ public sealed class DeliveryQueue(
         else
         {
             job.Status = DeliveryStatus.Deferred;
-            var delayMinutes = Math.Min(Math.Pow(2, Math.Max(0, job.Attempts - 1)), 360);
+            // 指数退避上限 6 小时，避免持续失败的任务压垮远端或本机 DNS/SMTP 资源。
+            var jitter = 0.8 + Random.Shared.NextDouble() * 0.4;
+            var delayMinutes = Math.Min(Math.Pow(2, Math.Max(0, job.Attempts - 1)) * jitter, 360);
             job.NextAttemptAt = DateTimeOffset.UtcNow.AddMinutes(delayMinutes);
+            attempt.NextRetryAt = job.NextAttemptAt;
         }
 
         await db.SaveChangesAsync(cancellationToken);
@@ -135,6 +154,9 @@ public sealed class DeliveryQueue(
             result.RemoteHost ?? string.Empty,
             result.Response);
     }
+
+    private static string? Truncate(string? value, int maximumLength) =>
+        string.IsNullOrEmpty(value) || value.Length <= maximumLength ? value : value[..maximumLength];
 
     public async Task RetryNowAsync(Guid jobId, CancellationToken cancellationToken)
     {

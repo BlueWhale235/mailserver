@@ -1,11 +1,11 @@
 {
   "id": "sample-large-message-policy",
   "system": false,
-  "displayName": "示例大邮件策略",
-  "description": "演示消息接收策略以及 XOAUTH2/OAUTHBEARER 语义认证扩展点。",
+  "displayName": "示例大邮件与 Bearer 认证策略",
+  "description": "开发示例：演示消息接收策略以及 XOAUTH2/OAUTHBEARER 语义认证扩展点。生产环境请编写自己的认证插件来校验 OAuth/OIDC/SSO Token。",
   "defaultEnabled": false,
   "version": "1.0.0",
-  "contractVersion": "1.0",
+  "contractVersion": "2.0",
   "entryAssembly": "MailServer.SamplePlugin.dll",
   "order": 100,
   "hosts": ["smtp", "imap"],
@@ -15,15 +15,15 @@
     {
       "key": "exampleIdentity",
       "type": "Text",
-      "label": "示例本地邮箱地址",
-      "description": "Token 验证成功后映射到的既有邮箱账号。",
+      "label": "示例映射邮箱地址",
+      "description": "示例 Token 验证成功后返回给宿主的既有本地邮箱账号。宿主只做本地账号映射，不自动创建账号。",
       "defaultValue": ""
     },
     {
       "key": "exampleBearerToken",
       "type": "Password",
       "label": "示例 Bearer Token",
-      "description": "仅用于开发和测试，不应用于生产环境。"
+      "description": "仅用于开发和测试，不应用于生产环境。真实 OAuth/OIDC 校验请在插件代码中自行实现。"
     }
   ]
 }

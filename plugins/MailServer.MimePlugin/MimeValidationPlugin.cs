@@ -1,4 +1,5 @@
 using MailServer.PluginSdk;
+using MailServer.PluginSdk.Smtp;
 using Microsoft.Extensions.DependencyInjection;
 using MimeKit;
 

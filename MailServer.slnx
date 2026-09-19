@@ -6,6 +6,9 @@
     <Project Path="src/MailServer.Cli/MailServer.Cli.csproj">
       <Platform Solution="*|x64" Project="x64" />
     </Project>
+    <Project Path="src/MailServer.Cluster/MailServer.Cluster.csproj">
+      <Platform Solution="*|x64" Project="x64" />
+    </Project>
     <Project Path="src/MailServer.Domain/MailServer.Domain.csproj">
       <Platform Solution="*|x64" Project="x64" />
     </Project>
@@ -43,15 +46,4 @@
     <Platform Name="Any CPU" />
     <Platform Name="x64" />
   </Configurations>
-  <Folder Name="/plugins/">
-    <Project Path="plugins/MailServer.GreylistingPlugin/MailServer.GreylistingPlugin.csproj">
-      <Platform Solution="*|x64" Project="x64" />
-    </Project>
-    <Project Path="plugins/MailServer.MimePlugin/MailServer.MimePlugin.csproj">
-      <Platform Solution="*|x64" Project="x64" />
-    </Project>
-    <Project Path="plugins/MailServer.SamplePlugin/MailServer.SamplePlugin.csproj">
-      <Platform Solution="*|x64" Project="x64" />
-    </Project>
-  </Folder>
 </Solution>

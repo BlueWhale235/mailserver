@@ -50,8 +50,7 @@ public sealed class DatabaseAndCertificateTests
                 {
                     Message = message,
                     Sender = "sender@example.com",
-                    Recipient = "recipient@example.net",
-                    RouteMode = OutboundMode.Relay
+                    Recipient = "recipient@example.net"
                 });
                 await db.SaveChangesAsync();
             }

@@ -1,0 +1,20 @@
+<Solution>
+  <Folder Name="/plugins/">
+    <Project Path="MailServer.GreylistingPlugin/MailServer.GreylistingPlugin.csproj">
+      <Platform Solution="*|x64" Project="x64" />
+    </Project>
+    <Project Path="MailServer.MimePlugin/MailServer.MimePlugin.csproj">
+      <Platform Solution="*|x64" Project="x64" />
+    </Project>
+    <Project Path="MailServer.SamplePlugin/MailServer.SamplePlugin.csproj">
+      <Platform Solution="*|x64" Project="x64" />
+    </Project>
+    <Project Path="MailServer.TestPlugin/MailServer.TestPlugin.csproj">
+      <Platform Solution="*|x64" Project="x64" />
+    </Project>
+  </Folder>
+  <Configurations>
+    <Platform Name="Any CPU" />
+    <Platform Name="x64" />
+  </Configurations>
+</Solution>

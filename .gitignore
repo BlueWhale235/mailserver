@@ -2,6 +2,8 @@
 **/bin/
 **/obj/
 builds/
+src/MailServer.Admin/node_modules/
+src/MailServer.Admin/dist/
 artifacts/
 TestResults/
 *.trx
@@ -56,6 +58,11 @@ security-assets/*
 Thumbs.db
 Desktop.ini
 
+
+# QA artifacts
+.qa-login-browser/
+login-redesign-check.png
+.qa-vite.log
 
 # other files
 frontend_design.md

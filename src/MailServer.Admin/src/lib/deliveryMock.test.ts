@@ -1,0 +1,54 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import type { DeliveryAttempt, DeliveryJob, DeliverySummary, PagedResult, TlsReportDeliveryDetail } from '../views/delivery/types'
+
+beforeEach(() => vi.resetModules())
+
+describe('delivery preview contract', () => {
+  it('keeps active, delivered and failed scopes separate and summary consistent', async () => {
+    const { mockApi } = await import('./mockApi')
+    const active = await mockApi<PagedResult<DeliveryJob>>('/queues?scope=Active')
+    const history = await mockApi<PagedResult<DeliveryJob>>('/queues?scope=History')
+    const failed = await mockApi<PagedResult<DeliveryJob>>('/queues?scope=Failed')
+    const summary = await mockApi<DeliverySummary>('/queues/summary')
+    expect(active.items.every(item => item.status !== 'Delivered')).toBe(true)
+    expect(history.items.every(item => item.status === 'Delivered')).toBe(true)
+    expect(failed.items.every(item => item.status === 'Failed')).toBe(true)
+    expect(summary.deliveredLast24Hours).toBe(history.totalCount)
+    expect(summary.failed).toBe(failed.totalCount)
+    expect(summary.pending + summary.processing + summary.deferred + summary.failed).toBe(active.totalCount)
+  })
+
+  it('returns latest attempts first and masks envelope addresses in session summaries', async () => {
+    const { mockApi } = await import('./mockApi')
+    const jobs = await mockApi<PagedResult<DeliveryJob>>('/queues')
+    for (const job of jobs.items) {
+      const attempts = await mockApi<DeliveryAttempt[]>(`/queues/${job.id}/attempts`)
+      expect(attempts.map(attempt => attempt.attemptNumber)).toEqual(attempts.map(attempt => attempt.attemptNumber).sort((a, b) => b - a))
+      for (const attempt of attempts) {
+        expect(attempt.sessionSummary ?? '').not.toContain(`<${job.sender}>`)
+        expect(attempt.sessionSummary ?? '').not.toContain(`<${job.recipient}>`)
+      }
+    }
+  })
+
+  it('supports report pagination, retry reset and completed-report protection', async () => {
+    const { mockApi } = await import('./mockApi')
+    const all = await mockApi<PagedResult<TlsReportDeliveryDetail>>('/delivery/tls-reports')
+    const first = await mockApi<PagedResult<TlsReportDeliveryDetail>>('/delivery/tls-reports?page=1&pageSize=2')
+    const second = await mockApi<PagedResult<TlsReportDeliveryDetail>>('/delivery/tls-reports?page=2&pageSize=2')
+    expect(first.totalCount).toBe(all.totalCount)
+    expect(first.items).toHaveLength(2)
+    expect(new Set([...first.items, ...second.items].map(item => item.id)).size).toBe(4)
+    expect(first.items[0]).not.toHaveProperty('reportJson')
+    const failed = all.items.find(item => item.status === 'Failed')!
+    await mockApi(`/delivery/tls-reports/${failed.id}/retry`, { method: 'POST' })
+    const updated = await mockApi<TlsReportDeliveryDetail>(`/delivery/tls-reports/${failed.id}`)
+    expect(updated.status).toBe('Pending')
+    expect(updated.attempts).toBe(0)
+    expect(updated.lastError).toBeUndefined()
+    expect(() => JSON.parse(updated.reportJson)).not.toThrow()
+    const completed = all.items.find(item => item.status === 'Completed')!
+    await expect(mockApi(`/delivery/tls-reports/${completed.id}/retry`, { method: 'POST' })).rejects.toThrow('已完成')
+    await expect(mockApi('/delivery/tls-reports/missing/retry', { method: 'POST' })).rejects.toThrow('不存在')
+  })
+})

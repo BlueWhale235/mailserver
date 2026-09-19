@@ -40,16 +40,13 @@ public sealed class SwaggerEndpointDescriptionOperationFilter : IOperationFilter
                 "按域名 ID 获取域名配置、状态和基础详情。"),
             ["POST /api/v1/domains"] = new(
                 "创建域名",
-                "创建新的邮件域名，并可同时设置出站模式和 DKIM 私钥路径。"),
+                "创建新的 Direct MX 邮件域名，并可同时设置 DKIM 私钥路径。"),
             ["PATCH /api/v1/domains/{id}"] = new(
                 "修改域名",
-                "按域名 ID 局部更新启用状态、出站模式和 DKIM 配置。"),
+                "按域名 ID 局部更新启用状态和 DKIM 配置。"),
             ["DELETE /api/v1/domains/{id}"] = new(
                 "删除域名",
                 "按域名 ID 删除指定邮件域名及其相关配置。"),
-            ["POST /api/v1/domains/batch/outbound-mode"] = new(
-                "批量设置出站模式",
-                "为多个域名批量更新邮件出站投递模式。"),
             ["POST /api/v1/domains/batch/delete"] = new(
                 "批量删除域名",
                 "按域名 ID 列表批量删除多个邮件域名。"),
@@ -119,7 +116,10 @@ public sealed class SwaggerEndpointDescriptionOperationFilter : IOperationFilter
                 "修改指定域名下别名的本地部分、目标账号或收发模式。"),
             ["GET /api/v1/domains/{id}/rules"] = new(
                 "查询邮件规则",
-                "返回指定域名下的收信或发信邮件规则。"),
+                "返回指定域名下的收信或发信邮件规则；direction=Incoming 为收信规则，Outgoing 为发信规则。"),
+            ["PUT /api/v1/domains/{id}/rules/order"] = new(
+                "调整邮件规则顺序",
+                "按规则 ID 顺序重新排列指定方向的邮件规则；发信规则的顺序决定拒绝与转发的执行先后。"),
             ["GET /api/v1/domains/{id}/rule-folders"] = new(
                 "查询规则文件夹",
                 "返回指定域名账号可用于邮件规则动作的文件夹列表。"),
@@ -132,9 +132,6 @@ public sealed class SwaggerEndpointDescriptionOperationFilter : IOperationFilter
             ["DELETE /api/v1/domains/{id}/rules/{ruleId}"] = new(
                 "删除邮件规则",
                 "删除指定域名下的一条邮件规则。"),
-            ["PUT /api/v1/domains/{id}/rules/order"] = new(
-                "调整邮件规则顺序",
-                "按规则 ID 顺序重新排列指定方向的邮件规则。"),
             ["GET /api/v1/domains/{id}/audit"] = new(
                 "查询域名审计日志",
                 "返回指定域名相关的管理操作和系统审计记录。"),
@@ -207,16 +204,28 @@ public sealed class SwaggerEndpointDescriptionOperationFilter : IOperationFilter
 
             ["GET /api/v1/queues"] = new(
                 "查询投递队列",
-                "按状态筛选并返回外发邮件投递队列。"),
+                "按工作区、状态、关键字和分页参数返回外发邮件投递任务。"),
             ["GET /api/v1/queues/{id}/raw"] = new(
                 "获取原始邮件",
                 "按投递任务 ID 返回队列中的原始邮件内容。"),
+            ["GET /api/v1/queues/{id}/attempts"] = new(
+                "查询投递尝试",
+                "返回指定投递任务的分阶段 Direct MX 尝试、远端响应与 TLS 诊断。"),
             ["POST /api/v1/queues/{id}/retry"] = new(
                 "重试投递任务",
                 "立即将指定失败或待处理投递任务重新加入投递流程。"),
             ["DELETE /api/v1/queues/{id}"] = new(
                 "删除投递任务",
                 "按投递任务 ID 从队列中删除指定任务。"),
+            ["GET /api/v1/delivery/tls-reports"] = new(
+                "查询 TLS 报告投递",
+                "按状态、关键字和分页参数返回 TLS-RPT 聚合报告投递记录。"),
+            ["GET /api/v1/delivery/tls-reports/{id}"] = new(
+                "获取 TLS 报告详情",
+                "返回指定 TLS-RPT 聚合报告的投递状态和 JSON 正文。"),
+            ["POST /api/v1/delivery/tls-reports/{id}/retry"] = new(
+                "重试 TLS 报告投递",
+                "将尚未完成的 TLS-RPT 报告重新安排为立即投递。"),
             ["GET /api/v1/domains/{domainId}/queue"] = new(
                 "查询域名投递队列",
                 "按域名、关键字、状态和分页参数查询投递任务。"),

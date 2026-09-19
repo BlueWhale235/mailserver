@@ -5,9 +5,11 @@ using MailServer.Domain;
 using MailServer.Imap;
 using MailServer.Infrastructure;
 using MailServer.PluginSdk;
-using MailServer.SamplePlugin;
-using MailServer.MimePlugin;
-using MailServer.GreylistingPlugin;
+using MailServer.PluginSdk.Auditing;
+using MailServer.PluginSdk.Delivery;
+using MailServer.PluginSdk.Imap;
+using MailServer.PluginSdk.Security;
+using MailServer.PluginSdk.Smtp;
 using System.Text.Json;
 using MailServer.Smtp;
 using Microsoft.EntityFrameworkCore;
@@ -23,6 +25,34 @@ namespace MailServer.Tests;
 
 public sealed class ProtocolAndPluginTests
 {
+    [Fact]
+    public async Task ProtocolListenersStopCleanlyWhenAcceptIsCanceled()
+    {
+        using var provider = new ServiceCollection().BuildServiceProvider();
+        var scopeFactory = provider.GetRequiredService<IServiceScopeFactory>();
+        var smtp = new SmtpServerService(
+            scopeFactory,
+            Options.Create(new SmtpServerOptions
+            {
+                Endpoints = [new SmtpEndpointOptions { Address = "127.0.0.1", Port = 0 }]
+            }),
+            null!,
+            NullLogger<SmtpServerService>.Instance);
+        var imap = new ImapServerService(
+            scopeFactory,
+            Options.Create(new ImapServerOptions
+            {
+                Endpoints = [new ImapEndpointOptions { Address = "127.0.0.1", Port = 0 }]
+            }),
+            null!,
+            NullLogger<ImapServerService>.Instance);
+
+        await smtp.StartAsync(CancellationToken.None);
+        await imap.StartAsync(CancellationToken.None);
+        await smtp.StopAsync(CancellationToken.None);
+        await imap.StopAsync(CancellationToken.None);
+    }
+
     [Fact]
     public async Task SmtpDataReaderRemovesDotStuffingWithoutBufferingMessageInMemory()
     {
@@ -233,35 +263,6 @@ public sealed class ProtocolAndPluginTests
     }
 
     [Fact]
-    public async Task MimePluginRequiresEightBitDeclarationAndAcceptsEmptyOrHeaderOnlyMessages()
-    {
-        var middleware = new MimeValidationMiddleware();
-        var settings = MimeSettings();
-        await using var eightBit = new MemoryStream(
-            [.. "Subject: test\r\n\r\n"u8.ToArray(), 0xc3, 0xa9, .. "\r\n"u8.ToArray()]);
-
-        var rejected = await middleware.InvokeAsync(
-            new MessageContentContext("a@example.com", ["b@example.com"], "7BIT", eightBit.Length, eightBit, settings),
-            CancellationToken.None);
-        Assert.Equal(PluginDecisionKind.Reject, rejected.Kind);
-
-        eightBit.Position = 0;
-        var accepted = await middleware.InvokeAsync(
-            new MessageContentContext("a@example.com", ["b@example.com"], "8BITMIME", eightBit.Length, eightBit, settings),
-            CancellationToken.None);
-        Assert.Equal(PluginDecisionKind.Continue, accepted.Kind);
-
-        foreach (var raw in new[] { "\r\n", "From: a@example.com\r\nSubject: no body\r\n\r\n" })
-        {
-            await using var content = new MemoryStream(Encoding.ASCII.GetBytes(raw));
-            var decision = await middleware.InvokeAsync(
-                new MessageContentContext("a@example.com", ["b@example.com"], "7BIT", content.Length, content, settings),
-                CancellationToken.None);
-            Assert.Equal(PluginDecisionKind.Continue, decision.Kind);
-        }
-    }
-
-    [Fact]
     public async Task SmtpDataReaderAcceptsBodyOnlyMessagesAndLimitsReceivedHeaders()
     {
         await using (var bodyOnlyInput = new MemoryStream(Encoding.ASCII.GetBytes("hello world\r\n.\r\n")))
@@ -281,39 +282,6 @@ public sealed class ProtocolAndPluginTests
         var exception = await Assert.ThrowsAsync<InvalidDataException>(() =>
             oversizedConnection.ReadDataAsync(CancellationToken.None));
         Assert.Contains("Received header count", exception.Message);
-    }
-
-    [Fact]
-    public async Task GreylistingPluginDefersFirstAttemptAndAcceptsRetryAfterWindow()
-    {
-        var middleware = new GreylistingMiddleware();
-        var settings = new PluginSettingsSnapshot(true, new Dictionary<string, JsonElement>(StringComparer.OrdinalIgnoreCase)
-        {
-            ["minimumRetryMinutes"] = JsonSerializer.SerializeToElement(1),
-            ["recordExpiryDays"] = JsonSerializer.SerializeToElement(30),
-            ["includeRemoteIp"] = JsonSerializer.SerializeToElement(true),
-            ["includeSender"] = JsonSerializer.SerializeToElement(true),
-            ["includeRecipients"] = JsonSerializer.SerializeToElement(true)
-        });
-        var context = new MessageAcceptanceContext(
-            "sender@example.net",
-            ["user@example.com"],
-            "pending",
-            100,
-            "192.0.2.10:25",
-            settings);
-
-        var first = await middleware.InvokeAsync(context, CancellationToken.None);
-        Assert.Equal(PluginDecisionKind.Defer, first.Kind);
-
-        var relaxed = settings with
-        {
-            Values = settings.Values.ToDictionary(x => x.Key, x => x.Key == "minimumRetryMinutes"
-                ? JsonSerializer.SerializeToElement(0)
-                : x.Value, StringComparer.OrdinalIgnoreCase)
-        };
-        var retry = await middleware.InvokeAsync(context with { Settings = relaxed }, CancellationToken.None);
-        Assert.Equal(PluginDecisionKind.Continue, retry.Kind);
     }
 
     [Fact]
@@ -1557,6 +1525,949 @@ public sealed class ProtocolAndPluginTests
     }
 
     [Fact]
+    public async Task ImapSearchHeaderMatchesFoldedHeaderValues()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-search-header-{Guid.NewGuid():N}");
+        try
+        {
+            var scenario = await CreateImapInboxScenarioAsync(root);
+            await using (var db = await scenario.Factory.CreateDbContextAsync())
+            {
+                db.MailboxMessages.RemoveRange(db.MailboxMessages.Where(x => x.MailboxId == scenario.MailboxId));
+                await db.SaveChangesAsync();
+            }
+
+            await AddInboxMessageAsync(
+                scenario.Factory,
+                scenario.Store,
+                scenario.MailboxId,
+                1,
+                "Subject: hello\r\n world\r\nX-Trace: first\r\n second\r\n\r\nbody\r\n");
+            await AddInboxMessageAsync(
+                scenario.Factory,
+                scenario.Store,
+                scenario.MailboxId,
+                2,
+                "Subject: other\r\nX-Trace: unrelated\r\n\r\nbody\r\n");
+            await using var stream = new DuplexMemoryStream(string.Empty);
+            await using var connection = new ImapConnection(stream, TimeSpan.FromSeconds(1), 4096);
+
+            await scenario.Service.ExecuteLineAsync(connection, scenario.State, "A001 SEARCH HEADER Subject \"hello world\"", "local", ConnectionSecurity.StartTls, true, CancellationToken.None);
+            await scenario.Service.ExecuteLineAsync(connection, scenario.State, "A002 SEARCH HEADER X-Trace \"first second\"", "local", ConnectionSecurity.StartTls, true, CancellationToken.None);
+
+            Assert.Equal(2, Regex.Matches(stream.OutputText, @"\* SEARCH 1").Count);
+            Assert.DoesNotContain("* SEARCH 2", stream.OutputText);
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ImapBodyStructureDescribesMultipartAndAttachments()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-bodystructure-{Guid.NewGuid():N}");
+        try
+        {
+            var scenario = await CreateImapInboxScenarioAsync(root);
+            await using (var db = await scenario.Factory.CreateDbContextAsync())
+            {
+                db.MailboxMessages.RemoveRange(db.MailboxMessages.Where(x => x.MailboxId == scenario.MailboxId));
+                await db.SaveChangesAsync();
+            }
+
+            await AddInboxMessageAsync(
+                scenario.Factory,
+                scenario.Store,
+                scenario.MailboxId,
+                1,
+                """
+                MIME-Version: 1.0
+                Subject: multipart
+                Content-Type: multipart/mixed; boundary="b1"
+
+                --b1
+                Content-Type: text/plain; charset=utf-8
+                Content-Transfer-Encoding: quoted-printable
+
+                hello
+                --b1
+                Content-Type: application/pdf; name="file.pdf"
+                Content-Transfer-Encoding: base64
+                Content-Disposition: attachment; filename="file.pdf"
+
+                SGVsbG8=
+                --b1--
+                """.ReplaceLineEndings("\r\n"));
+            await using var stream = new DuplexMemoryStream(string.Empty);
+            await using var connection = new ImapConnection(stream, TimeSpan.FromSeconds(1), 4096);
+
+            await scenario.Service.FetchAsync(
+                connection,
+                scenario.State,
+                "1 (BODYSTRUCTURE)",
+                "127.0.0.1:143",
+                useUid: false,
+                CancellationToken.None);
+
+            var output = stream.OutputText;
+            Assert.Contains("BODYSTRUCTURE", output);
+            Assert.Contains("\"MIXED\"", output);
+            Assert.Contains("\"TEXT\" \"PLAIN\"", output);
+            Assert.Contains("\"CHARSET\" \"utf-8\"", output);
+            Assert.Contains("\"APPLICATION\" \"PDF\"", output);
+            Assert.Contains("\"NAME\" \"file.pdf\"", output);
+            Assert.Contains("(\"ATTACHMENT\" (\"FILENAME\" \"file.pdf\"))", output);
+            Assert.Contains("\"BASE64\"", output);
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ImapRfc822SizeUsesOriginalStoredBytes()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-rfc822-size-{Guid.NewGuid():N}");
+        try
+        {
+            var scenario = await CreateImapInboxScenarioAsync(root);
+            await using (var db = await scenario.Factory.CreateDbContextAsync())
+            {
+                db.MailboxMessages.RemoveRange(db.MailboxMessages.Where(x => x.MailboxId == scenario.MailboxId));
+                await db.SaveChangesAsync();
+            }
+
+            var raw = "Subject: size\r\nX-Test: one\r\n\tfolded\r\n\r\nhello\r\n";
+            await AddInboxMessageAsync(scenario.Factory, scenario.Store, scenario.MailboxId, 1, raw);
+            await using var stream = new DuplexMemoryStream(string.Empty);
+            await using var connection = new ImapConnection(stream, TimeSpan.FromSeconds(1), 4096);
+
+            await scenario.Service.FetchAsync(
+                connection,
+                scenario.State,
+                "1 (RFC822.SIZE RFC822)",
+                "127.0.0.1:143",
+                useUid: false,
+                CancellationToken.None);
+
+            var size = Encoding.UTF8.GetByteCount(raw);
+            Assert.Contains($"RFC822.SIZE {size}", stream.OutputText);
+            Assert.Contains($"RFC822 {{{size}}}", stream.OutputText);
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ImapAppendUidUsesTargetUidValidityAndPreservesUidNext()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-appenduid-{Guid.NewGuid():N}");
+        try
+        {
+            var scenario = await CreateImapInboxScenarioAsync(root);
+            var target = await scenario.Provider.GetRequiredService<IMailboxService>()
+                .CreateAsync(scenario.State.AccountId!.Value, "Uploads", CancellationToken.None);
+            var message = "Subject: append uid\r\n\r\nbody\r\n";
+            await using var stream = new DuplexMemoryStream(message + "\r\n");
+            await using var connection = new ImapConnection(stream, TimeSpan.FromSeconds(1), 4096);
+
+            await scenario.Service.AppendAsync(
+                connection,
+                scenario.State,
+                "A001",
+                $"\"Uploads\" (\\Seen \\Flagged) \"08-Jul-2026 12:34:56 +0900\" {{{Encoding.UTF8.GetByteCount(message)}}}",
+                "local",
+                CancellationToken.None);
+
+            Assert.Contains($"A001 OK [APPENDUID {target.UidValidity} 1]", stream.OutputText);
+            await using var verification = await scenario.Factory.CreateDbContextAsync();
+            var mailbox = await verification.Mailboxes.SingleAsync(x => x.Id == target.Id);
+            var stored = await verification.MailboxMessages.SingleAsync(x => x.MailboxId == target.Id);
+            Assert.Equal(2, mailbox.UidNext);
+            Assert.Equal("\\Seen \\Flagged", stored.Flags);
+            Assert.Equal(new DateTimeOffset(2026, 7, 8, 12, 34, 56, TimeSpan.FromHours(9)), stored.InternalDate);
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ImapCopyMoveKeepInternalDateStable()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-internaldate-stable-{Guid.NewGuid():N}");
+        try
+        {
+            var scenario = await CreateImapInboxScenarioAsync(root);
+            var expected = new DateTimeOffset(2026, 7, 8, 12, 34, 56, TimeSpan.FromHours(8));
+            await using (var db = await scenario.Factory.CreateDbContextAsync())
+            {
+                var item = await db.MailboxMessages.SingleAsync(x => x.MailboxId == scenario.MailboxId);
+                item.InternalDate = expected;
+                await db.SaveChangesAsync();
+            }
+
+            var mailbox = scenario.Provider.GetRequiredService<IMailboxService>();
+            var archive = await mailbox.CreateAsync(scenario.State.AccountId!.Value, "Archive", CancellationToken.None);
+            await using var stream = new DuplexMemoryStream(string.Empty);
+            await using var connection = new ImapConnection(stream, TimeSpan.FromSeconds(1), 4096);
+
+            await scenario.Service.CopyMoveAsync(connection, scenario.State, "1 Archive", useUid: false, move: false, CancellationToken.None);
+            await scenario.Service.CopyMoveAsync(connection, scenario.State, "1 Archive", useUid: false, move: true, CancellationToken.None);
+
+            var copied = await mailbox.FetchAsync(archive.Id, "1:*", useUid: false, CancellationToken.None);
+            Assert.Equal([expected, expected], copied.Select(x => x.InternalDate));
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ImapLiteralPlusIsAcceptedButNotAdvertised()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-literal-plus-{Guid.NewGuid():N}");
+        try
+        {
+            var scenario = await CreateImapInboxScenarioAsync(root);
+            var message = "Subject: literal plus\r\n\r\nbody\r\n";
+            await using var stream = new DuplexMemoryStream(message + "\r\n");
+            await using var connection = new ImapConnection(stream, TimeSpan.FromSeconds(1), 4096);
+
+            await scenario.Service.AppendAsync(
+                connection,
+                scenario.State,
+                "A001",
+                $"\"INBOX\" {{{Encoding.UTF8.GetByteCount(message)}+}}",
+                "local",
+                CancellationToken.None);
+
+            Assert.DoesNotContain("LITERAL+", ImapServerService.BaseCapabilities);
+            Assert.DoesNotContain("+ Ready for literal data", stream.OutputText);
+            Assert.Contains("A001 OK [APPENDUID", stream.OutputText);
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ImapQuotedMailboxNamesRoundTripAndListWildcardFilters()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-list-wildcard-{Guid.NewGuid():N}");
+        try
+        {
+            var scenario = await CreateImapInboxScenarioAsync(root);
+            await scenario.Service.ExecuteLineAsync(
+                new ImapConnection(new DuplexMemoryStream(string.Empty), TimeSpan.FromSeconds(1), 4096),
+                scenario.State,
+                "A001 CREATE \"folder \\\"quoted\\\" name\"",
+                "local",
+                ConnectionSecurity.StartTls,
+                true,
+                CancellationToken.None);
+            var mailbox = scenario.Provider.GetRequiredService<IMailboxService>();
+            await mailbox.CreateAsync(scenario.State.AccountId!.Value, "folder \\ slash", CancellationToken.None);
+            await mailbox.CreateAsync(scenario.State.AccountId!.Value, "Projects/A", CancellationToken.None);
+            await mailbox.CreateAsync(scenario.State.AccountId!.Value, "Projects/Nested/B", CancellationToken.None);
+            await mailbox.CreateAsync(scenario.State.AccountId!.Value, "Archive", CancellationToken.None);
+
+            await using var oneLevelStream = new DuplexMemoryStream(string.Empty);
+            await using var oneLevelConnection = new ImapConnection(oneLevelStream, TimeSpan.FromSeconds(1), 4096);
+            await scenario.Service.ListAsync(oneLevelConnection, scenario.State, "\"\" \"%\"", subscribedOnly: false, CancellationToken.None);
+            await using var allStream = new DuplexMemoryStream(string.Empty);
+            await using var allConnection = new ImapConnection(allStream, TimeSpan.FromSeconds(1), 4096);
+            await scenario.Service.ListAsync(allConnection, scenario.State, "\"\" \"*\"", subscribedOnly: false, CancellationToken.None);
+            await using var projectStream = new DuplexMemoryStream(string.Empty);
+            await using var projectConnection = new ImapConnection(projectStream, TimeSpan.FromSeconds(1), 4096);
+            await scenario.Service.ListAsync(projectConnection, scenario.State, "\"Projects/\" \"%\"", subscribedOnly: false, CancellationToken.None);
+
+            Assert.Contains(@"""folder \""quoted\"" name""", oneLevelStream.OutputText);
+            Assert.Contains(@"""folder \\ slash""", oneLevelStream.OutputText);
+            Assert.Contains(@"""Archive""", oneLevelStream.OutputText);
+            Assert.DoesNotContain(@"""Projects/A""", oneLevelStream.OutputText);
+            Assert.Contains(@"""Projects/Nested/B""", allStream.OutputText);
+            Assert.Contains(@"""Projects/A""", projectStream.OutputText);
+            Assert.DoesNotContain(@"""Projects/Nested/B""", projectStream.OutputText);
+            Assert.Contains(@"""/""", projectStream.OutputText);
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ImapSubscribeLsubAndUnsubscribePersist()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-lsub-{Guid.NewGuid():N}");
+        try
+        {
+            var scenario = await CreateImapInboxScenarioAsync(root);
+            await scenario.Provider.GetRequiredService<IMailboxService>()
+                .CreateAsync(scenario.State.AccountId!.Value, "Archive", CancellationToken.None);
+            await using var stream = new DuplexMemoryStream(string.Empty);
+            await using var connection = new ImapConnection(stream, TimeSpan.FromSeconds(1), 4096);
+
+            await scenario.Service.ExecuteLineAsync(connection, scenario.State, "A001 SUBSCRIBE \"Archive\"", "local", ConnectionSecurity.StartTls, true, CancellationToken.None);
+            await scenario.Service.ExecuteLineAsync(connection, scenario.State, "A002 LSUB \"\" \"*\"", "local", ConnectionSecurity.StartTls, true, CancellationToken.None);
+            await scenario.Service.ExecuteLineAsync(connection, scenario.State, "A003 UNSUBSCRIBE \"Archive\"", "local", ConnectionSecurity.StartTls, true, CancellationToken.None);
+            await scenario.Service.ExecuteLineAsync(connection, scenario.State, "A004 LSUB \"\" \"*\"", "local", ConnectionSecurity.StartTls, true, CancellationToken.None);
+
+            var output = stream.OutputText;
+            Assert.Contains(@"* LSUB (\HasNoChildren \Archive) ""/"" ""Archive""", output);
+            Assert.True(output.IndexOf("A003 OK", StringComparison.Ordinal) < output.LastIndexOf("A004 OK", StringComparison.Ordinal));
+            Assert.Single(Regex.Matches(output, @"\* LSUB"));
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ImapSelectedMailboxDeletedByAnotherConnectionDeselectsOnNoop()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-selected-deleted-{Guid.NewGuid():N}");
+        try
+        {
+            var scenario = await CreateImapInboxScenarioAsync(root);
+            var mailbox = scenario.Provider.GetRequiredService<IMailboxService>();
+            await mailbox.CreateAsync(scenario.State.AccountId!.Value, "Projects", CancellationToken.None);
+            await using var stream = new DuplexMemoryStream(string.Empty);
+            await using var connection = new ImapConnection(stream, TimeSpan.FromSeconds(1), 4096);
+
+            await scenario.Service.ExecuteLineAsync(connection, scenario.State, "A001 SELECT Projects", "local", ConnectionSecurity.StartTls, true, CancellationToken.None);
+            await mailbox.DeleteAsync(scenario.State.AccountId!.Value, "Projects", CancellationToken.None);
+            await scenario.Service.ExecuteLineAsync(connection, scenario.State, "A002 NOOP", "local", ConnectionSecurity.StartTls, true, CancellationToken.None);
+            await scenario.Service.ExecuteLineAsync(connection, scenario.State, "A003 FETCH 1 FLAGS", "local", ConnectionSecurity.StartTls, true, CancellationToken.None);
+            await scenario.Service.ExecuteLineAsync(connection, scenario.State, "A004 CLOSE", "local", ConnectionSecurity.StartTls, true, CancellationToken.None);
+
+            Assert.Contains("* 0 EXISTS", stream.OutputText);
+            Assert.Contains("A002 OK NOOP completed", stream.OutputText);
+            Assert.Contains("A003 NO \"Select a mailbox first.\"", stream.OutputText);
+            Assert.Contains("A004 NO \"Select a mailbox first.\"", stream.OutputText);
+            Assert.Null(scenario.State.MailboxId);
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ImapRenameParentMailboxMovesChildrenAndSystemMailboxesAreProtected()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-rename-{Guid.NewGuid():N}");
+        try
+        {
+            var scenario = await CreateImapInboxScenarioAsync(root);
+            var mailbox = scenario.Provider.GetRequiredService<IMailboxService>();
+            await mailbox.CreateAsync(scenario.State.AccountId!.Value, "Projects", CancellationToken.None);
+            await mailbox.CreateAsync(scenario.State.AccountId!.Value, "Projects/Alpha", CancellationToken.None);
+            await mailbox.CreateAsync(scenario.State.AccountId!.Value, "Projects/Beta", CancellationToken.None);
+            await mailbox.CreateAsync(scenario.State.AccountId!.Value, "Sent", CancellationToken.None);
+            await using var stream = new DuplexMemoryStream(string.Empty);
+            await using var connection = new ImapConnection(stream, TimeSpan.FromSeconds(1), 4096);
+
+            await scenario.Service.ExecuteLineAsync(connection, scenario.State, "A001 RENAME \"Projects\" \"OldProjects\"", "local", ConnectionSecurity.StartTls, true, CancellationToken.None);
+            await scenario.Service.ExecuteLineAsync(connection, scenario.State, "A002 RENAME INBOX OldInbox", "local", ConnectionSecurity.StartTls, true, CancellationToken.None);
+            await scenario.Service.ExecuteLineAsync(connection, scenario.State, "A003 DELETE Sent", "local", ConnectionSecurity.StartTls, true, CancellationToken.None);
+
+            var names = (await mailbox.ListAsync(scenario.State.AccountId!.Value, CancellationToken.None)).Select(x => x.Name).ToArray();
+            Assert.Contains("OldProjects", names);
+            Assert.Contains("OldProjects/Alpha", names);
+            Assert.Contains("OldProjects/Beta", names);
+            Assert.DoesNotContain("Projects", names);
+            Assert.DoesNotContain("OldInbox", names);
+            Assert.Contains("INBOX", names);
+            Assert.Contains("Sent", names);
+            Assert.Contains("A002 NO", stream.OutputText);
+            Assert.Contains("System mailbox 'INBOX' cannot be renamed.", stream.OutputText);
+            Assert.Contains("A003 NO", stream.OutputText);
+            Assert.Contains("System mailbox 'Sent' cannot be deleted.", stream.OutputText);
+            await using var verification = await scenario.Factory.CreateDbContextAsync();
+            var inbox = await verification.Mailboxes.SingleAsync(x => x.AccountId == scenario.State.AccountId && x.Name == "INBOX");
+            Assert.True(await verification.MailboxMessages.AnyAsync(x => x.MailboxId == inbox.Id));
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ImapDeleteMailboxWithChildrenIsRejectedAndStatusDoesNotSelect()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-delete-status-{Guid.NewGuid():N}");
+        try
+        {
+            var scenario = await CreateImapInboxScenarioAsync(root);
+            var mailbox = scenario.Provider.GetRequiredService<IMailboxService>();
+            await mailbox.CreateAsync(scenario.State.AccountId!.Value, "Projects", CancellationToken.None);
+            await mailbox.CreateAsync(scenario.State.AccountId!.Value, "Projects/Alpha", CancellationToken.None);
+            await using var stream = new DuplexMemoryStream(string.Empty);
+            await using var connection = new ImapConnection(stream, TimeSpan.FromSeconds(1), 4096);
+
+            await scenario.Service.ExecuteLineAsync(connection, scenario.State, "A001 SELECT INBOX", "local", ConnectionSecurity.StartTls, true, CancellationToken.None);
+            var selected = scenario.State.MailboxId;
+            await scenario.Service.ExecuteLineAsync(connection, scenario.State, "A002 STATUS Projects (MESSAGES UNSEEN UIDNEXT UIDVALIDITY)", "local", ConnectionSecurity.StartTls, true, CancellationToken.None);
+            await scenario.Service.ExecuteLineAsync(connection, scenario.State, "A003 DELETE Projects", "local", ConnectionSecurity.StartTls, true, CancellationToken.None);
+
+            Assert.Equal(selected, scenario.State.MailboxId);
+            Assert.Equal("INBOX", scenario.State.MailboxName);
+            Assert.Contains("* STATUS \"Projects\"", stream.OutputText);
+            Assert.Contains("A002 OK STATUS completed", stream.OutputText);
+            Assert.Contains("A003 NO \"Mailbox has child mailboxes.\"", stream.OutputText);
+            Assert.NotNull(await mailbox.SelectAsync(scenario.State.AccountId!.Value, "Projects", CancellationToken.None));
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ImapMimeBoundaryLikeTextNestedMultipartAndMalformedContentStayFetchable()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-mime-87-90-{Guid.NewGuid():N}");
+        try
+        {
+            var scenario = await CreateImapInboxScenarioAsync(root);
+            await using (var db = await scenario.Factory.CreateDbContextAsync())
+            {
+                db.MailboxMessages.RemoveRange(db.MailboxMessages.Where(x => x.MailboxId == scenario.MailboxId));
+                await db.SaveChangesAsync();
+            }
+
+            await AddInboxMessageAsync(
+                scenario.Factory,
+                scenario.Store,
+                scenario.MailboxId,
+                1,
+                """
+                MIME-Version: 1.0
+                Subject: boundary
+                Content-Type: multipart/mixed; boundary="----abc"
+
+                ------abc
+                Content-Type: text/plain
+
+                this line mentions ------abc but is not a delimiter
+                ------abc--
+                """.ReplaceLineEndings("\r\n"));
+            await AddInboxMessageAsync(
+                scenario.Factory,
+                scenario.Store,
+                scenario.MailboxId,
+                2,
+                """
+                MIME-Version: 1.0
+                Subject: nested
+                Content-Type: multipart/mixed; boundary="outer"
+
+                --outer
+                Content-Type: multipart/alternative; boundary="alt"
+
+                --alt
+                Content-Type: text/plain; charset=utf-8
+
+                plain
+                --alt
+                Content-Type: text/html; charset=utf-8
+
+                <b>html</b>
+                --alt--
+                --outer
+                Content-Type: application/pdf; name="a.pdf"
+                Content-Disposition: attachment; filename="a.pdf"
+                Content-Transfer-Encoding: base64
+
+                SGVsbG8=
+                --outer--
+                """.ReplaceLineEndings("\r\n"));
+            await AddInboxMessageAsync(
+                scenario.Factory,
+                scenario.Store,
+                scenario.MailboxId,
+                3,
+                "Subject: bad content type\r\nContent-Type: text/html; charset=\"unknown-charset\"\r\n\r\n<html>safe</html>\r\n");
+            var invalidBase64 = "Subject: bad base64\r\nContent-Type: application/octet-stream\r\nContent-Transfer-Encoding: base64\r\n\r\n%%%not-base64%%%\r\n";
+            await AddInboxMessageAsync(
+                scenario.Factory,
+                scenario.Store,
+                scenario.MailboxId,
+                4,
+                invalidBase64);
+            await using var stream = new DuplexMemoryStream(string.Empty);
+            await using var connection = new ImapConnection(stream, TimeSpan.FromSeconds(1), 16384);
+
+            await scenario.Service.FetchAsync(connection, scenario.State, "1:* (BODYSTRUCTURE RFC822)", "local", useUid: false, CancellationToken.None);
+
+            var output = stream.OutputText;
+            Assert.Contains("this line mentions ------abc", output);
+            Assert.Contains("\"ALTERNATIVE\"", output);
+            Assert.Contains("\"TEXT\" \"HTML\"", output);
+            Assert.Contains("\"APPLICATION\" \"PDF\"", output);
+            Assert.Contains("unknown-charset", output);
+            Assert.Contains("%%%not-base64%%%", output);
+            Assert.Contains($"RFC822 {{{Encoding.UTF8.GetByteCount(invalidBase64)}}}", output);
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ImapMimeAttachmentsKeepDuplicateAndEncodedFileNamesDistinct()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-mime-91-92-99-{Guid.NewGuid():N}");
+        try
+        {
+            var scenario = await CreateImapInboxScenarioAsync(root);
+            await using (var db = await scenario.Factory.CreateDbContextAsync())
+            {
+                db.MailboxMessages.RemoveRange(db.MailboxMessages.Where(x => x.MailboxId == scenario.MailboxId));
+                await db.SaveChangesAsync();
+            }
+
+            await AddInboxMessageAsync(
+                scenario.Factory,
+                scenario.Store,
+                scenario.MailboxId,
+                1,
+                """
+                MIME-Version: 1.0
+                Subject: attachments
+                Content-Type: multipart/mixed; boundary="files"
+
+                --files
+                Content-Type: text/plain; charset=utf-8
+
+                body
+                --files
+                Content-Type: application/pdf; name="invoice.pdf"
+                Content-Disposition: attachment; filename="invoice.pdf"
+                Content-Transfer-Encoding: base64
+
+                Zmlyc3Q=
+                --files
+                Content-Type: application/pdf; name="invoice.pdf"
+                Content-Disposition: attachment; filename="invoice.pdf"
+                Content-Transfer-Encoding: base64
+
+                c2Vjb25k
+                --files
+                Content-Type: application/pdf
+                Content-Disposition: attachment;
+                 filename*=UTF-8''%E6%8A%A5%E5%91%8A.pdf
+                Content-Transfer-Encoding: base64
+
+                cmZjMjIzMQ==
+                --files
+                Content-Type: application/pdf
+                Content-Disposition: attachment; filename="=?UTF-8?B?5rWL6K+VLnBkZg==?="
+                Content-Transfer-Encoding: base64
+
+                cmZjMjA0Nw==
+                --files--
+                """.ReplaceLineEndings("\r\n"));
+            await using var stream = new DuplexMemoryStream(string.Empty);
+            await using var connection = new ImapConnection(stream, TimeSpan.FromSeconds(1), 32768);
+
+            await scenario.Service.FetchAsync(connection, scenario.State, "1 (BODYSTRUCTURE RFC822)", "local", useUid: false, CancellationToken.None);
+
+            var output = stream.OutputText;
+            Assert.True(Regex.Matches(output, "\"FILENAME\" \"invoice.pdf\"").Count >= 2);
+            Assert.Contains("\"FILENAME\" \"报告.pdf\"", output);
+            Assert.Contains("\"FILENAME\" \"测试.pdf\"", output);
+            Assert.Contains("filename*=UTF-8''%E6%8A%A5%E5%91%8A.pdf", output);
+            Assert.Contains("=?UTF-8?B?5rWL6K+VLnBkZg==?=", output);
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ImapSearchTextFindsHtmlOnlyPlainOnlyAndEncodedSubject()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-mime-93-94-98-{Guid.NewGuid():N}");
+        try
+        {
+            var scenario = await CreateImapInboxScenarioAsync(root);
+            await using (var db = await scenario.Factory.CreateDbContextAsync())
+            {
+                db.MailboxMessages.RemoveRange(db.MailboxMessages.Where(x => x.MailboxId == scenario.MailboxId));
+                await db.SaveChangesAsync();
+            }
+
+            await AddInboxMessageAsync(
+                scenario.Factory,
+                scenario.Store,
+                scenario.MailboxId,
+                1,
+                """
+                MIME-Version: 1.0
+                Subject: =?UTF-8?B?5rWL?= =?UTF-8?B?6K+V?=
+                Content-Type: text/html; charset=utf-8
+
+                <html><body><h1>欢迎</h1><p>Only HTML searchable summary</p><script>alert(1)</script></body></html>
+                """.ReplaceLineEndings("\r\n"));
+            await AddInboxMessageAsync(
+                scenario.Factory,
+                scenario.Store,
+                scenario.MailboxId,
+                2,
+                """
+                MIME-Version: 1.0
+                Subject: plain
+                Content-Type: text/plain; charset=utf-8
+
+                Only plain searchable body.
+                """.ReplaceLineEndings("\r\n"));
+            await using var stream = new DuplexMemoryStream(string.Empty);
+            await using var connection = new ImapConnection(stream, TimeSpan.FromSeconds(1), 4096);
+
+            await scenario.Service.ExecuteLineAsync(connection, scenario.State, "A001 SEARCH TEXT \"HTML searchable\"", "local", ConnectionSecurity.StartTls, true, CancellationToken.None);
+            await scenario.Service.ExecuteLineAsync(connection, scenario.State, "A002 SEARCH BODY \"plain searchable\"", "local", ConnectionSecurity.StartTls, true, CancellationToken.None);
+            await scenario.Service.ExecuteLineAsync(connection, scenario.State, "A003 SEARCH SUBJECT \"测试\"", "local", ConnectionSecurity.StartTls, true, CancellationToken.None);
+
+            Assert.Contains("* SEARCH 1", stream.OutputText);
+            Assert.Contains("* SEARCH 2", stream.OutputText);
+            Assert.Equal(2, Regex.Matches(stream.OutputText, @"\* SEARCH 1").Count);
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ImapDirtyMultipartBoundariesRemainFetchable()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-mime-95-97-{Guid.NewGuid():N}");
+        try
+        {
+            var scenario = await CreateImapInboxScenarioAsync(root);
+            await using (var db = await scenario.Factory.CreateDbContextAsync())
+            {
+                db.MailboxMessages.RemoveRange(db.MailboxMessages.Where(x => x.MailboxId == scenario.MailboxId));
+                await db.SaveChangesAsync();
+            }
+
+            var missingClose = """
+                MIME-Version: 1.0
+                Subject: missing close
+                Content-Type: multipart/mixed; boundary=abc
+
+                --abc
+                Content-Type: text/plain
+
+                hello without final boundary
+                """.ReplaceLineEndings("\r\n");
+            var trailingSpace = """
+                MIME-Version: 1.0
+                Subject: trailing boundary
+                Content-Type: multipart/mixed; boundary=abc
+
+                --abc
+                Content-Type: text/plain
+
+                hello with dirty boundary
+                --abc--
+                """.ReplaceLineEndings("\r\n")
+                .Replace("--abc\r\nContent-Type", "--abc \r\nContent-Type", StringComparison.Ordinal);
+            var specialBoundary = """
+                MIME-Version: 1.0
+                Subject: special boundary
+                Content-Type: multipart/mixed; boundary="----=_NextPart_(abc)+123"
+
+                ------=_NextPart_(abc)+123
+                Content-Type: text/plain
+
+                hello special boundary
+                ------=_NextPart_(abc)+123--
+                """.ReplaceLineEndings("\r\n");
+            await AddInboxMessageAsync(scenario.Factory, scenario.Store, scenario.MailboxId, 1, missingClose);
+            await AddInboxMessageAsync(scenario.Factory, scenario.Store, scenario.MailboxId, 2, trailingSpace);
+            await AddInboxMessageAsync(scenario.Factory, scenario.Store, scenario.MailboxId, 3, specialBoundary);
+            await using var stream = new DuplexMemoryStream(string.Empty);
+            await using var connection = new ImapConnection(stream, TimeSpan.FromSeconds(1), 32768);
+
+            await scenario.Service.FetchAsync(connection, scenario.State, "1:* (BODYSTRUCTURE RFC822)", "local", useUid: false, CancellationToken.None);
+
+            var output = stream.OutputText;
+            Assert.Contains("hello without final boundary", output);
+            Assert.Contains("hello with dirty boundary", output);
+            Assert.Contains("hello special boundary", output);
+            Assert.Contains($"RFC822 {{{Encoding.UTF8.GetByteCount(missingClose)}}}", output);
+            Assert.Contains($"RFC822 {{{Encoding.UTF8.GetByteCount(trailingSpace)}}}", output);
+            Assert.Contains($"RFC822 {{{Encoding.UTF8.GetByteCount(specialBoundary)}}}", output);
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ImapMismatchedTransferEncodingKeepsOriginalBytesFetchable()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-mime-100-{Guid.NewGuid():N}");
+        try
+        {
+            var scenario = await CreateImapInboxScenarioAsync(root);
+            await using (var db = await scenario.Factory.CreateDbContextAsync())
+            {
+                db.MailboxMessages.RemoveRange(db.MailboxMessages.Where(x => x.MailboxId == scenario.MailboxId));
+                await db.SaveChangesAsync();
+            }
+
+            var badBase64 = "Subject: bad base64\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: base64\r\n\r\nhello world\r\n";
+            var badQuotedPrintable = "Subject: bad qp\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\nhello =XX world=\r\n";
+            await AddInboxMessageAsync(scenario.Factory, scenario.Store, scenario.MailboxId, 1, badBase64);
+            await AddInboxMessageAsync(scenario.Factory, scenario.Store, scenario.MailboxId, 2, badQuotedPrintable);
+            await using var stream = new DuplexMemoryStream(string.Empty);
+            await using var connection = new ImapConnection(stream, TimeSpan.FromSeconds(1), 32768);
+
+            await scenario.Service.FetchAsync(connection, scenario.State, "1:* (BODYSTRUCTURE RFC822)", "local", useUid: false, CancellationToken.None);
+
+            Assert.Contains("hello world", stream.OutputText);
+            Assert.Contains("hello =XX world=", stream.OutputText);
+            Assert.Contains($"RFC822 {{{Encoding.UTF8.GetByteCount(badBase64)}}}", stream.OutputText);
+            Assert.Contains($"RFC822 {{{Encoding.UTF8.GetByteCount(badQuotedPrintable)}}}", stream.OutputText);
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ImapMime101To111StructuresSearchAndFetchRemainStable()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-mime-101-111-{Guid.NewGuid():N}");
+        try
+        {
+            var scenario = await CreateImapInboxScenarioAsync(root);
+            await using (var db = await scenario.Factory.CreateDbContextAsync())
+            {
+                db.MailboxMessages.RemoveRange(db.MailboxMessages.Where(x => x.MailboxId == scenario.MailboxId));
+                await db.SaveChangesAsync();
+            }
+
+            var raw = """
+                MIME-Version: 1.0
+                Subject: complex
+                Content-Type: multipart/mixed; boundary="outer"
+
+                --outer
+                Content-Type: text/plain; charset=utf-8
+                Content-Transfer-Encoding: quoted-printable
+
+                hello=
+                world
+                --outer
+                Content-Type: multipart/mixed; boundary="empty"
+
+                --empty
+                Content-Type: text/plain
+
+                --empty
+                Content-Type: application/pdf
+                Content-Disposition: attachment; filename="empty.pdf"
+
+                --empty--
+                --outer
+                Content-Type: message/rfc822
+                Content-Disposition: attachment; filename="forwarded.eml"
+
+                From: Nested <nested@example.net>
+                To: Alice <alice@example.com>
+                Subject: nested message
+
+                nested searchable body
+                --outer
+                Content-Type: multipart/related; boundary="rel"
+
+                --rel
+                Content-Type: text/html; charset=utf-8
+
+                <html><body><img src="cid:image001.png@abc">related body &amp;#20320;</body></html>
+                --rel
+                Content-Type: image/png
+                Content-ID: <image001.png@abc>
+                Content-Disposition: inline; filename="image001.png"
+
+                png
+                --rel--
+                --outer
+                Content-Type: text/calendar; method=REQUEST; charset=utf-8
+
+                BEGIN:VCALENDAR
+                METHOD:REQUEST
+                BEGIN:VEVENT
+                UID:event-1
+                SEQUENCE:2
+                END:VEVENT
+                END:VCALENDAR
+                --outer
+                Content-Type: multipart/signed; protocol="application/pgp-signature"; boundary="signed"
+
+                --signed
+                Content-Type: text/plain
+
+                signed body
+                --signed
+                Content-Type: application/pgp-signature
+
+                signature
+                --signed--
+                --outer
+                Content-Type: application/pkcs7-mime; name="smime.p7m"
+                Content-Disposition: attachment; filename="smime.p7m"
+
+                encrypted
+                --outer--
+                """.ReplaceLineEndings("\r\n");
+            await AddInboxMessageAsync(scenario.Factory, scenario.Store, scenario.MailboxId, 1, raw);
+            await using var stream = new DuplexMemoryStream(string.Empty);
+            await using var connection = new ImapConnection(stream, TimeSpan.FromSeconds(1), 65536);
+
+            await scenario.Service.ExecuteLineAsync(connection, scenario.State, "A001 SEARCH TEXT \"helloworld\"", "local", ConnectionSecurity.StartTls, true, CancellationToken.None);
+            await scenario.Service.ExecuteLineAsync(connection, scenario.State, "A002 SEARCH TEXT \"nested searchable\"", "local", ConnectionSecurity.StartTls, true, CancellationToken.None);
+            await scenario.Service.FetchAsync(connection, scenario.State, "1 (BODYSTRUCTURE RFC822)", "local", useUid: false, CancellationToken.None);
+
+            var output = stream.OutputText;
+            Assert.Contains("* SEARCH 1", output);
+            Assert.Contains("\"MESSAGE\" \"RFC822\"", output);
+            Assert.Contains("\"RELATED\"", output);
+            Assert.Contains("image001.png@abc", output);
+            Assert.Contains("\"TEXT\" \"CALENDAR\"", output);
+            Assert.Contains("\"SIGNED\"", output);
+            Assert.Contains("\"APPLICATION\" \"PKCS7-MIME\"", output);
+            Assert.Contains("related body &amp;#20320;", output);
+            Assert.Contains($"RFC822 {{{Encoding.UTF8.GetByteCount(raw)}}}", output);
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ImapFetchHandlesMissingBlobAndLargePartialFetchWithoutLosingMailbox()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-recovery-partial-{Guid.NewGuid():N}");
+        try
+        {
+            var scenario = await CreateImapInboxScenarioAsync(root);
+            await using (var db = await scenario.Factory.CreateDbContextAsync())
+            {
+                db.MailboxMessages.RemoveRange(db.MailboxMessages.Where(x => x.MailboxId == scenario.MailboxId));
+                await db.SaveChangesAsync();
+            }
+
+            await AddInboxMessageAsync(
+                scenario.Factory,
+                scenario.Store,
+                scenario.MailboxId,
+                1,
+                "Subject: missing\r\n\r\nwill lose blob\r\n");
+            var longLine = new string('A', 12_000) + "尾巴";
+            var raw = "Subject: long\r\n\r\n" + longLine + "\r\n";
+            await AddInboxMessageAsync(scenario.Factory, scenario.Store, scenario.MailboxId, 2, raw);
+            string missingKey;
+            await using (var db = await scenario.Factory.CreateDbContextAsync())
+            {
+                missingKey = await db.MailboxMessages
+                    .Where(x => x.MailboxId == scenario.MailboxId && x.Uid == 1)
+                    .Select(x => x.Message.ContentKey)
+                    .SingleAsync();
+            }
+            var missingPath = Path.Combine(root, missingKey[..2], missingKey[2..4], $"{missingKey}.eml");
+            File.Delete(missingPath);
+            await using var stream = new DuplexMemoryStream(string.Empty);
+            await using var connection = new ImapConnection(stream, TimeSpan.FromSeconds(1), 65536);
+
+            await scenario.Service.FetchAsync(connection, scenario.State, "1:* (RFC822.SIZE RFC822 BODY.PEEK[]<20.40>)", "local", useUid: false, CancellationToken.None);
+            await scenario.Service.ExecuteLineAsync(connection, scenario.State, "A001 SEARCH ALL", "local", ConnectionSecurity.StartTls, true, CancellationToken.None);
+
+            var output = stream.OutputText;
+            Assert.Contains("* 1 FETCH", output);
+            Assert.Contains("RFC822 {0}", output);
+            Assert.Contains("* 2 FETCH", output);
+            Assert.Contains("BODY[]<20> {40}", output);
+            Assert.Contains("* SEARCH 1 2", output);
+            Assert.Contains("A001 OK SEARCH completed", output);
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ImapClientCompatibilityFetchSubscriptionsDraftsAndTrashRemainStable()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-client-124-131-{Guid.NewGuid():N}");
+        try
+        {
+            var scenario = await CreateImapInboxScenarioAsync(root);
+            var mailbox = scenario.Provider.GetRequiredService<IMailboxService>();
+            await mailbox.CreateAsync(scenario.State.AccountId!.Value, "Sent", CancellationToken.None);
+            await mailbox.CreateAsync(scenario.State.AccountId!.Value, "Trash", CancellationToken.None);
+            await mailbox.CreateAsync(scenario.State.AccountId!.Value, "Drafts", CancellationToken.None);
+            await mailbox.CreateAsync(scenario.State.AccountId!.Value, "Junk", CancellationToken.None);
+            await mailbox.CreateAsync(scenario.State.AccountId!.Value, "Archives", CancellationToken.None);
+            var draftOne = "Subject: draft one\r\n\r\n1\r\n";
+            var draftTwo = "Subject: draft two\r\n\r\n2\r\n";
+            await using var stream = new DuplexMemoryStream(draftOne + "\r\n" + draftTwo + "\r\n");
+            await using var connection = new ImapConnection(stream, TimeSpan.FromSeconds(1), 65536);
+
+            for (var i = 0; i < 5; i++)
+            {
+                await scenario.Service.ExecuteLineAsync(connection, scenario.State, $"F{i} UID FETCH 1:* (UID FLAGS BODY.PEEK[HEADER.FIELDS (FROM TO SUBJECT DATE MESSAGE-ID)])", "local", ConnectionSecurity.StartTls, true, CancellationToken.None);
+            }
+            var inboxFlags = (await mailbox.FetchAsync(scenario.MailboxId, "1:*", useUid: false, CancellationToken.None)).Single().Flags;
+            await scenario.Service.ExecuteLineAsync(connection, scenario.State, "S001 SUBSCRIBE Sent", "local", ConnectionSecurity.StartTls, true, CancellationToken.None);
+            await scenario.Service.ExecuteLineAsync(connection, scenario.State, "S002 LSUB \"\" \"*\"", "local", ConnectionSecurity.StartTls, true, CancellationToken.None);
+            await scenario.Service.AppendAsync(connection, scenario.State, "D001", $"\"Drafts\" (\\Draft) {{{Encoding.UTF8.GetByteCount(draftOne)}}}", "local", CancellationToken.None);
+            await scenario.Service.AppendAsync(connection, scenario.State, "D002", $"\"Drafts\" (\\Draft) {{{Encoding.UTF8.GetByteCount(draftTwo)}}}", "local", CancellationToken.None);
+            await scenario.Service.ExecuteLineAsync(connection, scenario.State, "T001 MOVE 1 Trash", "local", ConnectionSecurity.StartTls, true, CancellationToken.None);
+            await scenario.Service.ExecuteLineAsync(connection, scenario.State, "L001 LIST \"\" \"*\"", "local", ConnectionSecurity.StartTls, true, CancellationToken.None);
+
+            var output = stream.OutputText;
+            Assert.DoesNotContain("\\Seen", inboxFlags);
+            Assert.Contains(@"* LSUB (\HasNoChildren \Sent) ""/"" ""Sent""", output);
+            Assert.Contains(@"LIST (\HasNoChildren \Trash) ""/"" ""Trash""", output);
+            Assert.Contains(@"LIST (\HasNoChildren \Drafts) ""/"" ""Drafts""", output);
+            Assert.Contains(@"LIST (\HasNoChildren \Junk) ""/"" ""Junk""", output);
+            Assert.Contains(@"LIST (\HasNoChildren \Archive) ""/"" ""Archives""", output);
+            var drafts = await mailbox.SelectAsync(scenario.State.AccountId.Value, "Drafts", CancellationToken.None);
+            Assert.Equal(2, drafts!.Exists);
+            Assert.True(drafts.UidNext >= 3);
+            var trash = await mailbox.SelectAsync(scenario.State.AccountId.Value, "Trash", CancellationToken.None);
+            Assert.Equal(1, trash!.Exists);
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task ImapRefreshSelectedMailboxReportsNewExists()
     {
         var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-refresh-{Guid.NewGuid():N}");
@@ -2130,47 +3041,6 @@ public sealed class ProtocolAndPluginTests
     }
 
     [Fact]
-    public void RelaySecurityImplicitTlsUsesSslOnConnect()
-    {
-        var options = new RelayOptions
-        {
-            Host = "MAIL.1605960.XYZ",
-            Port = 465,
-            Security = "ImplicitTls",
-            UseStartTls = true
-        };
-
-        Assert.Equal(SecureSocketOptions.SslOnConnect, RelaySmtpTransport.ResolveSecureSocketOptions(options));
-        Assert.Equal(465, options.Port);
-    }
-
-    [Fact]
-    public void LegacyRelayStartTlsStillUsesStartTls()
-    {
-        var options = new RelayOptions
-        {
-            Host = "smtp.example.com",
-            Port = 587,
-            UseStartTls = true
-        };
-
-        Assert.Equal(SecureSocketOptions.StartTls, RelaySmtpTransport.ResolveSecureSocketOptions(options));
-    }
-
-    [Fact]
-    public void LegacyRelayPort465StartTlsUsesImplicitTls()
-    {
-        var options = new RelayOptions
-        {
-            Host = "smtp.example.com",
-            Port = 465,
-            UseStartTls = true
-        };
-
-        Assert.Equal(SecureSocketOptions.SslOnConnect, RelaySmtpTransport.ResolveSecureSocketOptions(options));
-    }
-
-    [Fact]
     public void PluginLoaderDiscoversTrustedDllAndRegistersMiddleware()
     {
         var root = Path.Combine(Path.GetTempPath(), $"mailserver-plugin-test-{Guid.NewGuid():N}");
@@ -2183,8 +3053,8 @@ public sealed class ProtocolAndPluginTests
                 {
                     id = "sample-large-message-policy",
                     version = "1.0.0",
-                    contractVersion = "1.0",
-                    entryAssembly = typeof(LargeMessagePlugin).Assembly.Location,
+                    contractVersion = PluginContract.Version,
+                    entryAssembly = typeof(LoaderTestPlugin).Assembly.Location,
                     hosts = new[] { "smtp" },
                     failureMode = "reject"
                 }));
@@ -2198,6 +3068,40 @@ public sealed class ProtocolAndPluginTests
 
             Assert.Single(provider.GetServices<IMessageAcceptanceMiddleware>());
             Assert.Single(provider.GetRequiredService<PluginCatalog>().Plugins);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void PluginLoaderRejectsOlderContractVersion()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-plugin-contract-test-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            File.WriteAllText(
+                Path.Combine(root, "plugin.json"),
+                JsonSerializer.Serialize(new
+                {
+                    id = "old-contract-plugin",
+                    version = "1.0.0",
+                    contractVersion = "1.0",
+                    entryAssembly = typeof(LoaderTestPlugin).Assembly.Location,
+                    hosts = new[] { "smtp" }
+                }));
+            var configuration = new ConfigurationBuilder()
+                .AddInMemoryCollection(new Dictionary<string, string?> { ["Plugins:Path"] = root })
+                .Build();
+            var services = new ServiceCollection();
+
+            var exception = Assert.Throws<InvalidOperationException>(() =>
+                services.AddMailServerPlugins(configuration, "smtp"));
+
+            Assert.Contains("requires contract 1.0", exception.Message);
+            Assert.Contains("host supports 2.0", exception.Message);
         }
         finally
         {
@@ -2231,12 +3135,23 @@ public sealed class ProtocolAndPluginTests
             services.AddMailServerPlugins(configuration, "smtp");
             using var provider = services.BuildServiceProvider();
 
-            Assert.Empty(provider.GetRequiredService<PluginCatalog>().Plugins);
+            var catalog = provider.GetRequiredService<PluginCatalog>();
+            Assert.Empty(catalog.Plugins);
+            Assert.Equal(root, Assert.Single(catalog.SearchPaths));
+            Assert.Equal(root, Assert.Single(catalog.SkippedSourceDirectories));
         }
         finally
         {
             Directory.Delete(root, recursive: true);
         }
+    }
+
+    [Fact]
+    public void RelativePluginPathIsResolvedBesideTheApplication()
+    {
+        var resolved = PluginServiceCollectionExtensions.ResolvePluginPath("plugins");
+
+        Assert.Equal(Path.GetFullPath("plugins", AppContext.BaseDirectory), resolved);
     }
 
     [Theory]
@@ -2283,30 +3198,34 @@ public sealed class ProtocolAndPluginTests
     }
 
     [Fact]
-    public async Task ExampleBearerAuthenticationMapsConfiguredIdentity()
+    public async Task AuthenticationPipelineContinuesAfterNotHandled()
     {
-        var settings = new PluginSettingsSnapshot(
-            true,
-            new Dictionary<string, JsonElement>
-            {
-                ["exampleIdentity"] = JsonSerializer.SerializeToElement("alice@example.com"),
-                ["exampleBearerToken"] = JsonSerializer.SerializeToElement("token-123")
-            });
-        var middleware = new ExampleBearerAuthenticationMiddleware();
+        var notHandled = new EarlierNotHandledAuthenticationMiddleware();
+        var success = new LaterSuccessAuthenticationMiddleware();
+        var services = new ServiceCollection();
+        services.AddSingleton<IAuthenticationMiddleware>(notHandled);
+        services.AddSingleton<IAuthenticationMiddleware>(success);
+        using var provider = services.BuildServiceProvider();
+        var pipeline = new PluginPipeline(
+            provider,
+            new PluginCatalog(),
+            new EmptyPluginSettingsProvider(),
+            NullLogger<PluginPipeline>.Instance);
 
-        var result = await middleware.AuthenticateAsync(
+        var result = await pipeline.AuthenticateAsync(
             new AuthenticationContext(
-                MailProtocol.Imap,
-                "OAUTHBEARER",
-                null,
+                MailProtocol.Smtp,
+                "XOAUTH2",
+                "alice@example.com",
                 "token-123",
                 "127.0.0.1",
-                true,
-                settings),
+                true),
             CancellationToken.None);
 
         Assert.Equal(AuthenticationStatus.Success, result.Status);
         Assert.Equal("alice@example.com", result.Identity);
+        Assert.Equal(1, notHandled.Invocations);
+        Assert.Equal(1, success.Invocations);
     }
 
     [Fact]
@@ -2362,7 +3281,7 @@ public sealed class ProtocolAndPluginTests
             Options.Create(new MailboxDefaultsOptions()),
             Options.Create(new CertificatesOptions()));
         var store = new FileMessageContentStore(
-            Options.Create(new StorageOptions { RootPath = root, MaximumMessageBytes = 4096 }),
+            Options.Create(new StorageOptions { RootPath = root, MaximumMessageBytes = 16 * 1024 * 1024 }),
             factory);
         await AddInboxMessageAsync(
             factory,
@@ -2509,17 +3428,6 @@ public sealed class ProtocolAndPluginTests
 
     private static string Base64(string value) => Convert.ToBase64String(Encoding.UTF8.GetBytes(value));
 
-    private static PluginSettingsSnapshot MimeSettings() =>
-        new(true, new Dictionary<string, JsonElement>(StringComparer.OrdinalIgnoreCase)
-        {
-            ["requireEightBitMimeDeclaration"] = JsonSerializer.SerializeToElement(true),
-            ["validateMimeStructure"] = JsonSerializer.SerializeToElement(true),
-            ["maximumMimeParts"] = JsonSerializer.SerializeToElement(1000),
-            ["maximumNestingDepth"] = JsonSerializer.SerializeToElement(30),
-            ["emptyBodyPolicy"] = JsonSerializer.SerializeToElement("accept"),
-            ["headerOnlyPolicy"] = JsonSerializer.SerializeToElement("accept")
-        });
-
     private static IDbContextFactory<MailDbContext> CreateFactory()
     {
         var options = new DbContextOptionsBuilder<MailDbContext>()
@@ -2581,6 +3489,18 @@ public sealed class ProtocolAndPluginTests
             Task.FromResult(new PluginSettingsSnapshot(true, new Dictionary<string, JsonElement>()));
     }
 
+    public sealed class LoaderTestPlugin : IMailServerPlugin
+    {
+        public void ConfigureServices(IServiceCollection services) =>
+            services.AddSingleton<IMessageAcceptanceMiddleware, LoaderTestMiddleware>();
+    }
+
+    private sealed class LoaderTestMiddleware : IMessageAcceptanceMiddleware
+    {
+        public Task<PluginDecision> InvokeAsync(MessageAcceptanceContext context, CancellationToken cancellationToken) =>
+            Task.FromResult(PluginDecision.Continue());
+    }
+
     private sealed class FirstFailureAuthenticationMiddleware : IAuthenticationMiddleware
     {
         public IReadOnlyCollection<string> GetMechanisms(MailProtocol protocol) =>
@@ -2591,6 +3511,19 @@ public sealed class ProtocolAndPluginTests
         {
             Invocations++;
             return Task.FromResult(AuthenticationResult.Failure("invalid"));
+        }
+    }
+
+    private sealed class EarlierNotHandledAuthenticationMiddleware : IAuthenticationMiddleware
+    {
+        public IReadOnlyCollection<string> GetMechanisms(MailProtocol protocol) =>
+            protocol == MailProtocol.Smtp ? ["XOAUTH2"] : [];
+        public int Invocations { get; private set; }
+
+        public Task<AuthenticationResult> AuthenticateAsync(AuthenticationContext context, CancellationToken cancellationToken)
+        {
+            Invocations++;
+            return Task.FromResult(AuthenticationResult.NotHandled());
         }
     }
 

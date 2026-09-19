@@ -1,9 +1,9 @@
-using MailServer.Api.Components;
 using Microsoft.Extensions.FileProviders;
+using System.Text.RegularExpressions;
 
 namespace MailServer.Api;
 
-public static class StaticWebAssetExtraction
+public static partial class StaticWebAssetExtraction
 {
     private const string ResourcePrefix = "MailServer.Api.StaticWebAssets/wwwroot/";
 
@@ -17,7 +17,7 @@ public static class StaticWebAssetExtraction
         var webRootFullPath = Path.GetFullPath(webRoot);
         var webRootWithSeparator = webRootFullPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
             + Path.DirectorySeparatorChar;
-        var assembly = typeof(App).Assembly;
+        var assembly = typeof(StaticWebAssetExtraction).Assembly;
 
         foreach (var resourceName in assembly.GetManifestResourceNames()
                      .Where(name => name.StartsWith(ResourcePrefix, StringComparison.Ordinal)))
@@ -37,11 +37,6 @@ public static class StaticWebAssetExtraction
                 continue;
             }
 
-            if (File.Exists(targetPath) && new FileInfo(targetPath).Length == source.Length)
-            {
-                continue;
-            }
-
             var directory = Path.GetDirectoryName(targetPath);
             if (!string.IsNullOrEmpty(directory))
             {
@@ -56,5 +51,36 @@ public static class StaticWebAssetExtraction
 
             File.Move(temporaryPath, targetPath, overwrite: true);
         }
+
+        ValidateAdminBundle(webRootFullPath);
     }
+
+    internal static void ValidateAdminBundle(string webRoot)
+    {
+        var indexPath = Path.Combine(webRoot, "admin", "index.html");
+        if (!File.Exists(indexPath))
+        {
+            throw new InvalidOperationException(
+                $"The Vue administration bundle is incomplete: '{indexPath}' is missing. Rebuild and redeploy the complete package.");
+        }
+
+        var index = File.ReadAllText(indexPath);
+        var missingAssets = AdminAssetReferenceRegex().Matches(index)
+            .Select(match => match.Groups["path"].Value)
+            .Select(path => path.Split('?', '#')[0])
+            .Distinct(StringComparer.Ordinal)
+            .Where(path => !File.Exists(Path.Combine(
+                webRoot,
+                path.TrimStart('/').Replace('/', Path.DirectorySeparatorChar))))
+            .ToArray();
+
+        if (missingAssets.Length > 0)
+        {
+            throw new InvalidOperationException(
+                $"The Vue administration bundle is incomplete. Missing assets: {string.Join(", ", missingAssets)}. Rebuild and redeploy the complete package.");
+        }
+    }
+
+    [GeneratedRegex("(?:src|href)=[\"'](?<path>/admin/[^\"'#]+)[\"']", RegexOptions.IgnoreCase)]
+    private static partial Regex AdminAssetReferenceRegex();
 }

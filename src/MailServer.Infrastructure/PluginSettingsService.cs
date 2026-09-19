@@ -70,7 +70,7 @@ public sealed class PluginSettingsService(
             .ToArray();
     }
 
-    public async Task SaveOrderAsync(IReadOnlyList<string> pluginIds, CancellationToken cancellationToken)
+    public async Task SaveOrderAsync(IReadOnlyList<string> pluginIds, CancellationToken cancellationToken, string actor = "admin")
     {
         var known = catalog.Plugins.Select(x => x.Manifest.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
         if (pluginIds.Count != pluginIds.Distinct(StringComparer.OrdinalIgnoreCase).Count()
@@ -86,6 +86,16 @@ public sealed class PluginSettingsService(
         var json = JsonSerializer.Serialize(orders);
         if (setting is null) db.SystemSettings.Add(new SystemSetting { Key = OrderKey, Value = json });
         else setting.Value = json;
+        db.AuditRecords.Add(new AuditRecord
+        {
+            Actor = actor,
+            Action = "plugin.order.update",
+            Resource = "plugins:order",
+            Detail = string.Join(",", pluginIds),
+            Category = AuditCategory.Plugin,
+            Status = AuditStatus.Succeeded,
+            RawJson = AuditLogService.SafeJson(new { pluginIds })
+        });
         await db.SaveChangesAsync(cancellationToken);
     }
 
@@ -115,27 +125,45 @@ public sealed class PluginSettingsService(
         bool enabled,
         IReadOnlyDictionary<string, JsonElement> input,
         IReadOnlySet<string> clearedSecrets,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string actor = "admin")
     {
         var plugin = Find(pluginId);
         var definitions = plugin.Manifest.Settings.ToDictionary(x => x.Key, StringComparer.OrdinalIgnoreCase);
         if (input.Keys.Any(key => !definitions.ContainsKey(key)))
             throw new FormatException("Plugin configuration contains an unknown setting.");
         var stored = await ReadStoredAsync(pluginId, cancellationToken);
+        var previous = await GetAsync(pluginId, cancellationToken);
+        var changes = new List<AuditFieldChangeView>();
+        if (previous.Enabled != enabled)
+            changes.Add(new AuditFieldChangeView("enabled", previous.Enabled.ToString(), enabled.ToString()));
         stored.Enabled = enabled;
         foreach (var definition in definitions.Values)
         {
             if (definition.Type == PluginSettingType.Password)
             {
-                if (clearedSecrets.Contains(definition.Key)) stored.Secrets.Remove(definition.Key);
+                var hadSecret = stored.Secrets.ContainsKey(definition.Key);
+                if (clearedSecrets.Contains(definition.Key))
+                {
+                    stored.Secrets.Remove(definition.Key);
+                    if (hadSecret) changes.Add(new AuditFieldChangeView(definition.Key, "***", null));
+                }
                 if (input.TryGetValue(definition.Key, out var secret)
                     && secret.ValueKind == JsonValueKind.String
                     && !string.IsNullOrEmpty(secret.GetString()))
+                {
                     stored.Secrets[definition.Key] = _protector.Protect(secret.GetString()!);
+                    changes.Add(new AuditFieldChangeView(definition.Key, hadSecret ? "***" : null, "***"));
+                }
                 continue;
             }
             if (!input.TryGetValue(definition.Key, out var value)) continue;
             ValidateValue(definition, value);
+            if (!previous.Values.TryGetValue(definition.Key, out var oldValue)
+                || oldValue.GetRawText() != value.GetRawText())
+            {
+                changes.Add(new AuditFieldChangeView(definition.Key, oldValue.GetRawText(), value.GetRawText()));
+            }
             stored.Values[definition.Key] = value.Clone();
         }
 
@@ -145,6 +173,25 @@ public sealed class PluginSettingsService(
         var json = JsonSerializer.Serialize(stored);
         if (setting is null) db.SystemSettings.Add(new SystemSetting { Key = key, Value = json });
         else setting.Value = json;
+        db.AuditRecords.Add(new AuditRecord
+        {
+            Actor = actor,
+            Action = "plugin.settings.update",
+            Resource = $"plugin:{plugin.Manifest.Id}",
+            Detail = plugin.Manifest.DisplayName ?? plugin.Manifest.Id,
+            Category = AuditCategory.Plugin,
+            Status = AuditStatus.Succeeded,
+            PluginId = plugin.Manifest.Id,
+            PluginName = plugin.Manifest.DisplayName ?? plugin.Manifest.Id,
+            ChangeSummaryJson = JsonSerializer.Serialize(changes),
+            RawJson = AuditLogService.SafeJson(new
+            {
+                pluginId = plugin.Manifest.Id,
+                pluginName = plugin.Manifest.DisplayName ?? plugin.Manifest.Id,
+                enabled,
+                changedFields = changes.Select(x => x.Field).ToArray()
+            })
+        });
         await db.SaveChangesAsync(cancellationToken);
         return await GetConfigurationAsync(pluginId, cancellationToken);
     }

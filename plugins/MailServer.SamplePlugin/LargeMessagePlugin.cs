@@ -1,4 +1,6 @@
 using MailServer.PluginSdk;
+using MailServer.PluginSdk.Security;
+using MailServer.PluginSdk.Smtp;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace MailServer.SamplePlugin;

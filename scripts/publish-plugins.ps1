@@ -12,7 +12,8 @@ if ([string]::IsNullOrWhiteSpace($Output)) {
 
 $plugins = @(
     "MailServer.MimePlugin",
-    "MailServer.GreylistingPlugin"
+    "MailServer.GreylistingPlugin",
+    "MailServer.TestPlugin"
 )
 
 foreach ($plugin in $plugins) {

@@ -7,12 +7,17 @@ using System.Collections.Concurrent;
 using MailServer.Domain;
 using MailServer.Infrastructure;
 using MailServer.PluginSdk;
+using MailServer.PluginSdk.Security;
+using MailServer.PluginSdk.Smtp;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using MimeKit;
 
 namespace MailServer.Smtp;
 
+/// <summary>
+/// SMTP 服务的运行配置。这里的限制值直接影响协议层拒绝响应，修改时要同步考虑客户端兼容性。
+/// </summary>
 public sealed class SmtpServerOptions
 {
     public const string SectionName = "Smtp";
@@ -27,6 +32,9 @@ public sealed class SmtpServerOptions
     public List<SmtpEndpointOptions> Endpoints { get; set; } = [];
 }
 
+/// <summary>
+/// 单个 SMTP 监听端点配置。Security 是新配置项，ImplicitTls 保留给旧配置文件平滑升级。
+/// </summary>
 public sealed class SmtpEndpointOptions
 {
     private ConnectionSecurity? _security;
@@ -51,6 +59,9 @@ public sealed class SmtpEndpointOptions
     internal ConnectionSecurity EffectiveSecurity => Security;
 }
 
+/// <summary>
+/// SMTP 认证失败限流配置，用于在协议层阻断连续爆破。
+/// </summary>
 public sealed class SmtpAbuseOptions
 {
     public const string SectionName = "SmtpAbuse";
@@ -59,6 +70,9 @@ public sealed class SmtpAbuseOptions
     public int AuthenticationBlockMinutes { get; set; } = 30;
 }
 
+/// <summary>
+/// SMTP 协议宿主。它只负责会话、认证、信封和 DATA 接收，真正的落库与投递交给 Infrastructure 服务。
+/// </summary>
 public sealed class SmtpServerService(
     IServiceScopeFactory scopeFactory,
     IOptions<SmtpServerOptions> options,
@@ -66,13 +80,15 @@ public sealed class SmtpServerService(
     ILogger<SmtpServerService> logger,
     IpFirewallService? firewall = null,
     IOptions<SmtpAbuseOptions>? abuseOptions = null,
-    SystemSettingsService? systemSettings = null) : BackgroundService
+    SystemSettingsService? systemSettings = null,
+    IClusterLeaseService? clusterLease = null) : BackgroundService
 {
     private readonly SmtpServerOptions _options = options.Value;
     private readonly List<TcpListener> _listeners = [];
     private readonly List<Task> _acceptLoops = [];
     private SemaphoreSlim _connectionLimit = null!;
     private readonly SmtpAuthFailureLimiter _authFailures = new(abuseOptions?.Value ?? new SmtpAbuseOptions());
+    private volatile bool _stopping;
 
     protected override Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -100,6 +116,7 @@ public sealed class SmtpServerService(
 
     public override async Task StopAsync(CancellationToken cancellationToken)
     {
+        _stopping = true;
         foreach (var listener in _listeners)
         {
             listener.Stop();
@@ -124,11 +141,12 @@ public sealed class SmtpServerService(
             {
                 break;
             }
-            catch (SocketException) when (cancellationToken.IsCancellationRequested)
+            catch (SocketException) when (_stopping || cancellationToken.IsCancellationRequested)
             {
                 break;
             }
 
+            // 连接级防火墙在欢迎语之前执行，避免被拒绝来源确认服务器能力。
             if (firewall is not null
                 && client.Client.RemoteEndPoint is IPEndPoint remoteEndPoint
                 && await firewall.IsBlockedAsync(remoteEndPoint.Address, cancellationToken))
@@ -140,6 +158,7 @@ public sealed class SmtpServerService(
                 continue;
             }
 
+            // 这里用信号量做进程级连接上限；每个会话独立运行，结束时释放名额。
             await _connectionLimit.WaitAsync(cancellationToken);
             _ = HandleClientAsync(client, endpoint, cancellationToken).ContinueWith(
                 _ => _connectionLimit.Release(),
@@ -180,6 +199,12 @@ public sealed class SmtpServerService(
                     stream,
                     TimeSpan.FromSeconds(smtpSettings.CommandTimeoutSeconds),
                     _options.MaximumMessageBytes);
+                if (clusterLease is not null && !await clusterLease.IsWritableAsync(serverCancellationToken))
+                {
+                    // 只有主节点接受写入型协议会话，避免多节点同时落库造成队列和 UID 状态分叉。
+                    await connection.ReplyAsync("421 4.3.2 This node is not the writable cluster primary", serverCancellationToken);
+                    return;
+                }
                 using (var scope = scopeFactory.CreateScope())
                 {
                     var pipeline = scope.ServiceProvider.GetService<PluginPipeline>();
@@ -190,6 +215,7 @@ public sealed class SmtpServerService(
                             serverCancellationToken);
                         if (decision.Kind != PluginDecisionKind.Continue)
                         {
+                            // 插件可以在 banner 前拒绝连接，适合灰名单、来源信誉和维护窗口。
                             await connection.ReplyAsync(
                                 decision.Kind == PluginDecisionKind.Defer
                                     ? $"421 4.7.0 {decision.Message ?? "Connection deferred by policy"}"
@@ -300,6 +326,7 @@ public sealed class SmtpServerService(
                             stream = await UpgradeTlsAsync(connection.Detach(), serverCancellationToken);
                             connection.Attach(stream);
                             isTls = true;
+                            // RFC 要求 STARTTLS 后丢弃之前的 EHLO/MAIL 状态，客户端必须重新 EHLO。
                             state = new SmtpSessionState();
                             using (var scope = scopeFactory.CreateScope())
                             {
@@ -351,6 +378,7 @@ public sealed class SmtpServerService(
                             }
                             if (_authFailures.IsBlocked(remote, DateTimeOffset.UtcNow))
                             {
+                                // 连续认证失败直接关闭会话，减少密码爆破时的资源占用。
                                 await connection.ReplyAsync("421 4.7.0 Too many authentication failures", serverCancellationToken);
                                 return;
                             }
@@ -401,6 +429,7 @@ public sealed class SmtpServerService(
                             }
                             using (var scope = scopeFactory.CreateScope())
                             {
+                                // RCPT 阶段先给插件机会拦截，再做本地收件人/中继判断，便于实现黑名单或灰名单。
                                 var pipeline = scope.ServiceProvider.GetService<PluginPipeline>();
                                 if (pipeline is not null)
                                 {
@@ -443,6 +472,7 @@ public sealed class SmtpServerService(
                             using (var scope = scopeFactory.CreateScope())
                             {
                                 var inbound = scope.ServiceProvider.GetRequiredService<IInboundMessageService>();
+                                // 未认证客户端只能投递到本地域名，防止服务器变成开放中继。
                                 if (state.AuthenticatedUser is null
                                     && !await inbound.IsLocalRecipientAsync(recipient, serverCancellationToken))
                                 {
@@ -483,6 +513,7 @@ public sealed class SmtpServerService(
                             Stream data;
                             try
                             {
+                                // ReadDataAsync 会做点号透明处理、大小限制和头部安全检查。
                                 data = await connection.ReadDataAsync(serverCancellationToken);
                             }
                             catch (InvalidDataException exception)
@@ -516,6 +547,7 @@ public sealed class SmtpServerService(
                                 var pipeline = scope.ServiceProvider.GetService<PluginPipeline>();
                                 if (pipeline is not null)
                                 {
+                                    // 内容插件拿到的是完整 DATA 流，适合 MIME/附件检查；拒绝后不会进入落库事务。
                                     var contentDecision = await pipeline.OnMessageContentAsync(
                                         state.Sender,
                                         state.Recipients,
@@ -552,7 +584,7 @@ public sealed class SmtpServerService(
                                         break;
                                     }
 
-                                    var messageDecision = await pipeline.OnMessageAsync(
+                                    var messageDecision = await pipeline.OnMessageWithSourceAsync(
                                         new MessageAcceptanceContext(
                                             state.Sender,
                                             state.Recipients,
@@ -560,18 +592,40 @@ public sealed class SmtpServerService(
                                             data.Length,
                                             remote),
                                         serverCancellationToken);
-                                    if (messageDecision.Kind != PluginDecisionKind.Continue)
+                                    if (messageDecision.Decision.Kind != PluginDecisionKind.Continue)
                                     {
+                                        if (messageDecision.Decision.Kind == PluginDecisionKind.Quarantine)
+                                        {
+                                            // Quarantine 对客户端返回成功，邮件转入人工审核，不再进入常规收件/外发链路。
+                                            data.Position = 0;
+                                            var quarantine = scope.ServiceProvider.GetRequiredService<IQuarantineService>();
+                                            await quarantine.CreateAsync(
+                                                new QuarantineCreateRequest(
+                                                    state.Sender,
+                                                    state.Recipients,
+                                                    remote,
+                                                    data,
+                                                    messageDecision.PluginId,
+                                                    messageDecision.PluginName,
+                                                    messageDecision.Decision.Message),
+                                                serverCancellationToken);
+                                            await connection.ReplyAsync(
+                                                $"250 2.6.0 {messageDecision.Decision.Message ?? "Message quarantined for review"}",
+                                                serverCancellationToken);
+                                            state.ResetTransaction();
+                                            break;
+                                        }
+
                                         logger.LogInformation(
                                             "SMTP message from {Remote} sender={Sender} was rejected by plugin policy: decision={Decision}, message={Message}.",
                                             remote,
                                             state.Sender,
-                                            messageDecision.Kind,
-                                            messageDecision.Message ?? string.Empty);
+                                            messageDecision.Decision.Kind,
+                                            messageDecision.Decision.Message ?? string.Empty);
                                         await connection.ReplyAsync(
-                                            messageDecision.Kind == PluginDecisionKind.Defer
-                                                ? $"451 4.7.1 {messageDecision.Message ?? "Deferred by policy"}"
-                                                : $"550 5.7.1 {messageDecision.Message ?? "Rejected by policy"}",
+                                            messageDecision.Decision.Kind == PluginDecisionKind.Defer
+                                                ? $"451 4.7.1 {messageDecision.Decision.Message ?? "Deferred by policy"}"
+                                                : $"550 5.7.1 {messageDecision.Decision.Message ?? "Rejected by policy"}",
                                             serverCancellationToken);
                                         state.ResetTransaction();
                                         break;
@@ -579,16 +633,51 @@ public sealed class SmtpServerService(
                                 }
 
                                 var inbound = scope.ServiceProvider.GetRequiredService<IInboundMessageService>();
-                                var accepted = await inbound.AcceptAsync(
-                                    new InboundEnvelope(
-                                        state.Sender,
-                                        state.Recipients,
-                                        state.AuthenticatedUser,
-                                        remote,
-                                        state.HeloName ?? "unknown",
-                                        state.AuthenticatedAccountId),
-                                    data,
-                                    serverCancellationToken);
+                                InboundAcceptance accepted;
+                                try
+                                {
+                                    accepted = await inbound.AcceptAsync(
+                                        new InboundEnvelope(
+                                            state.Sender,
+                                            state.Recipients,
+                                            state.AuthenticatedUser,
+                                            remote,
+                                            state.HeloName ?? "unknown",
+                                            state.AuthenticatedAccountId),
+                                        data,
+                                        serverCancellationToken);
+                                }
+                                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+                                {
+                                    logger.LogError(
+                                        exception,
+                                        "SMTP DATA from {Remote} could not be committed to storage.",
+                                        remote);
+                                    await connection.ReplyAsync(
+                                        "451 4.3.0 Temporary storage failure",
+                                        serverCancellationToken);
+                                    state.ResetTransaction();
+                                    break;
+                                }
+                                var replication = scope.ServiceProvider.GetService<IReplicationTransport>();
+                                var replicationFactory = scope.ServiceProvider.GetService<IDbContextFactory<MailDbContext>>();
+                                if (replication is not null && replicationFactory is not null)
+                                {
+                                    // 已提交本地后等待副本确认；超时返回 451，让上游稍后重投以降低主备切换丢信风险。
+                                    await using var replicationDb = await replicationFactory.CreateDbContextAsync(serverCancellationToken);
+                                    var sequence = await replicationDb.ReplicationLogs
+                                        .MaxAsync(x => (long?)x.Sequence, serverCancellationToken) ?? 0;
+                                    if (!await replication.WaitForAcknowledgementAsync(sequence, serverCancellationToken))
+                                    {
+                                        logger.LogWarning(
+                                            "SMTP DATA {MessageId} was committed locally but standby acknowledgement timed out at replication sequence {Sequence}.",
+                                            accepted.MessageId,
+                                            sequence);
+                                        await connection.ReplyAsync("451 4.3.0 Standby replication acknowledgement timed out", serverCancellationToken);
+                                        state.ResetTransaction();
+                                        break;
+                                    }
+                                }
                                 logger.LogInformation(
                                     "SMTP DATA accepted from {Remote}: messageId={MessageId}, sender={Sender}, recipientCount={RecipientCount}, localDeliveries={LocalDeliveries}, queuedDeliveries={QueuedDeliveries}.",
                                     remote,
@@ -682,6 +771,7 @@ public sealed class SmtpServerService(
             .Skip(1)
             .Any(x => x.Equals("SMTPUTF8", StringComparison.OrdinalIgnoreCase)))
         {
+            // 当前存储和地址解析仍按传统邮箱地址处理，明确拒绝 SMTPUTF8 避免静默存入不可投递地址。
             await connection.ReplyAsync("555 5.5.4 SMTPUTF8 is not supported", cancellationToken);
             return;
         }
@@ -726,6 +816,7 @@ public sealed class SmtpServerService(
         {
             using var scope = scopeFactory.CreateScope();
             var authorizer = scope.ServiceProvider.GetRequiredService<ISmtpSenderAuthorizer>();
+            // 认证用户只能使用自己账号或授权别名作为信封发件人，防止域内冒名。
             if (sender.Length == 0 || !await authorizer.IsAuthorizedSenderAsync(accountId, sender, cancellationToken))
             {
                 logger.LogInformation(
@@ -865,6 +956,34 @@ public sealed class SmtpServerService(
                     state.AuthenticatedUser,
                     sender.Address,
                     "Sender header address is not authorized",
+                    cancellationToken);
+                return false;
+            }
+        }
+
+        // 发信规则可以在 DATA 阶段直接拒信（例如命中敏感内容或收件域黑名单）。
+        var ruleService = serviceProvider.GetService<MailRuleService>();
+        if (ruleService is not null)
+        {
+            var facts = MailRuleService.BuildFacts(
+                message,
+                state.Sender ?? message.From.Mailboxes.FirstOrDefault()?.Address ?? string.Empty,
+                state.Recipients,
+                data.CanSeek ? data.Length : 0,
+                DateTimeOffset.UtcNow);
+            var rejection = await ruleService.EvaluateOutgoingRejectionAsync(accountId, facts, cancellationToken);
+            if (rejection is not null)
+            {
+                logger.LogInformation(
+                    "SMTP DATA from {Remote} sender={Sender} was rejected by outgoing rule {RuleId} ({RuleName}).",
+                    remote,
+                    state.Sender,
+                    rejection.RuleId,
+                    rejection.RuleName);
+                await connection.ReplyAsync(
+                    string.IsNullOrWhiteSpace(rejection.Reason)
+                        ? "550 5.7.1 Message rejected by outgoing rule"
+                        : $"550 5.7.1 {rejection.Reason}",
                     cancellationToken);
                 return false;
             }

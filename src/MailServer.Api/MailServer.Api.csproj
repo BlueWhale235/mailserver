@@ -12,16 +12,30 @@
     <ProjectReference Include="../MailServer.Smtp/MailServer.Smtp.csproj" />
     <ProjectReference Include="../MailServer.Worker/MailServer.Worker.csproj" />
     <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" />
-    <PackageReference Include="Microsoft.AspNetCore.App.Internal.Assets" GeneratePathProperty="true" PrivateAssets="all" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Design" PrivateAssets="all" />
-    <PackageReference Include="Microsoft.Web.LibraryManager.Build" PrivateAssets="all" />
     <PackageReference Include="Swashbuckle.AspNetCore" />
   </ItemGroup>
   <ItemGroup>
-    <EmbeddedResource Include="$(PkgMicrosoft_AspNetCore_App_Internal_Assets)/_framework/blazor.web.js" LogicalName="MailServer.Api.blazor.web.js" />
-    <EmbeddedResource Include="wwwroot/admin.css" LogicalName="MailServer.Api.admin.css" />
-    <EmbeddedResource Include="wwwroot/**">
+    <EmbeddedResource Include="wwwroot\**\*" Exclude="wwwroot\lib\**\*;wwwroot\login-admin-visual.png">
       <LogicalName>MailServer.Api.StaticWebAssets/wwwroot/%(RecursiveDir)%(Filename)%(Extension)</LogicalName>
     </EmbeddedResource>
   </ItemGroup>
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>MailServer.Tests</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+  <Target Name="BuildAdminSpa" BeforeTargets="AssignTargetPaths" Condition="'$(DesignTimeBuild)' != 'true' and '$(SkipAdminBuild)' != 'true'">
+    <Exec WorkingDirectory="../MailServer.Admin" Command="npm ci" Condition="!Exists('../MailServer.Admin/node_modules') and Exists('../MailServer.Admin/package-lock.json')" />
+    <Exec WorkingDirectory="../MailServer.Admin" Command="npm install" Condition="!Exists('../MailServer.Admin/node_modules') and !Exists('../MailServer.Admin/package-lock.json')" />
+    <Exec WorkingDirectory="../MailServer.Admin" Command="npm run build" />
+    <ItemGroup>
+      <AdminSpaResource Include="..\MailServer.Admin\dist\**\*" />
+      <EmbeddedResource Include="@(AdminSpaResource)">
+        <LogicalName>MailServer.Api.StaticWebAssets/wwwroot/admin/%(AdminSpaResource.RecursiveDir)%(AdminSpaResource.Filename)%(AdminSpaResource.Extension)</LogicalName>
+        <ManifestResourceName>MailServer.Api.StaticWebAssets/wwwroot/admin/%(AdminSpaResource.RecursiveDir)%(AdminSpaResource.Filename)%(AdminSpaResource.Extension)</ManifestResourceName>
+        <WithCulture>false</WithCulture>
+      </EmbeddedResource>
+    </ItemGroup>
+  </Target>
 </Project>

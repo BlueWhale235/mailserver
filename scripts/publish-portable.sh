@@ -15,9 +15,16 @@ copy_deployment_assets() {
 
   mkdir -p "$TARGET/certificates" "$TARGET/plugins" "$TARGET/security-assets" "$TARGET/wwwroot" "$TARGET/logs"
   cp "$ROOT/certificates/README.md" "$TARGET/certificates/README.md"
-  cp "$ROOT/plugins/.gitkeep" "$TARGET/plugins/.gitkeep"
   cp "$ROOT/security-assets/README.md" "$TARGET/security-assets/README.md"
   cp -R "$ROOT/src/MailServer.Api/wwwroot/." "$TARGET/wwwroot/"
+
+  ADMIN_SOURCE="$ROOT/src/MailServer.Admin/dist"
+  if [ ! -f "$ADMIN_SOURCE/index.html" ]; then
+    echo "The Vue administration bundle was not produced at '$ADMIN_SOURCE/index.html'." >&2
+    exit 1
+  fi
+  mkdir -p "$TARGET/wwwroot/admin"
+  cp -R "$ADMIN_SOURCE/." "$TARGET/wwwroot/admin/"
 }
 
 remove_referenced_host_publish_files() {
@@ -67,20 +74,6 @@ for RID in $RUNTIMES; do
   find "$OUTPUT/$RID" -maxdepth 1 -type f -name '*.pdb' -delete
   remove_referenced_host_publish_files "$OUTPUT/$RID"
   copy_deployment_assets "$OUTPUT/$RID"
-  # shellcheck disable=SC2086
-  dotnet publish "$ROOT/plugins/MailServer.MimePlugin/MailServer.MimePlugin.csproj" \
-      -c Release \
-      -r "$RID" \
-      --self-contained false \
-      $PLATFORM_ARGS \
-      -o "$OUTPUT/$RID/plugins/MailServer.MimePlugin"
-  # shellcheck disable=SC2086
-  dotnet publish "$ROOT/plugins/MailServer.GreylistingPlugin/MailServer.GreylistingPlugin.csproj" \
-      -c Release \
-      -r "$RID" \
-      --self-contained false \
-      $PLATFORM_ARGS \
-      -o "$OUTPUT/$RID/plugins/MailServer.GreylistingPlugin"
   rm -rf "$TEMP_ARTIFACTS"
   trap - EXIT INT TERM
 done

@@ -323,7 +323,7 @@ public sealed class MailRulesAndAliasesTests
         Guid domainId;
         await using (var db = await factory.CreateDbContextAsync())
         {
-            var domain = new MailDomain { Name = "example.com", OutboundMode = OutboundMode.DirectMx };
+            var domain = new MailDomain { Name = "example.com" };
             var alice = Account(domain, "alice");
             var bob = Account(domain, "bob");
             db.AddRange(
@@ -420,6 +420,85 @@ public sealed class MailRulesAndAliasesTests
         await using var verification = await factory.CreateDbContextAsync();
         Assert.Empty(await verification.DeliveryJobs.ToListAsync());
     }
+
+    [Fact]
+    public async Task OutgoingRuleCanRejectAndForwardSentCopies()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var factory = environment.Services.GetRequiredService<IDbContextFactory<MailDbContext>>();
+        var rules = environment.Services.GetRequiredService<MailRuleService>();
+        Guid domainId;
+        Guid accountId;
+        await using (var db = await factory.CreateDbContextAsync())
+        {
+            var domain = new MailDomain { Name = "example.com" };
+            var alice = Account(domain, "alice");
+            var bob = Account(domain, "bob");
+            db.AddRange(
+                domain,
+                alice,
+                bob,
+                new Mailbox { Account = alice, Name = "INBOX" },
+                new Mailbox { Account = alice, Name = "Sent" },
+                new Mailbox { Account = bob, Name = "INBOX" });
+            await db.SaveChangesAsync();
+            domainId = domain.Id;
+            accountId = alice.Id;
+        }
+        await rules.CreateAsync(
+            domainId,
+            new MailRuleInput(
+                "Reject confidential",
+                MailRuleDirection.Outgoing,
+                MailRuleMatchMode.Any,
+                "Sent",
+                true,
+                [new MailRuleConditionInput(MailRuleField.Subject, MailRuleOperator.ContainsAny, ["*confidential*"])],
+                [new MailRuleActionInput(MailRuleActionKind.Reject, ["该主题禁止外发"])]),
+            "test",
+            CancellationToken.None);
+        await rules.CreateAsync(
+            domainId,
+            new MailRuleInput(
+                "Forward partner mail",
+                MailRuleDirection.Outgoing,
+                MailRuleMatchMode.All,
+                "Sent",
+                true,
+                [new MailRuleConditionInput(MailRuleField.Recipient, MailRuleOperator.ContainsAny, ["*@partner.test"])],
+                [new MailRuleActionInput(MailRuleActionKind.ForwardTo, ["bob@example.com", "outside@audit.test"])]),
+            "test",
+            CancellationToken.None);
+
+        var inbound = environment.Services.GetRequiredService<IInboundMessageService>();
+        // 命中拒绝发信的主题必须被 EvaluateOutgoingRejectionAsync 捕获；SMTP 层据此返回 550。
+        var blockedFacts = MailRuleService.BuildFacts(
+            ParseMessage(RawMessage("outgoing-blocked", "Quarterly confidential plan", "body")),
+            "alice@example.com",
+            ["customer@partner.test"],
+            100,
+            DateTimeOffset.UtcNow);
+        var rejection = await rules.EvaluateOutgoingRejectionAsync(accountId, blockedFacts, CancellationToken.None);
+        Assert.NotNull(rejection);
+        Assert.Equal("该主题禁止外发", rejection.Reason);
+
+        // 未命中拒绝动作的信件继续外发，并按发信规则把副本转发给本地与外部目标。
+        await using (var allowed = new MemoryStream(Encoding.UTF8.GetBytes(RawMessage("outgoing-forward", "Normal update", "body"))))
+            await inbound.AcceptAsync(
+                new InboundEnvelope("alice@example.com", ["customer@partner.test"], "alice@example.com", "127.0.0.1", "test", accountId),
+                allowed,
+                CancellationToken.None);
+
+        await using var verification = await factory.CreateDbContextAsync();
+        // Sent 副本按既有设计进入 SentCopyJobs 队列，再由 SentCopyService 落盘。
+        Assert.Equal(1, await verification.SentCopyJobs.CountAsync(x => x.AccountId == accountId));
+        var jobs = await verification.DeliveryJobs.ToListAsync();
+        Assert.Contains(jobs, job => job.Recipient == "outside@audit.test");
+        // 本地转发目标只排队一次，且不重复投递给原始收件人。
+        Assert.Single(jobs, job => job.Recipient == "outside@audit.test");
+    }
+
+    private static MimeMessage ParseMessage(string raw) => MimeMessage.Load(new MemoryStream(Encoding.UTF8.GetBytes(raw)));
 
     [Fact]
     public async Task SignedForwardingTraceStopsRuleAfterExternalReentry()
@@ -613,44 +692,113 @@ public sealed class MailRulesAndAliasesTests
     }
 
     [Fact]
-    public async Task MigrationMapsSameDomainAliasesAndDisablesExternalTargets()
+    public async Task FolderDeletionMovesMessagesInBatchesAndRedirectsRules()
     {
-        await using var environment = await TestEnvironment.CreateAsync(migrate: false);
+        await using var environment = await TestEnvironment.CreateAsync();
         var factory = environment.Services.GetRequiredService<IDbContextFactory<MailDbContext>>();
-        var domainId = Guid.NewGuid();
-        var accountId = Guid.NewGuid();
-        var ruleId = Guid.NewGuid();
+        var folders = environment.Services.GetRequiredService<MailboxFolderManagementService>();
+        Guid domainId;
+        Guid inboxId;
+        var firstDate = DateTimeOffset.UtcNow.AddDays(-2);
         await using (var db = await factory.CreateDbContextAsync())
         {
-            var migrator = db.GetService<IMigrator>();
-            await migrator.MigrateAsync("20260626110000_AddSystemSettings");
-            var ticks = DateTimeOffset.UtcNow.UtcDateTime.Ticks;
-            await db.Database.ExecuteSqlInterpolatedAsync($"INSERT INTO mail_domains (Id, Name, IsActive, OutboundMode, CreatedAt) VALUES ({domainId}, {"example.com"}, {true}, {"Relay"}, {ticks})");
-            await db.Database.ExecuteSqlInterpolatedAsync($"INSERT INTO mail_accounts (Id, DomainId, LocalPart, PasswordHash, IsEnabled, QuotaBytes, CreatedAt) VALUES ({accountId}, {domainId}, {"alice"}, {"unused"}, {true}, {1_000_000L}, {ticks})");
-            await db.Database.ExecuteSqlInterpolatedAsync($"INSERT INTO mail_aliases (Id, DomainId, SourceLocalPart, DestinationAddress, CreatedAt) VALUES ({Guid.NewGuid()}, {domainId}, {"sales"}, {"alice@example.com"}, {ticks})");
-            await db.Database.ExecuteSqlInterpolatedAsync($"INSERT INTO mail_aliases (Id, DomainId, SourceLocalPart, DestinationAddress, CreatedAt) VALUES ({Guid.NewGuid()}, {domainId}, {"legacy"}, {"outside@external.test"}, {ticks})");
-            await db.Database.ExecuteSqlInterpolatedAsync($"INSERT INTO mail_aliases (Id, DomainId, SourceLocalPart, DestinationAddress, CreatedAt) VALUES ({Guid.NewGuid()}, {domainId}, {"alice"}, {"alice@example.com"}, {ticks})");
-            await migrator.MigrateAsync("20260627085956_MigrateIdentityAliasData");
-            await db.Database.ExecuteSqlInterpolatedAsync($"INSERT INTO mail_rules (Id, DomainId, Name, Direction, MatchMode, TargetMailboxName, IsEnabled, Priority, CreatedAt, UpdatedAt) VALUES ({ruleId}, {domainId}, {"Legacy archive"}, {"Incoming"}, {"All"}, {"Archive"}, {true}, {0}, {ticks}, {ticks})");
-            await migrator.MigrateAsync();
+            var domain = new MailDomain { Name = "folder-delete.test", UsedBytes = 200 };
+            var account = Account(domain, "alice");
+            account.UsedBytes = 200;
+            var inbox = new Mailbox { Account = account, Name = "INBOX", UidNext = 8, HighestModSeq = 4 };
+            var parent = new Mailbox { Account = account, Name = "Projects" };
+            var child = new Mailbox { Account = account, Name = "Projects/2026" };
+            var first = new StoredMessage { ContentKey = "folder-delete-1", EnvelopeFrom = "sender@test", Size = 100 };
+            var second = new StoredMessage { ContentKey = "folder-delete-2", EnvelopeFrom = "sender@test", Size = 100 };
+            var rule = new MailRule
+            {
+                Domain = domain,
+                Name = "Project archive",
+                Direction = MailRuleDirection.Incoming,
+                MatchMode = MailRuleMatchMode.All,
+                TargetMailboxName = "Projects",
+                Actions =
+                [
+                    new MailRuleAction
+                    {
+                        Kind = MailRuleActionKind.MoveToFolder,
+                        Position = 0,
+                        ValuesJson = "[\"Projects/2026\",\"Keep\"]"
+                    }
+                ]
+            };
+            db.AddRange(domain, account, inbox, parent, child, first, second, rule);
+            db.MailboxMessages.AddRange(
+                new MailboxMessage
+                {
+                    Mailbox = parent,
+                    Message = first,
+                    Uid = 1,
+                    Flags = "\\Seen custom",
+                    InternalDate = firstDate,
+                    ScheduledDeleteAt = DateTimeOffset.UtcNow.AddDays(1)
+                },
+                new MailboxMessage
+                {
+                    Mailbox = child,
+                    Message = second,
+                    Uid = 1,
+                    Flags = "\\Flagged",
+                    InternalDate = firstDate.AddHours(1)
+                });
+            db.SystemSettings.Add(new SystemSetting
+            {
+                Key = $"mailbox-defaults:{domain.Id:N}:folders",
+                Value = "[\"INBOX\",\"Sent\",\"Drafts\",\"Trash\",\"Junk\",\"Archives\",\"Projects\",\"Projects/2026\",\"Keep\"]"
+            });
+            await db.SaveChangesAsync();
+            domainId = domain.Id;
+            inboxId = inbox.Id;
         }
 
-        await using var verification = await factory.CreateDbContextAsync();
-        var aliases = await verification.Aliases.OrderBy(x => x.SourceLocalPart).ToListAsync();
-        var external = Assert.Single(aliases, x => x.SourceLocalPart == "legacy");
-        var local = Assert.Single(aliases, x => x.SourceLocalPart == "sales");
-        var conflict = Assert.Single(aliases, x => x.SourceLocalPart == "alice");
-        Assert.False(external.IsEnabled);
-        Assert.Equal(MailAliasMode.Disabled, external.Mode);
-        Assert.Null(external.TargetAccountId);
-        Assert.True(local.IsEnabled);
-        Assert.Equal(MailAliasMode.SendReceive, local.Mode);
-        Assert.Equal(accountId, local.TargetAccountId);
-        Assert.Equal(MailAliasMode.Disabled, conflict.Mode);
-        Assert.False(conflict.IsEnabled);
-        var migratedAction = await verification.MailRuleActions.SingleAsync(x => x.RuleId == ruleId);
-        Assert.Equal(MailRuleActionKind.MoveToFolder, migratedAction.Kind);
-        Assert.Equal("[\"Archive\"]", migratedAction.ValuesJson);
+        var preview = await folders.PreviewAsync(domainId, "Projects", CancellationToken.None);
+        Assert.Equal(1, preview.AffectedAccountCount);
+        Assert.Equal(2, preview.AffectedMailboxCount);
+        Assert.Equal(2, preview.AffectedMessageCount);
+        Assert.Equal(1, preview.AffectedRuleCount);
+
+        var job = await folders.RequestDomainDeletionAsync(domainId, "Projects", "test", CancellationToken.None);
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            folders.RequestDomainDeletionAsync(domainId, "Projects/2026", "test", CancellationToken.None));
+        await using (var pending = await factory.CreateDbContextAsync())
+        {
+            Assert.Equal(2, await pending.Mailboxes.CountAsync(x => x.PendingDeletionJobId == job.Id));
+            var rule = await pending.MailRules.Include(x => x.Actions).SingleAsync(x => x.DomainId == domainId);
+            Assert.Equal("INBOX", rule.TargetMailboxName);
+            Assert.Equal("[\"INBOX\",\"Keep\"]", rule.Actions.Single().ValuesJson);
+            var configuration = await pending.SystemSettings.SingleAsync(x => x.Key == $"mailbox-defaults:{domainId:N}:folders");
+            Assert.DoesNotContain("Projects", configuration.Value);
+        }
+
+        Assert.Equal(1, await folders.ProcessPendingAsync(1, CancellationToken.None));
+        await using (var halfway = await factory.CreateDbContextAsync())
+        {
+            Assert.Equal(1, await halfway.MailboxMessages.CountAsync(x => x.Mailbox.PendingDeletionJobId == job.Id));
+            Assert.Equal(2, await halfway.Mailboxes.CountAsync(x => x.PendingDeletionJobId == job.Id && x.DeletedAt == null));
+        }
+
+        Assert.Equal(1, await folders.ProcessPendingAsync(1, CancellationToken.None));
+        await using (var completed = await factory.CreateDbContextAsync())
+        {
+            var moved = await completed.MailboxMessages.Where(x => x.MailboxId == inboxId).OrderBy(x => x.Uid).ToListAsync();
+            Assert.Equal(2, moved.Count);
+            Assert.Equal([8L, 9L], moved.Select(x => x.Uid));
+            Assert.Contains(moved, x => x.Flags == "\\Seen custom" && x.InternalDate == firstDate);
+            Assert.All(moved, x => Assert.Null(x.ScheduledDeleteAt));
+            Assert.Equal(2, await completed.Mailboxes.IgnoreQueryFilters().CountAsync(x => x.DeletedAt != null && x.Account.DomainId == domainId));
+            var deletion = await completed.MailboxFolderDeletionJobs.SingleAsync(x => x.Id == job.Id);
+            Assert.Equal(MailboxFolderDeletionStatus.Completed, deletion.Status);
+            Assert.Equal(2, deletion.ProcessedMessages);
+            var account = await completed.Accounts.SingleAsync(x => x.DomainId == domainId);
+            var domain = await completed.Domains.SingleAsync(x => x.Id == domainId);
+            Assert.Equal(200, account.UsedBytes);
+            Assert.Equal(200, domain.UsedBytes);
+        }
     }
 
     [Fact]
@@ -665,8 +813,8 @@ public sealed class MailRulesAndAliasesTests
         Guid secondDomainId;
         await using (var db = await factory.CreateDbContextAsync())
         {
-            var first = new MailDomain { Name = "alpha.test", OutboundMode = OutboundMode.DirectMx };
-            var second = new MailDomain { Name = "beta.test", OutboundMode = OutboundMode.Relay };
+            var first = new MailDomain { Name = "alpha.test" };
+            var second = new MailDomain { Name = "beta.test" };
             var firstAccount = Account(first, "alice");
             var secondAccount = Account(second, "bob");
             var firstMailbox = new Mailbox { Account = firstAccount, Name = "INBOX" };
@@ -706,7 +854,7 @@ public sealed class MailRulesAndAliasesTests
 
         var administration = environment.Services.GetRequiredService<AdminApplicationService>();
         var filtered = await administration.SearchDomainsAsync(
-            new DomainSearchFilter(null, true, true, OutboundMode.DirectMx, DomainExpiryFilter.Within7Days),
+            new DomainSearchFilter(null, true, true, DomainExpiryFilter.Within7Days),
             1,
             20,
             CancellationToken.None);
@@ -714,15 +862,14 @@ public sealed class MailRulesAndAliasesTests
         Assert.Equal(firstDomainId, row.Id);
         Assert.Equal(DomainDnsCheckStatus.Healthy, row.DnsStatus);
 
-        await administration.UpdateDomainsOutboundModeAsync([secondDomainId], OutboundMode.DirectMx, "test", CancellationToken.None);
         await Assert.ThrowsAsync<InvalidOperationException>(
             () => administration.DeleteDomainsAsync([firstDomainId], "test", CancellationToken.None));
-        await administration.UpdateDomainAsync(firstDomainId, false, null, null, null, "test", CancellationToken.None);
+        await administration.UpdateDomainAsync(firstDomainId, false, null, null, "test", CancellationToken.None);
         await administration.DeleteDomainsAsync([firstDomainId], "test", CancellationToken.None);
 
         await using var verification = await factory.CreateDbContextAsync();
         Assert.False(await verification.Domains.AnyAsync(x => x.Id == firstDomainId));
-        Assert.True(await verification.Domains.AnyAsync(x => x.Id == secondDomainId && x.OutboundMode == OutboundMode.DirectMx));
+        Assert.True(await verification.Domains.AnyAsync(x => x.Id == secondDomainId));
         Assert.Single(await verification.Messages.ToListAsync());
         Assert.Single(await verification.MailboxMessages.ToListAsync());
         await using var stored = await contentStore.OpenReadAsync(content.Key, CancellationToken.None);

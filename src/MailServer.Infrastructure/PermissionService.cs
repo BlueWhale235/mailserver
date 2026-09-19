@@ -4,13 +4,19 @@ using Microsoft.EntityFrameworkCore;
 
 namespace MailServer.Infrastructure;
 
+/// <summary>
+/// 管理后台权限代码表。新增页面或 API 时应优先复用读/管两级权限，而不是引入过细粒度代码。
+/// </summary>
 public static class PermissionCodes
 {
     public const string FullAccess = "*";
     public const string IamManage = "iam.manage";
     public const string DashboardRead = "dashboard.read";
+    public const string AuditRead = "audit.read";
     public const string DomainRead = "domain.read";
     public const string DomainManage = "domain.manage";
+    public const string DomainQuarantineRead = "domain.quarantine.read";
+    public const string DomainQuarantineManage = "domain.quarantine.manage";
     public const string ApiKeyRead = "api-key.read";
     public const string ApiKeyManage = "api-key.manage";
     public const string AdminAccountRead = "admin.account.read";
@@ -23,6 +29,10 @@ public static class PermissionCodes
     public const string SettingsManage = "settings.manage";
     public const string DnsRead = "dns.read";
     public const string DnsManage = "dns.manage";
+    public const string TaskRead = "task.read";
+    public const string TaskManage = "task.manage";
+    public const string ClusterRead = "cluster.read";
+    public const string ClusterManage = "cluster.manage";
 
     public const string ApiKeyList = ApiKeyRead;
     public const string ApiKeyCreate = ApiKeyManage;
@@ -59,7 +69,11 @@ public static class PermissionCodes
     public const string DomainRuleDelete = DomainManage;
     public const string DomainRuleReorder = DomainManage;
     public const string DomainAuditList = DomainRead;
+    public const string DomainQuarantineList = DomainQuarantineRead;
+    public const string DomainQuarantineRelease = DomainQuarantineManage;
+    public const string DomainQuarantineDelete = DomainQuarantineManage;
     public const string DashboardView = DashboardRead;
+    public const string AuditList = AuditRead;
     public const string FirewallList = FirewallRead;
     public const string FirewallCreate = FirewallManage;
     public const string FirewallUpdate = FirewallManage;
@@ -74,7 +88,9 @@ public static class PermissionCodes
     public static readonly IReadOnlySet<string> DomainScoped = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
     {
         DomainRead,
-        DomainManage
+        DomainManage,
+        DomainQuarantineRead,
+        DomainQuarantineManage
     };
 
     private static readonly IReadOnlyDictionary<string, string> ReadToManageMap =
@@ -86,11 +102,21 @@ public static class PermissionCodes
             [FirewallRead] = FirewallManage,
             [QueueRead] = QueueManage,
             [SettingsRead] = SettingsManage,
-            [DnsRead] = DnsManage
+            [DnsRead] = DnsManage,
+            [TaskRead] = TaskManage,
+            [ClusterRead] = ClusterManage,
+            [DomainQuarantineRead] = DomainQuarantineManage,
+            [DomainRead] = DomainManage
         };
 
+    /// <summary>
+    /// 只有域相关权限支持绑定到单个域，其它权限均按系统级授权处理。
+    /// </summary>
     public static bool SupportsDomainScope(string code) => DomainScoped.Contains(code.Trim());
 
+    /// <summary>
+    /// 管理权限隐含读取权限，例如 domain.manage 自动拥有 domain.read。
+    /// </summary>
     public static string? ManagementPermissionFor(string code)
     {
         var canonical = code.Trim();
@@ -126,11 +152,17 @@ public sealed record PermissionGrantView(
 
 public sealed record PermissionSubject(PermissionSubjectType Type, Guid Id);
 
+/// <summary>
+/// 当前主体可访问的域范围。AllDomains 为 true 时 DomainIds 不再限制访问。
+/// </summary>
 public sealed record PermittedDomainScope(bool AllDomains, IReadOnlySet<Guid> DomainIds)
 {
     public bool HasAny => AllDomains || DomainIds.Count > 0;
 }
 
+/// <summary>
+/// 权限快照，按一次请求或一次操作加载后在内存中判断，避免每个按钮/端点重复查库。
+/// </summary>
 public sealed class PermissionSnapshot
 {
     public bool FullAccess { get; set; }
@@ -145,6 +177,7 @@ public sealed class PermissionSnapshot
         var management = PermissionCodes.ManagementPermissionFor(canonical);
         if (domainId is null)
         {
+            // 系统级检查允许管理权限隐含读取权限。
             return SystemPermissions.Contains(canonical)
                    || (management is not null && SystemPermissions.Contains(management));
         }
@@ -176,11 +209,28 @@ public sealed class PermissionSnapshot
                || (management is not null && AllDomainPermissions.Contains(management));
     }
 
-    private bool HasDomainPermission(string code, Guid domainId) =>
-        AllDomainPermissions.Contains(code)
-        || (DomainPermissions.TryGetValue(code, out var ids) && ids.Contains(domainId));
+    private bool HasDomainPermission(string code, Guid domainId)
+    {
+        if (AllDomainPermissions.Contains(code)
+            || (DomainPermissions.TryGetValue(code, out var ids) && ids.Contains(domainId)))
+            return true;
+
+        var implied = code switch
+        {
+            // 隔离区权限可由更宽的域读/管权限隐含，方便旧角色平滑使用新增隔离功能。
+            PermissionCodes.DomainQuarantineRead => PermissionCodes.DomainRead,
+            PermissionCodes.DomainQuarantineManage => PermissionCodes.DomainManage,
+            _ => null
+        };
+        return implied is not null
+               && (AllDomainPermissions.Contains(implied)
+                   || (DomainPermissions.TryGetValue(implied, out var impliedIds) && impliedIds.Contains(domainId)));
+    }
 }
 
+/// <summary>
+/// 权限服务，负责授权目录、授权写入和权限快照加载。
+/// </summary>
 public sealed class PermissionService(IDbContextFactory<MailDbContext> dbFactory)
 {
     public const string DomainResourceType = "domain";
@@ -203,11 +253,14 @@ public sealed class PermissionService(IDbContextFactory<MailDbContext> dbFactory
         Group("domain", "域名",
         [
             Item(PermissionCodes.DomainRead, "域名只读", "查看授权范围内的域名、账号、别名、规则、DNS、证书、投递队列和日志。", domainScope: true),
-            Item(PermissionCodes.DomainManage, "域名管理", "创建域名，管理授权范围内的域名配置、账号、别名、规则、DNS、证书、配额和投递队列。", domainScope: true)
+            Item(PermissionCodes.DomainManage, "域名管理", "创建域名，管理授权范围内的域名配置、账号、别名、规则、DNS、证书、配额和投递队列。", domainScope: true),
+            Item(PermissionCodes.DomainQuarantineRead, "审核与隔离只读", "查看授权域名下的隔离邮件、审核状态和原始邮件内容。", domainScope: true),
+            Item(PermissionCodes.DomainQuarantineManage, "审核与隔离管理", "释放或删除授权域名下的隔离邮件。", domainScope: true)
         ]),
         Group("system", "系统功能",
         [
             Item(PermissionCodes.DashboardRead, "概览只读", "查看后台概览。", domainScope: false),
+            Item(PermissionCodes.AuditRead, "审计日志只读", "查看全局审计日志、详情和导出审计 JSON。", domainScope: false),
             Item(PermissionCodes.FirewallRead, "防火墙只读", "查看防火墙规则。", domainScope: false),
             Item(PermissionCodes.FirewallManage, "防火墙管理", "创建、启停、编辑和删除防火墙规则。", domainScope: false),
             Item(PermissionCodes.QueueRead, "投递队列只读", "查看外发投递队列和原始邮件。", domainScope: false),
@@ -216,6 +269,13 @@ public sealed class PermissionService(IDbContextFactory<MailDbContext> dbFactory
             Item(PermissionCodes.SettingsManage, "系统设置管理", "修改系统设置和通知模板。", domainScope: false),
             Item(PermissionCodes.DnsRead, "DNS 诊断只读", "执行 DNS 诊断并查看结果。", domainScope: false),
             Item(PermissionCodes.DnsManage, "DNS 诊断管理", "预留给需要写入 DNS 诊断配置的管理操作。", domainScope: false)
+        ]),
+        Group("operations", "任务与集群",
+        [
+            Item(PermissionCodes.TaskRead, "任务中心只读", "查看定时任务、执行历史和回收站。", domainScope: false),
+            Item(PermissionCodes.TaskManage, "任务中心管理", "配置、执行任务以及恢复或永久清理回收项。", domainScope: false),
+            Item(PermissionCodes.ClusterRead, "集群只读", "查看节点、同步和仲裁状态。", domainScope: false),
+            Item(PermissionCodes.ClusterManage, "集群管理", "管理同步并执行受控集群切换。", domainScope: false)
         ])
     ];
 

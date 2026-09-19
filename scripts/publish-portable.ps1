@@ -27,9 +27,18 @@ function Copy-DeploymentAssets {
         New-Item -ItemType Directory -Path (Join-Path $Target $directory) -Force | Out-Null
     }
     Copy-Item -LiteralPath (Join-Path $root "certificates\README.md") -Destination (Join-Path $Target "certificates\README.md") -Force
-    Copy-Item -LiteralPath (Join-Path $root "plugins\.gitkeep") -Destination (Join-Path $Target "plugins\.gitkeep") -Force
     Copy-Item -LiteralPath (Join-Path $root "security-assets\README.md") -Destination (Join-Path $Target "security-assets\README.md") -Force
     Copy-Item -Path (Join-Path $root "src\MailServer.Api\wwwroot\*") -Destination (Join-Path $Target "wwwroot") -Recurse -Force
+
+    $adminSource = Join-Path $root "src\MailServer.Admin\dist"
+    $adminIndex = Join-Path $adminSource "index.html"
+    if (-not (Test-Path -LiteralPath $adminIndex -PathType Leaf)) {
+        throw "The Vue administration bundle was not produced at '$adminIndex'."
+    }
+
+    $adminTarget = Join-Path $Target "wwwroot\admin"
+    New-Item -ItemType Directory -Path $adminTarget -Force | Out-Null
+    Copy-Item -Path (Join-Path $adminSource "*") -Destination $adminTarget -Recurse -Force
 }
 
 function Remove-ReferencedHostPublishFiles {
@@ -95,26 +104,6 @@ foreach ($rid in $Runtime) {
             Remove-Item -Force
         Remove-ReferencedHostPublishFiles -Target $target -SingleFile
         Copy-DeploymentAssets -Target $target
-        $pluginTarget = Join-Path $target "plugins\MailServer.MimePlugin"
-        dotnet publish (Join-Path $root "plugins\MailServer.MimePlugin\MailServer.MimePlugin.csproj") `
-            -c Release `
-            -r $rid `
-            --self-contained false `
-            $platformArgs `
-            -o $pluginTarget
-        if ($LASTEXITCODE -ne 0) {
-            throw "MIME plugin publish failed for '$rid' with exit code $LASTEXITCODE."
-        }
-        $greylistingTarget = Join-Path $target "plugins\MailServer.GreylistingPlugin"
-        dotnet publish (Join-Path $root "plugins\MailServer.GreylistingPlugin\MailServer.GreylistingPlugin.csproj") `
-            -c Release `
-            -r $rid `
-            --self-contained false `
-            $platformArgs `
-            -o $greylistingTarget
-        if ($LASTEXITCODE -ne 0) {
-            throw "Greylisting plugin publish failed for '$rid' with exit code $LASTEXITCODE."
-        }
 
         $executableName = if ($rid.StartsWith("win-")) { "mailserver.exe" } else { "mailserver" }
         $executablePath = Join-Path $target $executableName

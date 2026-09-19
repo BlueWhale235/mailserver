@@ -79,6 +79,9 @@ public sealed class TlsReportBackgroundService(
         var now = DateTimeOffset.UtcNow;
         var reports = await db.TlsReportDeliveries
             .Where(x => x.CompletedAt == null && x.NextAttemptAt <= now && x.Attempts < 5)
+            .OrderBy(x => x.NextAttemptAt)
+            .ThenBy(x => x.PeriodStart)
+            .ThenBy(x => x.Id)
             .Take(50)
             .ToListAsync(cancellationToken);
         foreach (var report in reports)

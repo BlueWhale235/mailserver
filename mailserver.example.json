@@ -91,14 +91,6 @@
       { "Address": "0.0.0.0", "Port": 993, "Security": "ImplicitTls" }
     ]
   },
-  "Relay": {
-    "Host": "localhost",
-    "Port": 25,
-    "Security": "StartTls",
-    "UseStartTls": true,
-    "UserName": "",
-    "Password": ""
-  },
   "Delivery": {
     "BatchSize": 20,
     "LeaseSeconds": 120,

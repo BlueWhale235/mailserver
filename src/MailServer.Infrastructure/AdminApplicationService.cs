@@ -11,13 +11,22 @@ using Microsoft.EntityFrameworkCore;
 
 namespace MailServer.Infrastructure;
 
+/// <summary>
+/// 管理后台首页统计视图，聚合域名、账号、队列和存储使用量。
+/// </summary>
 public sealed record AdminDashboard(
     int Domains,
     int Accounts,
     int Aliases,
     int PendingDeliveries,
     int FailedDeliveries,
-    long StoredBytes);
+    long StoredBytes,
+    int DirectMxHealthyDomains,
+    int DirectMxAttentionDomains,
+    int DirectMxUncheckedDomains,
+    int ExpiringCertificates,
+    int DeliveredLast24Hours,
+    int FailedLast24Hours);
 
 public sealed record AccountView(
     Guid Id,
@@ -25,7 +34,8 @@ public sealed record AccountView(
     bool IsEnabled,
     long QuotaBytes,
     long UsedBytes,
-    DateTimeOffset CreatedAt);
+    DateTimeOffset CreatedAt,
+    int AliasCount);
 
 public sealed record AliasView(
     Guid Id,
@@ -70,6 +80,87 @@ public sealed record DeliveryMessageDownloadView(
     Guid DeliveryJobId,
     string FileName,
     Stream Content);
+public sealed record DeliveryAttemptDetail(
+    Guid Id,
+    int AttemptNumber,
+    bool Succeeded,
+    bool PermanentFailure,
+    string Stage,
+    string? MxHost,
+    string? RemoteAddress,
+    string? SmtpStatusCode,
+    string? EnhancedStatusCode,
+    string? TlsProtocol,
+    string? TlsCipherSuite,
+    long DurationMilliseconds,
+    string? FailureCategory,
+    DateTimeOffset? NextRetryAt,
+    string? Response,
+    string? SessionSummary,
+    DateTimeOffset CreatedAt);
+public sealed record DeliveryJobView(
+    Guid Id,
+    string Sender,
+    string Recipient,
+    DeliveryStatus Status,
+    int Attempts,
+    DateTimeOffset NextAttemptAt,
+    string? LastError,
+    DateTimeOffset CreatedAt,
+    DateTimeOffset UpdatedAt);
+public sealed record DeliveryQueueSummary(
+    int Pending,
+    int Processing,
+    int Deferred,
+    int Failed,
+    int DeliveredLast24Hours,
+    int FailedLast24Hours,
+    double AverageAttemptMillisecondsLast24Hours);
+public enum DeliveryJobScope
+{
+    Any = 0,
+    Active = 1,
+    History = 2,
+    Failed = 3
+}
+public enum TlsReportDeliveryStatus
+{
+    Pending = 0,
+    Retrying = 1,
+    Failed = 2,
+    Completed = 3
+}
+public enum TlsReportDeliveryStatusFilter
+{
+    Any = 0,
+    Pending = 1,
+    Retrying = 2,
+    Failed = 3,
+    Completed = 4
+}
+public sealed record TlsReportDeliveryView(
+    Guid Id,
+    string PolicyDomain,
+    string ReportUri,
+    DateTimeOffset PeriodStart,
+    DateTimeOffset PeriodEnd,
+    TlsReportDeliveryStatus Status,
+    int Attempts,
+    DateTimeOffset NextAttemptAt,
+    DateTimeOffset? CompletedAt,
+    string? LastError);
+public sealed record TlsReportDeliveryDetail(
+    Guid Id,
+    string PolicyDomain,
+    string ReportUri,
+    DateTimeOffset PeriodStart,
+    DateTimeOffset PeriodEnd,
+    TlsReportDeliveryStatus Status,
+    int Attempts,
+    DateTimeOffset NextAttemptAt,
+    DateTimeOffset? CompletedAt,
+    string? LastError,
+    string ReportJson);
 public sealed record CreatedApiKey(Guid Id, string Value, DateTimeOffset? ExpiresAt);
 public sealed record AdminUserView(
     Guid Id,
@@ -93,7 +184,8 @@ public sealed record DomainHealthView(
     bool HasCertificate,
     DateTimeOffset? CertificateNotAfter,
     bool HasDkim,
-    DateTimeOffset? LastAuditAt);
+    DateTimeOffset? LastAuditAt,
+    int PendingQuarantineCount = 0);
 public sealed record DomainAuditView(
     Guid Id,
     string Actor,
@@ -124,7 +216,6 @@ public sealed record DomainListItemView(
     string Name,
     string? MailHostName,
     bool IsActive,
-    OutboundMode OutboundMode,
     DomainDnsCheckStatus DnsStatus,
     DateTimeOffset? DnsCheckedAt,
     bool HasCertificate,
@@ -152,14 +243,17 @@ public sealed record DomainSearchFilter(
     string? Search,
     bool? IsActive,
     bool? HasCertificate,
-    OutboundMode? OutboundMode,
-    DomainExpiryFilter Expiry = DomainExpiryFilter.Any);
+    DomainExpiryFilter Expiry = DomainExpiryFilter.Any,
+    DomainDnsCheckStatus? DnsStatus = null);
 public sealed record PagedResult<T>(
     IReadOnlyList<T> Items,
     int Page,
     int PageSize,
     int TotalCount);
 
+/// <summary>
+/// 管理端应用服务，承载 JSON API 的业务操作，避免 HTTP 端点直接操作 DbContext。
+/// </summary>
 public sealed class AdminApplicationService(
     IDbContextFactory<MailDbContext> dbFactory,
     ICredentialService credentials,
@@ -188,6 +282,7 @@ public sealed class AdminApplicationService(
 
         if (upgraded is not null)
         {
+            // 登录时顺手升级旧密码哈希，降低单独迁移凭据算法的运维成本。
             admin.PasswordHash = upgraded;
             await db.SaveChangesAsync(cancellationToken);
         }
@@ -198,15 +293,33 @@ public sealed class AdminApplicationService(
     public async Task<AdminDashboard> GetDashboardAsync(CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+        var now = DateTimeOffset.UtcNow;
+        var last24Hours = now.AddHours(-24);
+        var domains = await db.Domains.CountAsync(x => x.DeletedAt == null, cancellationToken);
+        var activeDomains = db.Domains.Where(x => x.DeletedAt == null && x.IsActive);
+        var healthyDomains = await activeDomains.CountAsync(x =>
+            db.DomainDnsChecks.Any(check => check.DomainId == x.Id && check.Status == DomainDnsCheckStatus.Healthy), cancellationToken);
+        var attentionDomains = await activeDomains.CountAsync(x =>
+            db.DomainDnsChecks.Any(check => check.DomainId == x.Id && check.Status == DomainDnsCheckStatus.Unhealthy), cancellationToken);
+        var checkedDomains = await activeDomains.CountAsync(x =>
+            db.DomainDnsChecks.Any(check => check.DomainId == x.Id
+                && (check.Status == DomainDnsCheckStatus.Healthy || check.Status == DomainDnsCheckStatus.Unhealthy)), cancellationToken);
+        var activeDomainCount = await activeDomains.CountAsync(cancellationToken);
         return new AdminDashboard(
-            await db.Domains.CountAsync(cancellationToken),
+            domains,
             await db.Accounts.CountAsync(cancellationToken),
             await db.Aliases.CountAsync(cancellationToken),
             await db.DeliveryJobs.CountAsync(
                 x => x.Status == DeliveryStatus.Pending || x.Status == DeliveryStatus.Deferred,
                 cancellationToken),
             await db.DeliveryJobs.CountAsync(x => x.Status == DeliveryStatus.Failed, cancellationToken),
-            await db.Messages.SumAsync(x => (long?)x.Size, cancellationToken) ?? 0);
+            await db.Messages.SumAsync(x => (long?)x.Size, cancellationToken) ?? 0,
+            healthyDomains,
+            attentionDomains,
+            Math.Max(0, activeDomainCount - checkedDomains),
+            await db.DomainCertificates.CountAsync(x => x.NotAfter <= now.AddDays(30), cancellationToken),
+            await db.DeliveryJobs.CountAsync(x => x.Status == DeliveryStatus.Delivered && x.UpdatedAt >= last24Hours, cancellationToken),
+            await db.DeliveryJobs.CountAsync(x => x.Status == DeliveryStatus.Failed && x.UpdatedAt >= last24Hours, cancellationToken));
     }
 
     public async Task<IReadOnlyList<FirewallRuleView>> GetFirewallRulesAsync(CancellationToken cancellationToken)
@@ -325,7 +438,13 @@ public sealed class AdminApplicationService(
         if (filter.IsActive is { } isActive) query = query.Where(x => x.IsActive == isActive);
         if (filter.HasCertificate is { } hasCertificate)
             query = query.Where(x => (x.Certificate != null) == hasCertificate);
-        if (filter.OutboundMode is { } outboundMode) query = query.Where(x => x.OutboundMode == outboundMode);
+        if (filter.DnsStatus is { } dnsStatus)
+        {
+            query = query.Where(x =>
+                db.DomainDnsChecks.Any(check => check.DomainId == x.Id && check.Status == dnsStatus)
+                || (dnsStatus == DomainDnsCheckStatus.PendingConfiguration
+                    && !db.DomainDnsChecks.Any(check => check.DomainId == x.Id)));
+        }
         query = filter.Expiry switch
         {
             DomainExpiryFilter.Expired => query.Where(x => x.Certificate != null && x.Certificate.NotAfter < now),
@@ -346,7 +465,6 @@ public sealed class AdminApplicationService(
                 x.Name,
                 x.MailHostName,
                 x.IsActive,
-                x.OutboundMode,
                 db.DomainDnsChecks.Where(check => check.DomainId == x.Id)
                     .Select(check => (DomainDnsCheckStatus?)check.Status)
                     .SingleOrDefault() ?? DomainDnsCheckStatus.PendingConfiguration,
@@ -361,9 +479,7 @@ public sealed class AdminApplicationService(
                 x.DkimSelector,
                 db.Accounts.Count(account => account.DomainId == x.Id),
                 x.QuotaBytes,
-                db.MailboxMessages
-                    .Where(message => message.Mailbox.Account.DomainId == x.Id)
-                    .Sum(message => (long?)message.Message.Size) ?? 0,
+                x.UsedBytes,
                 x.CreatedAt))
             .ToListAsync(cancellationToken);
 
@@ -375,27 +491,55 @@ public sealed class AdminApplicationService(
         int page,
         int pageSize,
         CancellationToken cancellationToken) =>
-        SearchDomainsAsync(new DomainSearchFilter(search, null, null, null), page, pageSize, cancellationToken);
+        SearchDomainsAsync(new DomainSearchFilter(search, null, null), page, pageSize, cancellationToken);
 
-    public async Task UpdateDomainsOutboundModeAsync(
+    public async Task DeleteDomainsAsync(
         IReadOnlyCollection<Guid> domainIds,
-        OutboundMode outboundMode,
         string actor,
         CancellationToken cancellationToken)
     {
         var ids = NormalizeDomainIds(domainIds);
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
         var domains = await db.Domains.Where(x => ids.Contains(x.Id)).ToListAsync(cancellationToken);
         if (domains.Count != ids.Length) throw new KeyNotFoundException("One or more domains were not found.");
+        var activeNames = domains.Where(x => x.IsActive).Select(x => x.Name).ToArray();
+        if (activeNames.Length > 0)
+            throw new InvalidOperationException($"Disable domains before deletion: {string.Join(", ", activeNames)}.");
+        var now = DateTimeOffset.UtcNow;
+        var purgeAfter = now.AddDays(Math.Clamp(configuration.GetValue("Maintenance:SoftDeleteRetentionDays", 30), 1, 3650));
         foreach (var domain in domains)
         {
-            domain.OutboundMode = outboundMode;
-            AddAudit(db, actor, "domain.outbound-mode.batch", $"domain:{domain.Id}", outboundMode.ToString());
+            domain.DeletedAt = now; domain.DeletedBy = actor; domain.PurgeAfter = purgeAfter; domain.IsActive = false;
+            var accounts = await db.Accounts.Where(x => x.DomainId == domain.Id).ToListAsync(cancellationToken);
+            var accountIds = accounts.Select(x => x.Id).ToArray();
+            foreach (var account in accounts)
+            {
+                account.DeletedAt = now; account.DeletedBy = actor; account.PurgeAfter = purgeAfter; account.IsEnabled = false;
+            }
+            var mailboxes = await db.Mailboxes.Where(x => accountIds.Contains(x.AccountId)).ToListAsync(cancellationToken);
+            var mailboxIds = mailboxes.Select(x => x.Id).ToArray();
+            foreach (var mailbox in mailboxes)
+            {
+                mailbox.DeletedAt = now; mailbox.DeletedBy = actor; mailbox.PurgeAfter = purgeAfter;
+            }
+            foreach (var message in await db.MailboxMessages.Where(x => mailboxIds.Contains(x.MailboxId)).ToListAsync(cancellationToken))
+            {
+                message.DeletedAt = now; message.DeletedBy = actor; message.PurgeAfter = purgeAfter;
+            }
+            db.CleanupQueue.Add(new CleanupQueueItem
+            {
+                ResourceType = CleanupResourceType.Domain, ResourceId = domain.Id, DomainId = domain.Id,
+                EstimatedBytes = domain.UsedBytes, CreatedAt = now, PurgeAfter = purgeAfter
+            });
+            AddAudit(db, actor, "domain.soft-delete", $"domain:{domain.Id}", $"{domain.Name}; purgeAfter={purgeAfter:O}");
         }
         await db.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+        certificateProvider.Invalidate();
     }
 
-    public async Task DeleteDomainsAsync(
+    private async Task DeleteDomainsImmediatelyAsync(
         IReadOnlyCollection<Guid> domainIds,
         string actor,
         CancellationToken cancellationToken)
@@ -505,12 +649,14 @@ public sealed class AdminApplicationService(
             domain.Certificate is not null,
             domain.Certificate?.NotAfter,
             !string.IsNullOrWhiteSpace(domain.DkimSelector) && !string.IsNullOrWhiteSpace(domain.DkimPublicKey),
-            lastAuditAt);
+            lastAuditAt,
+            await db.QuarantineRecords.CountAsync(
+                x => x.DomainId == id && x.Status == QuarantineStatus.PendingReview,
+                cancellationToken));
     }
 
     public async Task<MailDomain> CreateDomainAsync(
         string name,
-        OutboundMode outboundMode,
         string? dkimSelector,
         string? dkimPrivateKeyPath,
         string actor,
@@ -529,7 +675,6 @@ public sealed class AdminApplicationService(
             MailHostName = defaultMailHostName,
             SmtpHostName = defaultMailHostName,
             DirectDeliverSameDomain = true,
-            OutboundMode = outboundMode,
             DkimSelector = NullIfWhiteSpace(dkimSelector),
             DkimPrivateKeyPath = NullIfWhiteSpace(dkimPrivateKeyPath),
             DnsSettings = new DomainDnsSettings()
@@ -543,14 +688,12 @@ public sealed class AdminApplicationService(
     public async Task<MailDomain> UpdateDomainDetailsAsync(
         Guid id,
         string mailHostName,
-        OutboundMode outboundMode,
         bool isActive,
         string actor,
         CancellationToken cancellationToken)
         => await UpdateDomainDetailsAsync(
             id,
             mailHostName,
-            outboundMode,
             isActive,
             null,
             null,
@@ -561,7 +704,6 @@ public sealed class AdminApplicationService(
     public async Task<MailDomain> UpdateDomainDetailsAsync(
         Guid id,
         string mailHostName,
-        OutboundMode outboundMode,
         bool isActive,
         string? smtpHostName,
         string? outboundIpAddresses,
@@ -570,7 +712,6 @@ public sealed class AdminApplicationService(
         => await UpdateDomainDetailsAsync(
             id,
             mailHostName,
-            outboundMode,
             isActive,
             smtpHostName,
             outboundIpAddresses,
@@ -581,7 +722,6 @@ public sealed class AdminApplicationService(
     public async Task<MailDomain> UpdateDomainDetailsAsync(
         Guid id,
         string mailHostName,
-        OutboundMode outboundMode,
         bool isActive,
         string? smtpHostName,
         string? outboundIpAddresses,
@@ -612,7 +752,6 @@ public sealed class AdminApplicationService(
         domain.OutboundIpAddresses = normalizedOutboundIps;
         if (directDeliverSameDomain is not null)
             domain.DirectDeliverSameDomain = directDeliverSameDomain.Value;
-        domain.OutboundMode = outboundMode;
         domain.IsActive = isActive;
         AddAudit(db, actor, "domain.details.update", $"domain:{id}", normalizedHost);
         await db.SaveChangesAsync(cancellationToken);
@@ -623,7 +762,6 @@ public sealed class AdminApplicationService(
     public async Task<MailDomain> UpdateDomainAsync(
         Guid id,
         bool? isActive,
-        OutboundMode? outboundMode,
         string? dkimSelector,
         string? dkimPrivateKeyPath,
         string actor,
@@ -633,7 +771,6 @@ public sealed class AdminApplicationService(
         var domain = await db.Domains.SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
             ?? throw new KeyNotFoundException("Domain not found.");
         if (isActive is not null) domain.IsActive = isActive.Value;
-        if (outboundMode is not null) domain.OutboundMode = outboundMode.Value;
         if (dkimSelector is not null) domain.DkimSelector = NullIfWhiteSpace(dkimSelector);
         if (dkimPrivateKeyPath is not null) domain.DkimPrivateKeyPath = NullIfWhiteSpace(dkimPrivateKeyPath);
         AddAudit(db, actor, "domain.update", $"domain:{id}", null);
@@ -653,9 +790,7 @@ public sealed class AdminApplicationService(
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         var domain = await db.Domains.SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
             ?? throw new KeyNotFoundException("Domain not found.");
-        var usedBytes = await db.MailboxMessages
-            .Where(x => x.Mailbox.Account.DomainId == id)
-            .SumAsync(x => (long?)x.Message.Size, cancellationToken) ?? 0;
+        var usedBytes = domain.UsedBytes;
         if (quotaBytes < usedBytes)
             throw new InvalidOperationException("Domain quota cannot be lower than the currently used capacity.");
         var largestAccountQuota = await db.Accounts
@@ -680,10 +815,9 @@ public sealed class AdminApplicationService(
                 x.LocalPart + "@" + x.Domain.Name,
                 x.IsEnabled,
                 x.QuotaBytes,
-                db.MailboxMessages
-                    .Where(message => message.Mailbox.AccountId == x.Id)
-                    .Sum(message => (long?)message.Message.Size) ?? 0,
-                x.CreatedAt))
+                x.UsedBytes,
+                x.CreatedAt,
+                db.Aliases.Count(alias => alias.TargetAccountId == x.Id)))
             .ToListAsync(cancellationToken);
     }
 
@@ -700,10 +834,9 @@ public sealed class AdminApplicationService(
                 x.LocalPart + "@" + x.Domain.Name,
                 x.IsEnabled,
                 x.QuotaBytes,
-                db.MailboxMessages
-                    .Where(message => message.Mailbox.AccountId == x.Id)
-                    .Sum(message => (long?)message.Message.Size) ?? 0,
-                x.CreatedAt))
+                x.UsedBytes,
+                x.CreatedAt,
+                db.Aliases.Count(alias => alias.TargetAccountId == x.Id)))
             .ToListAsync(cancellationToken);
     }
 
@@ -726,10 +859,9 @@ public sealed class AdminApplicationService(
                 x.LocalPart + "@" + domainName,
                 x.IsEnabled,
                 x.QuotaBytes,
-                db.MailboxMessages
-                    .Where(message => message.Mailbox.AccountId == x.Id)
-                    .Sum(message => (long?)message.Message.Size) ?? 0,
-                x.CreatedAt))
+                x.UsedBytes,
+                x.CreatedAt,
+                db.Aliases.Count(alias => alias.TargetAccountId == x.Id)))
             .ToListAsync(cancellationToken);
     }
 
@@ -760,10 +892,9 @@ public sealed class AdminApplicationService(
                 x.LocalPart + "@" + domainName,
                 x.IsEnabled,
                 x.QuotaBytes,
-                db.MailboxMessages
-                    .Where(message => message.Mailbox.AccountId == x.Id)
-                    .Sum(message => (long?)message.Message.Size) ?? 0,
-                x.CreatedAt))
+                x.UsedBytes,
+                x.CreatedAt,
+                db.Aliases.Count(alias => alias.TargetAccountId == x.Id)))
             .ToListAsync(cancellationToken);
         return new PagedResult<AccountView>(rows, page, pageSize, total);
     }
@@ -822,15 +953,129 @@ public sealed class AdminApplicationService(
             if (quotaBytes <= 0) throw new ArgumentOutOfRangeException(nameof(quotaBytes));
             if (quotaBytes.Value > account.Domain.QuotaBytes)
                 throw new InvalidOperationException("Account quota cannot exceed the domain quota.");
-            var usedBytes = await db.MailboxMessages
-                .Where(x => x.Mailbox.AccountId == id)
-                .SumAsync(x => (long?)x.Message.Size, cancellationToken) ?? 0;
+            var usedBytes = account.UsedBytes;
             if (quotaBytes.Value < usedBytes)
                 throw new InvalidOperationException("Account quota cannot be lower than the currently used capacity.");
             account.QuotaBytes = quotaBytes.Value;
         }
         AddAudit(db, actor, "account.update", $"account:{id}", null);
         await db.SaveChangesAsync(cancellationToken);
+    }
+
+    public async Task DeleteAccountAsync(
+        Guid id,
+        string actor,
+        CancellationToken cancellationToken)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+        var account = await db.Accounts.Include(x => x.Domain).SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
+            ?? throw new KeyNotFoundException("Account not found.");
+        if (account.IsEnabled) throw new InvalidOperationException("Disable the account before deletion.");
+        var now = DateTimeOffset.UtcNow;
+        var purgeAfter = now.AddDays(Math.Clamp(configuration.GetValue("Maintenance:SoftDeleteRetentionDays", 30), 1, 3650));
+        account.DeletedAt = now; account.DeletedBy = actor; account.PurgeAfter = purgeAfter;
+        var mailboxes = await db.Mailboxes.Where(x => x.AccountId == id).ToListAsync(cancellationToken);
+        foreach (var mailbox in mailboxes)
+        {
+            mailbox.DeletedAt = now; mailbox.DeletedBy = actor; mailbox.PurgeAfter = purgeAfter;
+        }
+        var mailboxIds = mailboxes.Select(x => x.Id).ToArray();
+        foreach (var message in await db.MailboxMessages.Where(x => mailboxIds.Contains(x.MailboxId)).ToListAsync(cancellationToken))
+        {
+            message.DeletedAt = now; message.DeletedBy = actor; message.PurgeAfter = purgeAfter;
+        }
+        db.CleanupQueue.Add(new CleanupQueueItem
+        {
+            ResourceType = CleanupResourceType.Account,
+            ResourceId = account.Id,
+            AccountId = account.Id,
+            DomainId = account.DomainId,
+            EstimatedBytes = account.UsedBytes,
+            CreatedAt = now,
+            PurgeAfter = purgeAfter
+        });
+        AddAudit(db, actor, "account.soft-delete", $"account:{account.Id}", $"purgeAfter={purgeAfter:O}");
+        await db.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+    }
+
+    public async Task DisableDomainAccountsAsync(
+        Guid domainId,
+        IReadOnlyCollection<Guid> accountIds,
+        string actor,
+        CancellationToken cancellationToken)
+    {
+        var ids = accountIds.Distinct().ToArray();
+        if (ids.Length == 0) return;
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+        var accounts = await db.Accounts
+            .Where(x => x.DomainId == domainId && ids.Contains(x.Id))
+            .ToListAsync(cancellationToken);
+        if (accounts.Count != ids.Length) throw new KeyNotFoundException("One or more accounts were not found in this domain.");
+        foreach (var account in accounts) account.IsEnabled = false;
+        AddAudit(db, actor, "account.batch-disable", $"domain:{domainId}", $"count={accounts.Count}");
+        await db.SaveChangesAsync(cancellationToken);
+    }
+
+    public async Task EnableDomainAccountsAsync(
+        Guid domainId,
+        IReadOnlyCollection<Guid> accountIds,
+        string actor,
+        CancellationToken cancellationToken)
+    {
+        var ids = accountIds.Distinct().ToArray();
+        if (ids.Length == 0) return;
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+        var accounts = await db.Accounts
+            .Where(x => x.DomainId == domainId && ids.Contains(x.Id))
+            .ToListAsync(cancellationToken);
+        if (accounts.Count != ids.Length) throw new KeyNotFoundException("One or more accounts were not found in this domain.");
+        foreach (var account in accounts) account.IsEnabled = true;
+        AddAudit(db, actor, "account.batch-enable", $"domain:{domainId}", $"count={accounts.Count}");
+        await db.SaveChangesAsync(cancellationToken);
+    }
+
+    public async Task DeleteDomainAccountsAsync(
+        Guid domainId,
+        IReadOnlyCollection<Guid> accountIds,
+        string actor,
+        CancellationToken cancellationToken)
+    {
+        var ids = accountIds.Distinct().ToArray();
+        if (ids.Length == 0) return;
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+        var accounts = await db.Accounts.Include(x => x.Domain)
+            .Where(x => x.DomainId == domainId && ids.Contains(x.Id))
+            .ToListAsync(cancellationToken);
+        if (accounts.Count != ids.Length) throw new KeyNotFoundException("One or more accounts were not found in this domain.");
+        if (accounts.Any(x => x.IsEnabled)) throw new InvalidOperationException("Disable all selected accounts before deletion.");
+
+        var now = DateTimeOffset.UtcNow;
+        var purgeAfter = now.AddDays(Math.Clamp(configuration.GetValue("Maintenance:SoftDeleteRetentionDays", 30), 1, 3650));
+        var mailboxes = await db.Mailboxes.Where(x => ids.Contains(x.AccountId)).ToListAsync(cancellationToken);
+        var mailboxIds = mailboxes.Select(x => x.Id).ToArray();
+        var messages = await db.MailboxMessages.Where(x => mailboxIds.Contains(x.MailboxId)).ToListAsync(cancellationToken);
+        foreach (var account in accounts)
+        {
+            account.DeletedAt = now; account.DeletedBy = actor; account.PurgeAfter = purgeAfter;
+            db.CleanupQueue.Add(new CleanupQueueItem
+            {
+                ResourceType = CleanupResourceType.Account,
+                ResourceId = account.Id,
+                AccountId = account.Id,
+                DomainId = account.DomainId,
+                EstimatedBytes = account.UsedBytes,
+                CreatedAt = now,
+                PurgeAfter = purgeAfter
+            });
+        }
+        foreach (var mailbox in mailboxes) { mailbox.DeletedAt = now; mailbox.DeletedBy = actor; mailbox.PurgeAfter = purgeAfter; }
+        foreach (var message in messages) { message.DeletedAt = now; message.DeletedBy = actor; message.PurgeAfter = purgeAfter; }
+        AddAudit(db, actor, "account.batch-soft-delete", $"domain:{domainId}", $"count={accounts.Count};purgeAfter={purgeAfter:O}");
+        await db.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
     }
 
     public async Task SetAccountPasswordAsync(
@@ -915,6 +1160,46 @@ public sealed class AdminApplicationService(
                 x.IsEnabled && x.Mode != MailAliasMode.Disabled && x.TargetAccountId != null && x.TargetAccount!.IsEnabled,
                 x.IsEnabled && x.Mode == MailAliasMode.SendReceive && x.TargetAccountId != null && x.TargetAccount!.IsEnabled))
             .ToListAsync(cancellationToken);
+    }
+
+    public async Task<PagedResult<AliasView>> SearchDomainAliasesAsync(
+        Guid domainId,
+        string? search,
+        int page,
+        int pageSize,
+        CancellationToken cancellationToken)
+    {
+        page = Math.Max(1, page);
+        pageSize = Math.Clamp(pageSize, 5, 100);
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+        var domainName = await db.Domains.AsNoTracking().Where(x => x.Id == domainId)
+            .Select(x => x.Name).SingleOrDefaultAsync(cancellationToken)
+            ?? throw new KeyNotFoundException("Domain not found.");
+        var query = db.Aliases.AsNoTracking()
+            .Include(x => x.TargetAccount).ThenInclude(x => x!.Domain)
+            .Where(x => x.DomainId == domainId);
+        var normalizedSearch = search?.Trim().ToLowerInvariant();
+        if (!string.IsNullOrWhiteSpace(normalizedSearch))
+        {
+            query = query.Where(x => x.SourceLocalPart.Contains(normalizedSearch)
+                || (x.DestinationAddress != null && x.DestinationAddress.Contains(normalizedSearch))
+                || (x.TargetAccount != null && (x.TargetAccount.LocalPart + "@" + x.TargetAccount.Domain.Name).Contains(normalizedSearch)));
+        }
+        var total = await query.CountAsync(cancellationToken);
+        var rows = await query.OrderBy(x => x.SourceLocalPart)
+            .Skip((page - 1) * pageSize).Take(pageSize)
+            .Select(x => new AliasView(
+                x.Id,
+                x.SourceLocalPart + "@" + domainName,
+                x.TargetAccountId,
+                x.TargetAccount == null ? null : x.TargetAccount.LocalPart + "@" + x.TargetAccount.Domain.Name,
+                x.IsEnabled && x.Mode != MailAliasMode.Disabled && x.TargetAccountId != null && x.TargetAccount!.IsEnabled,
+                x.DestinationAddress,
+                x.Mode,
+                x.IsEnabled && x.Mode != MailAliasMode.Disabled && x.TargetAccountId != null && x.TargetAccount!.IsEnabled,
+                x.IsEnabled && x.Mode == MailAliasMode.SendReceive && x.TargetAccountId != null && x.TargetAccount!.IsEnabled))
+            .ToListAsync(cancellationToken);
+        return new PagedResult<AliasView>(rows, page, pageSize, total);
     }
 
     public async Task<AliasView> CreateAliasAsync(
@@ -1056,6 +1341,44 @@ public sealed class AdminApplicationService(
             ?? throw new KeyNotFoundException("Alias not found.");
         db.Aliases.Remove(alias);
         AddAudit(db, actor, "alias.delete", $"alias:{id}", null);
+        await db.SaveChangesAsync(cancellationToken);
+    }
+
+    public async Task UpdateDomainAliasesModeAsync(
+        Guid domainId,
+        IReadOnlyCollection<Guid> aliasIds,
+        MailAliasMode mode,
+        string actor,
+        CancellationToken cancellationToken)
+    {
+        if (!Enum.IsDefined(mode)) throw new ArgumentOutOfRangeException(nameof(mode));
+        var ids = aliasIds.Distinct().ToArray();
+        if (ids.Length == 0) return;
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+        var aliases = await db.Aliases.Include(x => x.TargetAccount)
+            .Where(x => x.DomainId == domainId && ids.Contains(x.Id))
+            .ToListAsync(cancellationToken);
+        if (aliases.Count != ids.Length) throw new KeyNotFoundException("One or more aliases were not found in this domain.");
+        if (mode != MailAliasMode.Disabled && aliases.Any(x => x.TargetAccountId == null || x.TargetAccount == null || !x.TargetAccount.IsEnabled))
+            throw new InvalidOperationException("Enabled aliases require an enabled target account.");
+        foreach (var alias in aliases) { alias.Mode = mode; alias.IsEnabled = mode != MailAliasMode.Disabled; }
+        AddAudit(db, actor, "alias.batch-mode", $"domain:{domainId}", $"count={aliases.Count};mode={mode}");
+        await db.SaveChangesAsync(cancellationToken);
+    }
+
+    public async Task DeleteDomainAliasesAsync(
+        Guid domainId,
+        IReadOnlyCollection<Guid> aliasIds,
+        string actor,
+        CancellationToken cancellationToken)
+    {
+        var ids = aliasIds.Distinct().ToArray();
+        if (ids.Length == 0) return;
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+        var aliases = await db.Aliases.Where(x => x.DomainId == domainId && ids.Contains(x.Id)).ToListAsync(cancellationToken);
+        if (aliases.Count != ids.Length) throw new KeyNotFoundException("One or more aliases were not found in this domain.");
+        db.Aliases.RemoveRange(aliases);
+        AddAudit(db, actor, "alias.batch-delete", $"domain:{domainId}", $"count={aliases.Count}");
         await db.SaveChangesAsync(cancellationToken);
     }
 
@@ -1234,9 +1557,28 @@ public sealed class AdminApplicationService(
         return await query.OrderByDescending(x => x.UpdatedAt).Take(200).ToListAsync(cancellationToken);
     }
 
-    public async Task<PagedResult<DeliveryJob>> SearchDeliveryJobsAsync(
+    public async Task<IReadOnlyList<DeliveryAttemptDetail>> GetDeliveryAttemptsAsync(
+        Guid deliveryJobId,
+        CancellationToken cancellationToken)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+        if (!await db.DeliveryJobs.AsNoTracking().AnyAsync(x => x.Id == deliveryJobId, cancellationToken))
+            throw new KeyNotFoundException("Delivery job not found.");
+        return await db.DeliveryAttempts.AsNoTracking()
+            .Where(x => x.DeliveryJobId == deliveryJobId)
+            .OrderByDescending(x => x.AttemptNumber)
+            .Select(x => new DeliveryAttemptDetail(
+                x.Id, x.AttemptNumber, x.Succeeded, x.PermanentFailure, x.Stage,
+                x.RemoteHost, x.RemoteAddress, x.SmtpStatusCode, x.EnhancedStatusCode,
+                x.TlsProtocol, x.TlsCipherSuite, x.DurationMilliseconds, x.FailureCategory,
+                x.NextRetryAt, x.Response, x.SessionSummary, x.CreatedAt))
+            .ToListAsync(cancellationToken);
+    }
+
+    public async Task<PagedResult<DeliveryJobView>> SearchDeliveryJobsAsync(
         string? search,
         DeliveryStatus? status,
+        DeliveryJobScope scope,
         int page,
         int pageSize,
         CancellationToken cancellationToken,
@@ -1248,6 +1590,13 @@ public sealed class AdminApplicationService(
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         var query = db.DeliveryJobs.AsNoTracking();
         if (routeDomainId is not null) query = query.Where(x => x.RouteDomainId == routeDomainId);
+        query = scope switch
+        {
+            DeliveryJobScope.Active => query.Where(x => x.Status != DeliveryStatus.Delivered),
+            DeliveryJobScope.History => query.Where(x => x.Status == DeliveryStatus.Delivered),
+            DeliveryJobScope.Failed => query.Where(x => x.Status == DeliveryStatus.Failed),
+            _ => query
+        };
         if (status is not null) query = query.Where(x => x.Status == status);
         if (normalizedSearch is not null)
         {
@@ -1262,9 +1611,137 @@ public sealed class AdminApplicationService(
             .OrderByDescending(x => x.UpdatedAt)
             .Skip((page - 1) * pageSize)
             .Take(pageSize)
+            .Select(x => new DeliveryJobView(
+                x.Id,
+                x.Sender,
+                x.Recipient,
+                x.Status,
+                x.Attempts,
+                x.NextAttemptAt,
+                x.LastError,
+                x.CreatedAt,
+                x.UpdatedAt))
             .ToListAsync(cancellationToken);
-        return new PagedResult<DeliveryJob>(rows, page, pageSize, total);
+        return new PagedResult<DeliveryJobView>(rows, page, pageSize, total);
     }
+
+    public async Task<DeliveryQueueSummary> GetDeliveryQueueSummaryAsync(CancellationToken cancellationToken)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+        var since = DateTimeOffset.UtcNow.AddHours(-24);
+        return new DeliveryQueueSummary(
+            await db.DeliveryJobs.CountAsync(x => x.Status == DeliveryStatus.Pending, cancellationToken),
+            await db.DeliveryJobs.CountAsync(x => x.Status == DeliveryStatus.Processing, cancellationToken),
+            await db.DeliveryJobs.CountAsync(x => x.Status == DeliveryStatus.Deferred, cancellationToken),
+            await db.DeliveryJobs.CountAsync(x => x.Status == DeliveryStatus.Failed, cancellationToken),
+            await db.DeliveryJobs.CountAsync(x => x.Status == DeliveryStatus.Delivered && x.UpdatedAt >= since, cancellationToken),
+            await db.DeliveryJobs.CountAsync(x => x.Status == DeliveryStatus.Failed && x.UpdatedAt >= since, cancellationToken),
+            await db.DeliveryAttempts.Where(x => x.CreatedAt >= since)
+                .AverageAsync(x => (double?)x.DurationMilliseconds, cancellationToken) ?? 0);
+    }
+
+    public async Task<PagedResult<TlsReportDeliveryView>> SearchTlsReportDeliveriesAsync(
+        string? search,
+        TlsReportDeliveryStatusFilter status,
+        int page,
+        int pageSize,
+        CancellationToken cancellationToken)
+    {
+        page = Math.Max(1, page);
+        pageSize = Math.Clamp(pageSize, 5, 100);
+        var normalizedSearch = NullIfWhiteSpace(search);
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+        var query = db.TlsReportDeliveries.AsNoTracking();
+        if (normalizedSearch is not null)
+        {
+            query = query.Where(x => x.PolicyDomain.Contains(normalizedSearch)
+                || x.ReportUri.Contains(normalizedSearch)
+                || (x.LastError != null && x.LastError.Contains(normalizedSearch)));
+        }
+
+        query = status switch
+        {
+            TlsReportDeliveryStatusFilter.Pending => query.Where(x => x.CompletedAt == null && x.Attempts == 0),
+            TlsReportDeliveryStatusFilter.Retrying => query.Where(x => x.CompletedAt == null && x.Attempts > 0 && x.Attempts < 5),
+            TlsReportDeliveryStatusFilter.Failed => query.Where(x => x.CompletedAt == null && x.Attempts >= 5),
+            TlsReportDeliveryStatusFilter.Completed => query.Where(x => x.CompletedAt != null),
+            _ => query
+        };
+
+        var total = await query.CountAsync(cancellationToken);
+        var rows = await query
+            .OrderByDescending(x => x.PeriodEnd)
+            .ThenBy(x => x.PolicyDomain)
+            .Skip((page - 1) * pageSize)
+            .Take(pageSize)
+            .Select(x => new TlsReportDeliveryView(
+                x.Id,
+                x.PolicyDomain,
+                x.ReportUri,
+                x.PeriodStart,
+                x.PeriodEnd,
+                x.CompletedAt != null
+                    ? TlsReportDeliveryStatus.Completed
+                    : x.Attempts >= 5
+                        ? TlsReportDeliveryStatus.Failed
+                        : x.Attempts > 0
+                            ? TlsReportDeliveryStatus.Retrying
+                            : TlsReportDeliveryStatus.Pending,
+                x.Attempts,
+                x.NextAttemptAt,
+                x.CompletedAt,
+                x.LastError))
+            .ToListAsync(cancellationToken);
+        return new PagedResult<TlsReportDeliveryView>(rows, page, pageSize, total);
+    }
+
+    public async Task<TlsReportDeliveryDetail> GetTlsReportDeliveryAsync(
+        Guid id,
+        CancellationToken cancellationToken)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+        var report = await db.TlsReportDeliveries.AsNoTracking()
+            .SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
+            ?? throw new KeyNotFoundException("TLS report delivery not found.");
+        return new TlsReportDeliveryDetail(
+            report.Id,
+            report.PolicyDomain,
+            report.ReportUri,
+            report.PeriodStart,
+            report.PeriodEnd,
+            GetTlsReportStatus(report),
+            report.Attempts,
+            report.NextAttemptAt,
+            report.CompletedAt,
+            report.LastError,
+            report.ReportJson);
+    }
+
+    public async Task RetryTlsReportDeliveryAsync(
+        Guid id,
+        string actor,
+        CancellationToken cancellationToken)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+        var report = await db.TlsReportDeliveries.SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
+            ?? throw new KeyNotFoundException("TLS report delivery not found.");
+        if (report.CompletedAt is not null)
+            throw new InvalidOperationException("Completed TLS reports cannot be retried.");
+        report.Attempts = 0;
+        report.NextAttemptAt = DateTimeOffset.UtcNow;
+        report.LastError = null;
+        AddAudit(db, actor, "tls-report.retry", $"tls-report:{id}", report.PolicyDomain);
+        await db.SaveChangesAsync(cancellationToken);
+    }
+
+    private static TlsReportDeliveryStatus GetTlsReportStatus(TlsReportDelivery report) =>
+        report.CompletedAt is not null
+            ? TlsReportDeliveryStatus.Completed
+            : report.Attempts >= 5
+                ? TlsReportDeliveryStatus.Failed
+                : report.Attempts > 0
+                    ? TlsReportDeliveryStatus.Retrying
+                    : TlsReportDeliveryStatus.Pending;
 
     public async Task<DeliveryRawMessageView> GetDeliveryRawMessageAsync(
         Guid id,
@@ -1505,6 +1982,30 @@ public sealed class AdminApplicationService(
         var saved = await systemSettings.SaveMailboxSettingsAsync(settings, cancellationToken);
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         AddAudit(db, actor, "settings.mailboxes.update", "settings:mailboxes", string.Join('\n', saved.DefaultFolders));
+        await db.SaveChangesAsync(cancellationToken);
+        return saved;
+    }
+
+    public Task<MailboxSettingsView> GetDomainMailboxSettingsAsync(Guid domainId, CancellationToken cancellationToken) =>
+        systemSettings.GetDomainMailboxSettingsAsync(domainId, cancellationToken);
+
+    public async Task<MailboxSettingsView> UpdateDomainMailboxSettingsAsync(
+        Guid domainId,
+        MailboxSettingsView settings,
+        string actor,
+        CancellationToken cancellationToken)
+    {
+        var current = await systemSettings.GetDomainMailboxSettingsAsync(domainId, cancellationToken);
+        var requested = MailboxNames.NormalizeDefaults(settings.DefaultFolders);
+        var removed = current.DefaultFolders
+            .Where(folder => !MailboxNames.IsSystemFolder(folder))
+            .Where(folder => !requested.Contains(folder, StringComparer.OrdinalIgnoreCase))
+            .ToArray();
+        if (removed.Length > 0)
+            throw new InvalidOperationException("Folders must be removed through the safe deletion workflow.");
+        var saved = await systemSettings.SaveDomainMailboxSettingsAsync(domainId, settings, cancellationToken);
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+        AddAudit(db, actor, "settings.mailboxes.update", $"domain:{domainId}", string.Join('\n', saved.DefaultFolders));
         await db.SaveChangesAsync(cancellationToken);
         return saved;
     }
@@ -1868,7 +2369,7 @@ public sealed class AdminApplicationService(
         CancellationToken cancellationToken)
     {
         ValidatePassword(password);
-        var mailboxSettings = await systemSettings.GetMailboxSettingsAsync(cancellationToken);
+        var mailboxSettings = await systemSettings.GetDomainMailboxSettingsAsync(domain.Id, cancellationToken);
         if (await db.Accounts.AnyAsync(
                 x => x.DomainId == domain.Id && x.LocalPart == localPart,
                 cancellationToken))
@@ -1904,7 +2405,8 @@ public sealed class AdminApplicationService(
             account.IsEnabled,
             account.QuotaBytes,
             0,
-            account.CreatedAt);
+            account.CreatedAt,
+            0);
     }
 
     private static async Task<AliasView> CreateAliasCoreAsync(

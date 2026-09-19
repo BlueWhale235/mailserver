@@ -9,6 +9,9 @@ using MailServer.PluginSdk;
 
 namespace MailServer.Infrastructure;
 
+/// <summary>
+/// Infrastructure 层的组合根。新增领域服务、后台服务依赖或插件宿主能力时优先在这里注册。
+/// </summary>
 public static class DependencyInjection
 {
     public static IServiceCollection AddMailServerInfrastructure(
@@ -22,7 +25,6 @@ public static class DependencyInjection
                 : throw new InvalidOperationException("ConnectionStrings:MailDatabase is required."));
         services.Configure<DatabaseOptions>(configuration.GetSection(DatabaseOptions.SectionName));
         services.Configure<StorageOptions>(configuration.GetSection(StorageOptions.SectionName));
-        services.Configure<RelayOptions>(configuration.GetSection(RelayOptions.SectionName));
         services.Configure<DeliveryOptions>(configuration.GetSection(DeliveryOptions.SectionName));
         services.Configure<MailboxDefaultsOptions>(configuration.GetSection(MailboxDefaultsOptions.SectionName));
         services.Configure<MailRulesOptions>(configuration.GetSection(MailRulesOptions.SectionName));
@@ -32,8 +34,24 @@ public static class DependencyInjection
         services.Configure<CertificatesOptions>(configuration.GetSection(CertificatesOptions.SectionName));
         services.Configure<AdminServerOptions>(configuration.GetSection(AdminServerOptions.SectionName));
         services.Configure<TransportSecurityOptions>(configuration.GetSection(TransportSecurityOptions.SectionName));
-        services.AddPooledDbContextFactory<MailDbContext>(options =>
+        services.Configure<MaintenanceOptions>(configuration.GetSection(MaintenanceOptions.SectionName));
+        services.Configure<ClusterOptions>(configuration.GetSection(ClusterOptions.SectionName));
+        services.Configure<ClusterTransportOptions>(configuration.GetSection(ClusterTransportOptions.SectionName));
+        services.Configure<ClusterSyncThrottleOptions>(configuration.GetSection(ClusterSyncThrottleOptions.SectionName));
+        services.AddSingleton(new ClusterRuntimeState(
+            configuration.GetValue("Cluster:Enabled", false),
+            configuration.GetValue("Cluster:RecoveryRequired", false)));
+        services.AddSingleton<ClusterTransportRuntimeState>();
+        services.AddHostedService<ClusterRuntimeBootstrap>();
+        services.AddHttpContextAccessor();
+        services.AddSingleton<AuditStampInterceptor>();
+        services.AddSingleton<ReplicationJournalInterceptor>();
+        services.AddPooledDbContextFactory<MailDbContext>((provider, options) =>
         {
+            // 所有数据库写入都经过复制日志拦截器，集群同步依赖它记录实体变更。
+            options.AddInterceptors(
+                provider.GetRequiredService<AuditStampInterceptor>(),
+                provider.GetRequiredService<ReplicationJournalInterceptor>());
             var migrationsAssembly = database.Provider.MigrationsAssemblyName();
             switch (database.Provider)
             {
@@ -42,6 +60,7 @@ public static class DependencyInjection
                     var sqlitePath = new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder(connectionString).DataSource;
                     if (!string.IsNullOrWhiteSpace(sqlitePath) && sqlitePath != ":memory:")
                     {
+                        // 本地单机默认使用 SQLite，启动时创建目录可减少首次运行配置成本。
                         var fullPath = Path.GetFullPath(sqlitePath);
                         Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
                     }
@@ -63,10 +82,13 @@ public static class DependencyInjection
             configuration[$"{SecurityAssetsOptions.SectionName}:RootPath"] ?? "security-assets");
         var pluginKeyDirectory = new DirectoryInfo(securityRoot);
         Directory.CreateDirectory(pluginKeyDirectory.FullName);
+        // DataProtection key 同时服务管理后台 cookie 和插件/安全资产场景，必须稳定持久化。
         services.AddDataProtection()
             .SetApplicationName("MailServer")
             .PersistKeysToFileSystem(pluginKeyDirectory);
         services.AddSingleton<IMessageContentStore, FileMessageContentStore>();
+        services.AddSingleton<IClock, SystemClock>();
+        services.AddSingleton<IMimeInspectionService, MimeInspectionService>();
         services.AddSingleton<ICredentialService, CredentialService>();
         services.AddSingleton<IAccountAuthenticator, AccountAuthenticator>();
         services.AddSingleton<ISmtpSenderAuthorizer, SmtpSenderAuthorizer>();
@@ -76,6 +98,8 @@ public static class DependencyInjection
         services.AddSingleton(new LookupClient(new LookupClientOptions { Timeout = TimeSpan.FromSeconds(5), Retries = 2 }));
         services.AddSingleton<DnsDiagnosticService>();
         services.AddSingleton<SystemSettingsService>();
+        services.AddSingleton<MailboxFolderManagementService>();
+        services.AddSingleton<AuditLogService>();
         services.AddSingleton<PermissionService>();
         services.AddSingleton<DomainCertificateProvider>();
         services.AddSingleton<DomainCertificateService>();
@@ -85,14 +109,62 @@ public static class DependencyInjection
         services.AddSingleton<SentCopyService>();
         services.AddSingleton<IpFirewallService>();
         services.AddSingleton<TransportSecurityPolicyService>();
+        services.AddSingleton<IQuotaLedgerService, QuotaLedgerService>();
+        services.AddSingleton<IQuotaReconciliationService, QuotaReconciliationService>();
+        services.AddSingleton<CleanupQueueService>();
+        services.AddSingleton<ICleanupQueueService>(provider => provider.GetRequiredService<CleanupQueueService>());
+        services.AddSingleton<IRecycleBinService>(provider => provider.GetRequiredService<CleanupQueueService>());
+        services.AddSingleton<IReplicationJournal, ReplicationJournal>();
+        services.AddSingleton<IReplicationTransport, DatabaseReplicationTransport>();
+        services.AddSingleton<ReplicationSchemaFingerprintProvider>();
+        services.AddSingleton<QuarantineService>();
+        services.AddSingleton<IQuarantineService>(provider => provider.GetRequiredService<QuarantineService>());
+        services.AddSingleton<ClusterLeaseService>();
+        services.AddSingleton<ClusterCertificateService>();
+        services.AddSingleton<ClusterPluginPackageService>();
+        services.AddSingleton<ClusterTransportClient>();
+        services.AddSingleton<ClusterSyncThrottle>();
+        services.AddSingleton<ClusterManagementService>();
+        services.AddSingleton<WitnessLeaseService>();
+        services.AddHttpClient("cluster-witness", client => client.Timeout = TimeSpan.FromSeconds(10));
+        services.AddHttpClient("cluster-replication", client => client.Timeout = TimeSpan.FromSeconds(60));
+        services.AddSingleton<IClusterLeaseService>(provider => provider.GetRequiredService<ClusterLeaseService>());
+        services.AddSingleton<IClusterHealthService>(provider => provider.GetRequiredService<ClusterLeaseService>());
+        services.AddSingleton<IScheduledTaskHandler, CleanupTaskHandler>();
+        services.AddSingleton<IScheduledTaskHandler, QuotaTaskHandler>();
+        services.AddSingleton<IScheduledTaskHandler, CacheCleanupTaskHandler>();
+        services.AddSingleton<IScheduledTaskHandler, ReplicationCheckTaskHandler>();
+        services.AddSingleton<IScheduledTaskHandler, OrphanStorageTaskHandler>();
+        services.AddSingleton<IScheduledTaskHandler, StorageIntegrityTaskHandler>();
+        services.AddSingleton<IScheduledTaskHandler, ReplicationSnapshotTaskHandler>();
+        services.AddSingleton<IScheduledTaskHandler, MailboxFolderDeletionTaskHandler>();
+        services.AddSingleton<TaskExecutionService>();
+        services.AddSingleton<ITaskScheduler>(provider => provider.GetRequiredService<TaskExecutionService>());
+        services.AddSingleton<ITaskExecutionService>(provider => provider.GetRequiredService<TaskExecutionService>());
         services.AddSingleton<PluginSettingsService>();
         services.AddSingleton<IPluginSettingsProvider>(provider => provider.GetRequiredService<PluginSettingsService>());
+        services.AddSingleton<IPluginMailSender, PluginMailSender>();
+        services.AddSingleton<IPluginDeliveryQueue, PluginDeliveryQueue>();
+        services.AddSingleton<IPluginDirectory, PluginDirectory>();
+        services.AddSingleton<IPluginMessageStore, PluginMessageStore>();
+        services.AddSingleton<IPluginMailboxStore, PluginMailboxStore>();
+        services.AddSingleton<IPluginAuditWriter, PluginAuditWriter>();
+        services.AddSingleton<IPluginStateStore, PluginStateStore>();
+        services.AddSingleton<IPluginQuarantineStore, PluginQuarantineStore>();
         services.AddSingleton<AdminApplicationService>();
-        services.AddSingleton<IOutboundTransport, RelaySmtpTransport>();
         services.AddSingleton<IOutboundTransport, DirectMxTransport>();
         return services;
     }
 
+    public static IServiceCollection AddClusterTransportHost(this IServiceCollection services)
+    {
+        services.AddHostedService<ClusterTransportService>();
+        return services;
+    }
+
+    /// <summary>
+    /// 启动前校验数据库可连接且迁移已应用，避免协议服务在半初始化状态下接收邮件。
+    /// </summary>
     public static async Task VerifyMailDatabaseAsync(
         this IServiceProvider services,
         CancellationToken cancellationToken = default)
@@ -105,6 +177,13 @@ public static class DependencyInjection
             throw new InvalidOperationException("The configured mail database is unavailable. Run 'mailserver doctor'.");
         }
 
+        var applied = (await db.Database.GetAppliedMigrationsAsync(cancellationToken)).ToArray();
+        if (applied.Any(migration => !migration.EndsWith("_InitialMailServer2", StringComparison.Ordinal)))
+        {
+            throw new InvalidOperationException(
+                "This database belongs to a pre-2.0 migration chain and cannot be upgraded in place. Back it up, create an empty database, then run 'mailserver db update'.");
+        }
+
         var pending = (await db.Database.GetPendingMigrationsAsync(cancellationToken)).ToArray();
         if (pending.Length > 0)
         {
@@ -114,6 +193,9 @@ public static class DependencyInjection
     }
 }
 
+/// <summary>
+/// SQLite 原生 provider 初始化器，保证单文件发布或便携运行时能正确加载 SQLitePCL。
+/// </summary>
 internal static class SqliteNative
 {
     private static readonly object Sync = new();

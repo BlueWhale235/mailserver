@@ -146,10 +146,6 @@ public static class PermissionEndpointExtensions
             yield break;
         }
 
-        if (argument is DomainBatchOutboundRequest outbound)
-        {
-            foreach (var id in outbound.DomainIds) yield return id;
-        }
     }
 
     private static string? ExtractStringProperty(object? argument, string[] propertyNames)

@@ -1,14 +1,8 @@
 namespace MailServer.Infrastructure;
 
-public enum RelaySecurity
-{
-    Auto = 0,
-    Plain = 1,
-    StartTls = 2,
-    StartTlsWhenAvailable = 3,
-    ImplicitTls = 4
-}
-
+/// <summary>
+/// 原始邮件内容存储配置。
+/// </summary>
 public sealed class StorageOptions
 {
     public const string SectionName = "Storage";
@@ -16,37 +10,9 @@ public sealed class StorageOptions
     public long MaximumMessageBytes { get; set; } = 52_428_800;
 }
 
-public sealed class RelayOptions
-{
-    public const string SectionName = "Relay";
-    public string Host { get; set; } = "localhost";
-    public int Port { get; set; } = 25;
-    public string? Security { get; set; }
-    public bool UseStartTls { get; set; } = true;
-    public string? UserName { get; set; }
-    public string? Password { get; set; }
-
-    public RelaySecurity EffectiveSecurity
-    {
-        get
-        {
-            if (!string.IsNullOrWhiteSpace(Security))
-            {
-                return Enum.TryParse<RelaySecurity>(Security, ignoreCase: true, out var parsed)
-                    ? parsed
-                    : throw new FormatException(
-                        "Relay:Security must be Auto, Plain, StartTls, StartTlsWhenAvailable, or ImplicitTls.");
-            }
-
-            return Port == 465 && UseStartTls
-                ? RelaySecurity.ImplicitTls
-                : UseStartTls
-                    ? RelaySecurity.StartTls
-                    : RelaySecurity.Auto;
-        }
-    }
-}
-
+/// <summary>
+/// 外发队列处理参数，控制租约长度、重试次数和轮询频率。
+/// </summary>
 public sealed class DeliveryOptions
 {
     public const string SectionName = "Delivery";
@@ -56,12 +22,18 @@ public sealed class DeliveryOptions
     public int PollIntervalSeconds { get; set; } = 5;
 }
 
+/// <summary>
+/// 新账号默认创建的 IMAP 文件夹。
+/// </summary>
 public sealed class MailboxDefaultsOptions
 {
     public const string SectionName = "MailboxDefaults";
     public List<string> Folders { get; set; } = ["INBOX", "Sent", "Drafts", "Trash", "Junk", "Archives"];
 }
 
+/// <summary>
+/// 邮件规则与 Sent 副本去重相关参数。
+/// </summary>
 public sealed class MailRulesOptions
 {
     public const string SectionName = "MailRules";
@@ -69,6 +41,9 @@ public sealed class MailRulesOptions
     public int SentCopyDeduplicationMinutes { get; set; } = 15;
 }
 
+/// <summary>
+/// 转发和 SRS 配置。SrsSecret 为空时不应启用跨域转发生产能力。
+/// </summary>
 public sealed class ForwardingOptions
 {
     public const string SectionName = "Forwarding";
@@ -78,6 +53,9 @@ public sealed class ForwardingOptions
     public int MaxTargetsPerRule { get; set; } = 20;
 }
 
+/// <summary>
+/// 插件搜索目录配置，宿主只加载已发布插件目录。
+/// </summary>
 public sealed class PluginOptions
 {
     public const string SectionName = "Plugins";
