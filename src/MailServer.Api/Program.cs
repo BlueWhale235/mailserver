@@ -340,7 +340,6 @@ api.MapGet("/audit", async (
     string? search,
     AuditCategory? category,
     AuditStatus? status,
-    string? nodeId,
     string? actor,
     string? pluginId,
     DateTimeOffset? from,
@@ -350,7 +349,7 @@ api.MapGet("/audit", async (
     AuditLogService audit,
     CancellationToken cancellationToken) =>
     Results.Ok(await audit.SearchAsync(
-        new AuditSearchRequest(search, category, status, nodeId, actor, pluginId, from, to),
+        new AuditSearchRequest(search, category, status, actor, pluginId, from, to),
         page ?? 1,
         pageSize ?? 20,
         cancellationToken)))

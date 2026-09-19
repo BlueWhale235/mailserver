@@ -483,7 +483,7 @@ public sealed class TaskExecutionService(
         if (lease is null) { lease = new TaskLease { ScheduledTaskId = taskId, Owner = Owner, ExpiresAt = clock.UtcNow }; db.TaskLeases.Add(lease); }
         lease.Owner = Owner; lease.ExpiresAt = clock.UtcNow.AddSeconds(Math.Clamp(task.TimeoutSeconds, 10, 86400));
         task.Status = ScheduledTaskStatus.Running; task.LastRunAt = clock.UtcNow;
-        var execution = new TaskExecution { ScheduledTaskId = taskId, NodeId = Owner };
+        var execution = new TaskExecution { ScheduledTaskId = taskId };
         db.TaskExecutions.Add(execution);
         await db.SaveChangesAsync(cancellationToken);
         await transaction.CommitAsync(cancellationToken);

@@ -128,10 +128,6 @@ namespace MailServer.Migrations.Sqlite.Migrations
                     b.Property<long?>("DurationMilliseconds")
                         .HasColumnType("INTEGER");
 
-                    b.Property<string>("NodeId")
-                        .HasMaxLength(128)
-                        .HasColumnType("TEXT");
-
                     b.Property<string>("PluginId")
                         .HasMaxLength(128)
                         .HasColumnType("TEXT");
@@ -1467,11 +1463,6 @@ namespace MailServer.Migrations.Sqlite.Migrations
 
                     b.Property<string>("Error")
                         .HasMaxLength(4096)
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("NodeId")
-                        .IsRequired()
-                        .HasMaxLength(128)
                         .HasColumnType("TEXT");
 
                     b.Property<int>("ProcessedCount")

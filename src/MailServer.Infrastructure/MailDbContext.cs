@@ -292,7 +292,6 @@ public sealed class MailDbContext(DbContextOptions<MailDbContext> options) : DbC
             entity.HasKey(x => x.Id);
             entity.HasIndex(x => new { x.ScheduledTaskId, x.StartedAt });
             entity.Property(x => x.Status).HasConversion<string>().HasMaxLength(32);
-            entity.Property(x => x.NodeId).HasMaxLength(128);
             entity.Property(x => x.Error).HasMaxLength(4096);
             entity.HasOne(x => x.ScheduledTask).WithMany().HasForeignKey(x => x.ScheduledTaskId).OnDelete(DeleteBehavior.Cascade);
         });
@@ -451,7 +450,6 @@ public sealed class MailDbContext(DbContextOptions<MailDbContext> options) : DbC
             entity.Property(x => x.RemoteAddress).HasMaxLength(128);
             entity.Property(x => x.Category).HasConversion<string>().HasMaxLength(32);
             entity.Property(x => x.Status).HasConversion<string>().HasMaxLength(32);
-            entity.Property(x => x.NodeId).HasMaxLength(128);
             entity.Property(x => x.RequestId).HasMaxLength(128);
             entity.Property(x => x.RelatedId).HasMaxLength(256);
             entity.Property(x => x.PluginId).HasMaxLength(128);

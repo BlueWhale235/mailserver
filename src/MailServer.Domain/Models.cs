@@ -436,7 +436,6 @@ public sealed class TaskExecution
     public Guid ScheduledTaskId { get; set; }
     public ScheduledTask ScheduledTask { get; set; } = null!;
     public TaskExecutionStatus Status { get; set; } = TaskExecutionStatus.Running;
-    public required string NodeId { get; set; }
     public DateTimeOffset StartedAt { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset? CompletedAt { get; set; }
     public int ProcessedCount { get; set; }
@@ -616,7 +615,6 @@ public sealed class AuditRecord
     public string? RemoteAddress { get; set; }
     public AuditCategory? Category { get; set; }
     public AuditStatus? Status { get; set; }
-    public string? NodeId { get; set; }
     public string? RequestId { get; set; }
     public string? RelatedId { get; set; }
     public long? DurationMilliseconds { get; set; }

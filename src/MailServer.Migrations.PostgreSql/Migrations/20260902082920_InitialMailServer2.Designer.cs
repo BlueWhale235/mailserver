@@ -136,10 +136,6 @@ namespace MailServer.Migrations.PostgreSql.Migrations
                     b.Property<long?>("DurationMilliseconds")
                         .HasColumnType("bigint");
 
-                    b.Property<string>("NodeId")
-                        .HasMaxLength(128)
-                        .HasColumnType("character varying(128)");
-
                     b.Property<string>("PluginId")
                         .HasMaxLength(128)
                         .HasColumnType("character varying(128)");
@@ -1476,11 +1472,6 @@ namespace MailServer.Migrations.PostgreSql.Migrations
                     b.Property<string>("Error")
                         .HasMaxLength(4096)
                         .HasColumnType("character varying(4096)");
-
-                    b.Property<string>("NodeId")
-                        .IsRequired()
-                        .HasMaxLength(128)
-                        .HasColumnType("character varying(128)");
 
                     b.Property<int>("ProcessedCount")
                         .HasColumnType("integer");

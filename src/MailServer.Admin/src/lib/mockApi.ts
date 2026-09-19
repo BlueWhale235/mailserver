@@ -214,7 +214,6 @@ interface MockTaskExecution {
   id: string
   scheduledTaskId: string
   status: 'Running' | 'Succeeded' | 'Failed' | 'Cancelled'
-  nodeId: string
   startedAt: string
   completedAt?: string
   processedCount: number
@@ -251,7 +250,6 @@ interface MockAuditEntry {
   resource: string
   detail?: string
   remoteAddress?: string
-  nodeId?: string
   requestId?: string
   relatedId?: string
   durationMilliseconds?: number
@@ -416,60 +414,60 @@ const previewTasks: MockScheduledTask[] = [
 ]
 
 let previewTaskExecutions: MockTaskExecution[] = [
-  { id: '0aa00000-0000-4000-8000-000000000001', scheduledTaskId: 'f0e1d2c3-b4a5-4678-9012-000000000005', status: 'Running', nodeId: 'preview-primary:4102', startedAt: '2026-09-18T04:18:00Z', processedCount: 386, releasedBytes: 0, attempt: 1 },
-  { id: '0aa00000-0000-4000-8000-000000000003', scheduledTaskId: 'f0e1d2c3-b4a5-4678-9012-000000000001', status: 'Succeeded', nodeId: 'preview-primary:4102', startedAt: '2026-09-18T04:00:00Z', completedAt: '2026-09-18T04:00:03Z', processedCount: 218, releasedBytes: 73400320, attempt: 1 },
-  { id: '0aa00000-0000-4000-8000-000000000004', scheduledTaskId: 'f0e1d2c3-b4a5-4678-9012-000000000002', status: 'Succeeded', nodeId: 'preview-primary:4102', startedAt: '2026-09-18T02:00:00Z', completedAt: '2026-09-18T02:00:11Z', processedCount: 14, releasedBytes: 187695104, attempt: 1 },
-  { id: '0aa00000-0000-4000-8000-000000000005', scheduledTaskId: 'f0e1d2c3-b4a5-4678-9012-000000000004', status: 'Succeeded', nodeId: 'preview-primary:4102', startedAt: '2026-09-01T02:00:00Z', completedAt: '2026-09-01T02:01:22Z', processedCount: 248, releasedBytes: 0, attempt: 1 },
+  { id: '0aa00000-0000-4000-8000-000000000001', scheduledTaskId: 'f0e1d2c3-b4a5-4678-9012-000000000005', status: 'Running', startedAt: '2026-09-18T04:18:00Z', processedCount: 386, releasedBytes: 0, attempt: 1 },
+  { id: '0aa00000-0000-4000-8000-000000000003', scheduledTaskId: 'f0e1d2c3-b4a5-4678-9012-000000000001', status: 'Succeeded', startedAt: '2026-09-18T04:00:00Z', completedAt: '2026-09-18T04:00:03Z', processedCount: 218, releasedBytes: 73400320, attempt: 1 },
+  { id: '0aa00000-0000-4000-8000-000000000004', scheduledTaskId: 'f0e1d2c3-b4a5-4678-9012-000000000002', status: 'Succeeded', startedAt: '2026-09-18T02:00:00Z', completedAt: '2026-09-18T02:00:11Z', processedCount: 14, releasedBytes: 187695104, attempt: 1 },
+  { id: '0aa00000-0000-4000-8000-000000000005', scheduledTaskId: 'f0e1d2c3-b4a5-4678-9012-000000000004', status: 'Succeeded', startedAt: '2026-09-01T02:00:00Z', completedAt: '2026-09-01T02:01:22Z', processedCount: 248, releasedBytes: 0, attempt: 1 },
 ]
 
 let previewAuditEntries: MockAuditEntry[] = [
   {
     id: '1a100000-0000-4000-8000-000000000001', number: '1a100000', content: '执行后台任务', category: 'BackgroundTask', status: 'Failed',
     actor: 'system', action: 'task.run', resource: 'task:quota.reconcile', detail: '配额台账与邮箱用量不一致，已中止并等待下次重试', remoteAddress: '127.0.0.1',
-    nodeId: 'preview-primary', requestId: 'req-task-9041', relatedId: '0aa00000-0000-4000-8000-000000000003', durationMilliseconds: 8042,
+    requestId: 'req-task-9041', relatedId: '0aa00000-0000-4000-8000-000000000003', durationMilliseconds: 8042,
     createdAt: '2026-09-18T04:20:08Z', changes: [],
     rawJson: JSON.stringify({ action: 'task.run', task: 'quota.reconcile', status: 'Failed', token: '***', operationIp: '127.0.0.1' }, null, 2),
   },
   {
     id: '1a100000-0000-4000-8000-000000000002', number: '1a100001', content: '邮件格式校验 插件隔离邮件', category: 'Plugin', status: 'Warning',
-    actor: '邮件格式校验', action: 'plugin.runtime.quarantine', resource: 'message:7d7f', detail: 'MIME 附件类型需要人工审核', nodeId: 'preview-primary',
+    actor: '邮件格式校验', action: 'plugin.runtime.quarantine', resource: 'message:7d7f', detail: 'MIME 附件类型需要人工审核',
     requestId: 'req-smtp-2208', durationMilliseconds: 42, pluginId: 'mime', pluginName: '邮件格式校验', createdAt: '2026-09-18T04:12:31Z', changes: [],
     rawJson: JSON.stringify({ pluginId: 'mime', stage: 'MessageReceived', decision: 'Quarantine', credential: '***' }, null, 2),
   },
   {
     id: '1a100000-0000-4000-8000-000000000003', number: '1a100002', content: '编辑域名', category: 'Update', status: 'Succeeded',
     actor: 'preview-admin', action: 'domain.update', resource: 'domain:northwind.cn', detail: '更新域配额与邮件主机名', remoteAddress: '192.0.2.18',
-    nodeId: 'preview-primary', requestId: 'req-api-6182', createdAt: '2026-09-18T03:46:15Z',
+    requestId: 'req-api-6182', createdAt: '2026-09-18T03:46:15Z',
     changes: [{ field: 'quotaBytes', oldValue: '536870912000', newValue: '1099511627776' }, { field: 'mailHostName', oldValue: 'mx.northwind.cn', newValue: 'mail.northwind.cn' }],
     rawJson: JSON.stringify({ action: 'domain.update', domain: 'northwind.cn', password: '***', operationIp: '192.0.2.18' }, null, 2),
   },
   {
     id: '1a100000-0000-4000-8000-000000000004', number: '1a100003', content: '刷新 API Key', category: 'Security', status: 'Succeeded',
     actor: 'preview-admin', action: 'api-key.refresh', resource: 'api-key:metrics-exporter', detail: '已轮换凭据并撤销旧密钥', remoteAddress: '192.0.2.18',
-    nodeId: 'preview-primary', requestId: 'req-api-6033', createdAt: '2026-09-18T03:30:02Z', changes: [],
+    requestId: 'req-api-6033', createdAt: '2026-09-18T03:30:02Z', changes: [],
     rawJson: JSON.stringify({ action: 'api-key.refresh', apiKey: '***', operationIp: '192.0.2.18' }, null, 2),
   },
   {
     id: '1a100000-0000-4000-8000-000000000005', number: '1a100004', content: 'DNS 诊断失败', category: 'Other', status: 'Warning',
-    actor: 'system', action: 'domain.dns.diagnose', resource: 'domain:northwind.cn', detail: 'SPF 记录未生效，等待 DNS 传播', nodeId: 'preview-primary',
+    actor: 'system', action: 'domain.dns.diagnose', resource: 'domain:northwind.cn', detail: 'SPF 记录未生效，等待 DNS 传播',
     requestId: 'req-dns-3301', durationMilliseconds: 30012, createdAt: '2026-09-18T03:25:47Z', changes: [],
     rawJson: JSON.stringify({ domain: 'northwind.cn', record: 'SPF', status: 'missing' }, null, 2),
   },
   {
     id: '1a100000-0000-4000-8000-000000000006', number: '1a100005', content: '创建管理员', category: 'Create', status: 'Succeeded',
     actor: 'preview-admin', action: 'admin.create', resource: 'admin:audit-reviewer', detail: '创建只读审计管理员', remoteAddress: '192.0.2.18',
-    nodeId: 'preview-primary', requestId: 'req-api-5118', createdAt: '2026-09-17T12:40:00Z', changes: [],
+    requestId: 'req-api-5118', createdAt: '2026-09-17T12:40:00Z', changes: [],
     rawJson: JSON.stringify({ userName: 'audit-reviewer', permissions: ['audit.read'] }, null, 2),
   },
   {
     id: '1a100000-0000-4000-8000-000000000007', number: '1a100006', content: '删除防火墙规则', category: 'Delete', status: 'Succeeded',
     actor: 'preview-admin', action: 'firewall.delete', resource: 'firewall:198.51.100.0/24', detail: '移除已过期的临时阻断规则', remoteAddress: '192.0.2.18',
-    nodeId: 'preview-primary', requestId: 'req-api-4880', createdAt: '2026-09-17T10:15:00Z', changes: [],
+    requestId: 'req-api-4880', createdAt: '2026-09-17T10:15:00Z', changes: [],
     rawJson: JSON.stringify({ cidr: '198.51.100.0/24', operationIp: '192.0.2.18' }, null, 2),
   },
   {
     id: '1a100000-0000-4000-8000-000000000008', number: '1a100007', content: '插件加载失败', category: 'Plugin', status: 'Failed',
-    actor: 'plugin:policy-demo', action: 'plugin.load.failed', resource: 'plugin:policy-demo', detail: '程序集签名验证失败', nodeId: 'preview-primary',
+    actor: 'plugin:policy-demo', action: 'plugin.load.failed', resource: 'plugin:policy-demo', detail: '程序集签名验证失败',
     requestId: 'req-plugin-4012', pluginId: 'policy-demo', pluginName: '策略演示插件', createdAt: '2026-09-17T09:05:00Z', changes: [],
     rawJson: JSON.stringify({ pluginId: 'policy-demo', error: 'signature validation failed' }, null, 2),
   },
@@ -1005,7 +1003,7 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
     task.batchSize = Math.min(1000, Math.max(1, Number(input.batchSize || 1)))
     addPreviewAudit({
       content: '编辑后台任务', category: 'Update', status: 'Succeeded', actor: 'preview-admin', action: 'task.update', resource: `task:${task.type}`,
-      detail: `更新 ${task.name} 的调度配置`, remoteAddress: '127.0.0.1', nodeId: 'preview-primary', requestId: `req-task-${Date.now()}`,
+      detail: `更新 ${task.name} 的调度配置`, remoteAddress: '127.0.0.1', requestId: `req-task-${Date.now()}`,
       createdAt: new Date().toISOString(),
       changes: [
         { field: 'enabled', oldValue: String(previous.enabled), newValue: String(task.isEnabled) },
@@ -1026,7 +1024,7 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
     const processedCount = task.type === 'cleanup.recycle' ? 6 : 128
     const releasedBytes = task.type.includes('cleanup') ? 48 * 1024 * 1024 : 0
     previewTaskExecutions = [{
-      id: executionId, scheduledTaskId: task.id, status: 'Succeeded', nodeId: 'preview-primary:4102',
+      id: executionId, scheduledTaskId: task.id, status: 'Succeeded',
       startedAt: startedAt.toISOString(), completedAt: new Date(startedAt.getTime() + 2400).toISOString(),
       processedCount, releasedBytes, attempt: 1,
     }, ...previewTaskExecutions]
@@ -1035,7 +1033,7 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
     task.nextRunAt = new Date(startedAt.getTime() + task.intervalMinutes * 60_000).toISOString()
     addPreviewAudit({
       content: '执行后台任务', category: 'BackgroundTask', status: 'Succeeded', actor: 'preview-admin', action: 'task.run', resource: `task:${task.type}`,
-      detail: `${task.name} 手动执行完成，处理 ${processedCount} 项`, remoteAddress: '127.0.0.1', nodeId: 'preview-primary',
+      detail: `${task.name} 手动执行完成，处理 ${processedCount} 项`, remoteAddress: '127.0.0.1',
       requestId: `req-task-${Date.now()}`, relatedId: executionId, durationMilliseconds: 2400, createdAt: startedAt.toISOString(), changes: [],
     })
     return { executionId } as T
@@ -1056,7 +1054,7 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
         && (to === null || createdAt <= to)
     }).map(entry => ({
       id: entry.id, number: entry.number, content: entry.content, category: entry.category, status: entry.status,
-      actor: entry.actor, nodeId: entry.nodeId, requestId: entry.requestId, pluginId: entry.pluginId,
+      actor: entry.actor, requestId: entry.requestId, pluginId: entry.pluginId,
       pluginName: entry.pluginName, createdAt: entry.createdAt,
     }))
     return page(filtered, Number(url.searchParams.get('page') || 1), Number(url.searchParams.get('pageSize') || 20)) as T
@@ -1206,7 +1204,7 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
         }
         addPreviewAudit({
           content: '更新退信消息模板', category: 'Update', status: 'Succeeded', actor: 'preview-admin', action: 'settings.message-templates.update', resource: 'settings:message-templates',
-          detail: '更新永久失败与重试耗尽模板', remoteAddress: '127.0.0.1', nodeId: 'preview-primary', requestId: `req-template-${Date.now()}`,
+          detail: '更新永久失败与重试耗尽模板', remoteAddress: '127.0.0.1', requestId: `req-template-${Date.now()}`,
           createdAt: new Date().toISOString(), changes: [],
         })
       } else if (url.pathname === '/settings/delivery') {
@@ -1222,7 +1220,7 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
         addPreviewAudit({
           content: '更新投递调度设置', category: 'Update', status: 'Succeeded', actor: 'preview-admin', action: 'settings.delivery.update', resource: 'settings:delivery',
           detail: `batch=${batchSize};lease=${leaseSeconds};attempts=${maximumAttempts};poll=${pollIntervalSeconds}`,
-          remoteAddress: '127.0.0.1', nodeId: 'preview-primary', requestId: `req-settings-${Date.now()}`, createdAt: new Date().toISOString(), changes: [],
+          remoteAddress: '127.0.0.1', requestId: `req-settings-${Date.now()}`, createdAt: new Date().toISOString(), changes: [],
         })
       } else if (url.pathname === '/settings/smtp') {
         const commandTimeoutSeconds = Number(input.commandTimeoutSeconds)
@@ -1230,7 +1228,7 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
         previewSettings[url.pathname] = { commandTimeoutSeconds }
         addPreviewAudit({
           content: '更新 SMTP 设置', category: 'Update', status: 'Succeeded', actor: 'preview-admin', action: 'settings.smtp.update', resource: 'settings:smtp',
-          detail: `timeout=${commandTimeoutSeconds}`, remoteAddress: '127.0.0.1', nodeId: 'preview-primary', requestId: `req-settings-${Date.now()}`,
+          detail: `timeout=${commandTimeoutSeconds}`, remoteAddress: '127.0.0.1', requestId: `req-settings-${Date.now()}`,
           createdAt: new Date().toISOString(), changes: [],
         })
       } else if (url.pathname === '/settings/mailboxes') {
@@ -1244,7 +1242,7 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
         previewSettings[url.pathname] = { defaultFolders }
         addPreviewAudit({
           content: '更新默认邮箱文件夹', category: 'Update', status: 'Succeeded', actor: 'preview-admin', action: 'settings.mailboxes.update', resource: 'settings:mailboxes',
-          detail: defaultFolders.join(','), remoteAddress: '127.0.0.1', nodeId: 'preview-primary', requestId: `req-settings-${Date.now()}`,
+          detail: defaultFolders.join(','), remoteAddress: '127.0.0.1', requestId: `req-settings-${Date.now()}`,
           createdAt: new Date().toISOString(), changes: [],
         })
       } else if (url.pathname === '/settings/certificates') {
@@ -1264,7 +1262,7 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
         }
         addPreviewAudit({
           content: '更新证书选择设置', category: 'Update', status: 'Succeeded', actor: 'preview-admin', action: 'settings.certificates.update', resource: 'settings:certificates',
-          detail: `${value || 'auto'};fallback=${allowSingleCertificateFallback}`, remoteAddress: '127.0.0.1', nodeId: 'preview-primary', requestId: `req-settings-${Date.now()}`,
+          detail: `${value || 'auto'};fallback=${allowSingleCertificateFallback}`, remoteAddress: '127.0.0.1', requestId: `req-settings-${Date.now()}`,
           createdAt: new Date().toISOString(), changes: [],
         })
       } else {
@@ -1283,7 +1281,7 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
     previewPlugins.forEach((plugin, index) => { plugin.effectiveOrder = (index + 1) * 10 })
     addPreviewAudit({
       content: '调整插件执行顺序', category: 'Plugin', status: 'Succeeded', actor: 'preview-admin', action: 'plugin.order.update', resource: 'plugins:order',
-      detail: ids.join(','), remoteAddress: '127.0.0.1', nodeId: 'preview-primary', requestId: `req-plugin-${Date.now()}`,
+      detail: ids.join(','), remoteAddress: '127.0.0.1', requestId: `req-plugin-${Date.now()}`,
       createdAt: new Date().toISOString(), changes: [],
     })
     return structuredClone(previewPlugins) as T
@@ -1323,7 +1321,7 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
       }
       addPreviewAudit({
         content: '更新插件配置', category: 'Plugin', status: 'Succeeded', actor: 'preview-admin', action: 'plugin.settings.update', resource: `plugin:${plugin.id}`,
-        detail: plugin.displayName, remoteAddress: '127.0.0.1', nodeId: 'preview-primary', requestId: `req-plugin-${Date.now()}`,
+        detail: plugin.displayName, remoteAddress: '127.0.0.1', requestId: `req-plugin-${Date.now()}`,
         pluginId: plugin.id, pluginName: plugin.displayName, createdAt: new Date().toISOString(),
         changes: Object.keys(values).map(key => ({ field: key, newValue: definitions.get(key)?.type === 'Password' ? '***' : JSON.stringify(values[key]) })),
         rawJson: JSON.stringify({ pluginId: plugin.id, enabled: plugin.enabled, changedFields: Object.keys(values), secret: '***' }, null, 2),
@@ -1347,7 +1345,7 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
       category: restoring ? 'Update' : 'Delete', status: 'Succeeded', actor: 'preview-admin',
       action: restoring ? 'recycle.restore' : 'recycle.purge', resource: `cleanup:${queueId}`,
       detail: `${item.resourceType}: ${item.displayName}; estimatedBytes=${item.estimatedBytes}`,
-      remoteAddress: '127.0.0.1', nodeId: 'preview-primary', requestId: `req-recycle-${Date.now()}`,
+      remoteAddress: '127.0.0.1', requestId: `req-recycle-${Date.now()}`,
       relatedId: item.resourceId ?? undefined, createdAt: new Date().toISOString(), changes: [],
     })
     return undefined as T
@@ -1465,7 +1463,7 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
     }
     rows.unshift(account)
     domain.accountCount++
-    addPreviewAudit({ content: '创建邮箱账号', category: 'Create', status: 'Succeeded', actor: 'preview-admin', action: 'account.create', resource: `account:${account.id}`, detail: address, remoteAddress: '127.0.0.1', nodeId: 'preview-primary', requestId: `req-account-${Date.now()}`, relatedId: domain.id, createdAt: new Date().toISOString(), changes: [] })
+    addPreviewAudit({ content: '创建邮箱账号', category: 'Create', status: 'Succeeded', actor: 'preview-admin', action: 'account.create', resource: `account:${account.id}`, detail: address, remoteAddress: '127.0.0.1', requestId: `req-account-${Date.now()}`, relatedId: domain.id, createdAt: new Date().toISOString(), changes: [] })
     return structuredClone(account) as T
   }
 
@@ -1498,7 +1496,7 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
     const alias: MockDomainAlias = { id: globalThis.crypto.randomUUID(), source, targetAccountId: account.id, targetAddress: account.address, isEnabled: true, legacyDestinationAddress: null, mode: request.mode, canReceive: true, canSend: request.mode === 'SendReceive' }
     rows.unshift(alias)
     account.aliasCount++
-    addPreviewAudit({ content: '创建邮箱别名', category: 'Create', status: 'Succeeded', actor: 'preview-admin', action: 'alias.create', resource: `alias:${alias.id}`, detail: `${source} -> ${account.address}`, remoteAddress: '127.0.0.1', nodeId: 'preview-primary', requestId: `req-alias-${Date.now()}`, relatedId: domain.id, createdAt: new Date().toISOString(), changes: [] })
+    addPreviewAudit({ content: '创建邮箱别名', category: 'Create', status: 'Succeeded', actor: 'preview-admin', action: 'alias.create', resource: `alias:${alias.id}`, detail: `${source} -> ${account.address}`, remoteAddress: '127.0.0.1', requestId: `req-alias-${Date.now()}`, relatedId: domain.id, createdAt: new Date().toISOString(), changes: [] })
     return structuredClone(alias) as T
   }
 
@@ -1517,7 +1515,7 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
     const upload = await readCertificateUpload(init)
     const inspection = inspectPreviewCertificate(domain, upload.certificatePem, upload.privateKeyPem, upload.password)
     const record = savePreviewCertificate(domain, 'ManagedUpload', `managed://${domain.mailHostName}/fullchain.pem`, `managed://${domain.mailHostName}/private.key`, inspection)
-    addPreviewAudit({ content: '上传并启用 TLS 证书', category: 'Update', status: 'Succeeded', actor: 'preview-admin', action: 'domain.certificate.upload', resource: `domain:${domain.id}`, detail: domain.mailHostName, remoteAddress: '127.0.0.1', nodeId: 'preview-primary', requestId: `req-certificate-${Date.now()}`, relatedId: domain.id, createdAt: new Date().toISOString(), changes: [] })
+    addPreviewAudit({ content: '上传并启用 TLS 证书', category: 'Update', status: 'Succeeded', actor: 'preview-admin', action: 'domain.certificate.upload', resource: `domain:${domain.id}`, detail: domain.mailHostName, remoteAddress: '127.0.0.1', requestId: `req-certificate-${Date.now()}`, relatedId: domain.id, createdAt: new Date().toISOString(), changes: [] })
     return structuredClone(record) as T
   }
 
@@ -1549,7 +1547,7 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
       notBefore: '2026-08-01T00:00:00Z', notAfter: '2027-08-01T00:00:00Z',
       hasMatchingPrivateKey: true, supportsServerAuthentication: true, coversMailHostName: true,
     })
-    addPreviewAudit({ content: '绑定服务器路径 TLS 证书', category: 'Update', status: 'Succeeded', actor: 'preview-admin', action: 'domain.certificate.bind-path', resource: `domain:${domain.id}`, detail: certificatePath, remoteAddress: '127.0.0.1', nodeId: 'preview-primary', requestId: `req-certificate-${Date.now()}`, relatedId: domain.id, createdAt: new Date().toISOString(), changes: [] })
+    addPreviewAudit({ content: '绑定服务器路径 TLS 证书', category: 'Update', status: 'Succeeded', actor: 'preview-admin', action: 'domain.certificate.bind-path', resource: `domain:${domain.id}`, detail: certificatePath, remoteAddress: '127.0.0.1', requestId: `req-certificate-${Date.now()}`, relatedId: domain.id, createdAt: new Date().toISOString(), changes: [] })
     return structuredClone(record) as T
   }
 
@@ -1565,7 +1563,7 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
       settings.availableMailHostNames = ((settings.availableMailHostNames as string[] | undefined) ?? []).filter(host => host !== domain.mailHostName)
       if (settings.effectiveDefaultMailHostName === domain.mailHostName) settings.effectiveDefaultMailHostName = null
     }
-    addPreviewAudit({ content: '删除 TLS 证书', category: 'Delete', status: 'Succeeded', actor: 'preview-admin', action: 'domain.certificate.delete', resource: `domain:${domain.id}`, detail: domain.mailHostName, remoteAddress: '127.0.0.1', nodeId: 'preview-primary', requestId: `req-certificate-${Date.now()}`, relatedId: domain.id, createdAt: new Date().toISOString(), changes: [] })
+    addPreviewAudit({ content: '删除 TLS 证书', category: 'Delete', status: 'Succeeded', actor: 'preview-admin', action: 'domain.certificate.delete', resource: `domain:${domain.id}`, detail: domain.mailHostName, remoteAddress: '127.0.0.1', requestId: `req-certificate-${Date.now()}`, relatedId: domain.id, createdAt: new Date().toISOString(), changes: [] })
     return undefined as T
   }
 
@@ -1645,7 +1643,7 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
     if (!Number.isSafeInteger(request.quotaBytes) || request.quotaBytes < 1_048_576) throw new Error('域配额至少为 1 MiB')
     if (request.quotaBytes < domain.usedBytes) throw new Error('域配额不能低于当前已用存储')
     domain.quotaBytes = request.quotaBytes
-    addPreviewAudit({ content: '更新域配额', category: 'Update', status: 'Succeeded', actor: 'preview-admin', action: 'domain.quota.update', resource: `domain:${domain.id}`, detail: `quotaBytes=${request.quotaBytes}`, remoteAddress: '127.0.0.1', nodeId: 'preview-primary', requestId: `req-domain-${Date.now()}`, relatedId: domain.id, createdAt: new Date().toISOString(), changes: [] })
+    addPreviewAudit({ content: '更新域配额', category: 'Update', status: 'Succeeded', actor: 'preview-admin', action: 'domain.quota.update', resource: `domain:${domain.id}`, detail: `quotaBytes=${request.quotaBytes}`, remoteAddress: '127.0.0.1', requestId: `req-domain-${Date.now()}`, relatedId: domain.id, createdAt: new Date().toISOString(), changes: [] })
     return structuredClone(domain) as T
   }
 
@@ -1658,12 +1656,12 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
     if (!/^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(host)) throw new Error('邮件主机名格式无效')
     domain.mailHostName = host
     domain.isActive = request.isActive
-    addPreviewAudit({ content: '更新域配置', category: 'Update', status: 'Succeeded', actor: 'preview-admin', action: 'domain.update', resource: `domain:${domain.id}`, detail: `${host}; active=${request.isActive}`, remoteAddress: '127.0.0.1', nodeId: 'preview-primary', requestId: `req-domain-${Date.now()}`, relatedId: domain.id, createdAt: new Date().toISOString(), changes: [] })
+    addPreviewAudit({ content: '更新域配置', category: 'Update', status: 'Succeeded', actor: 'preview-admin', action: 'domain.update', resource: `domain:${domain.id}`, detail: `${host}; active=${request.isActive}`, remoteAddress: '127.0.0.1', requestId: `req-domain-${Date.now()}`, relatedId: domain.id, createdAt: new Date().toISOString(), changes: [] })
     return structuredClone(domain) as T
   }
 
   const noteDomainAudit = (action: string, category: MockAuditCategory, content: string, resource: string, detail: string, relatedId?: string) =>
-    addPreviewAudit({ content, category, status: 'Succeeded', actor: 'preview-admin', action, resource, detail, remoteAddress: '127.0.0.1', nodeId: 'preview-primary', requestId: 'req-' + action.replaceAll('.', '-') + '-' + Date.now(), relatedId, createdAt: new Date().toISOString(), changes: [] })
+    addPreviewAudit({ content, category, status: 'Succeeded', actor: 'preview-admin', action, resource, detail, remoteAddress: '127.0.0.1', requestId: 'req-' + action.replaceAll('.', '-') + '-' + Date.now(), relatedId, createdAt: new Date().toISOString(), changes: [] })
 
   const findAccount = (id: string) => {
     for (const [domainId, rows] of Object.entries(domainAccounts)) {
@@ -2125,7 +2123,7 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
     const job = deliveryJobs.find(item => item.id === retryMatch[1])
     if (!job) throw new Error('投递任务不存在')
     job.status = 'Pending'; job.nextAttemptAt = new Date().toISOString(); job.updatedAt = new Date().toISOString(); job.lastError = undefined
-    addPreviewAudit({ content: '立即重试投递任务', category: 'BackgroundTask', status: 'Succeeded', actor: 'preview-admin', action: 'queue.retry', resource: `delivery:${job.id}`, detail: `${job.sender} -> ${job.recipient}`, remoteAddress: '127.0.0.1', nodeId: 'preview-primary', requestId: `req-queue-${Date.now()}`, relatedId: job.id, createdAt: new Date().toISOString(), changes: [] })
+    addPreviewAudit({ content: '立即重试投递任务', category: 'BackgroundTask', status: 'Succeeded', actor: 'preview-admin', action: 'queue.retry', resource: `delivery:${job.id}`, detail: `${job.sender} -> ${job.recipient}`, remoteAddress: '127.0.0.1', requestId: `req-queue-${Date.now()}`, relatedId: job.id, createdAt: new Date().toISOString(), changes: [] })
     return undefined as T
   }
 
@@ -2134,7 +2132,7 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
     const job = deliveryJobs.find(item => item.id === deleteMatch[1])
     if (!job) throw new Error('投递任务不存在')
     deliveryJobs = deliveryJobs.filter(job => job.id !== deleteMatch[1])
-    addPreviewAudit({ content: '删除投递任务', category: 'Delete', status: 'Succeeded', actor: 'preview-admin', action: 'queue.delete', resource: `delivery:${job.id}`, detail: `${job.sender} -> ${job.recipient}`, remoteAddress: '127.0.0.1', nodeId: 'preview-primary', requestId: `req-queue-${Date.now()}`, relatedId: job.id, createdAt: new Date().toISOString(), changes: [] })
+    addPreviewAudit({ content: '删除投递任务', category: 'Delete', status: 'Succeeded', actor: 'preview-admin', action: 'queue.delete', resource: `delivery:${job.id}`, detail: `${job.sender} -> ${job.recipient}`, remoteAddress: '127.0.0.1', requestId: `req-queue-${Date.now()}`, relatedId: job.id, createdAt: new Date().toISOString(), changes: [] })
     return undefined as T
   }
 
@@ -2203,7 +2201,7 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
     if (!report) throw new Error('TLS 报告不存在')
     if (report.completedAt) throw new Error('已完成的 TLS 报告不能重试')
     report.status = 'Pending'; report.attempts = 0; report.nextAttemptAt = new Date().toISOString(); report.lastError = undefined
-    addPreviewAudit({ content: '重试 TLS 报告投递', category: 'BackgroundTask', status: 'Succeeded', actor: 'preview-admin', action: 'tls-report.retry', resource: `tls-report:${report.id}`, detail: report.policyDomain, remoteAddress: '127.0.0.1', nodeId: 'preview-primary', requestId: `req-tls-report-${Date.now()}`, relatedId: report.id, createdAt: new Date().toISOString(), changes: [] })
+    addPreviewAudit({ content: '重试 TLS 报告投递', category: 'BackgroundTask', status: 'Succeeded', actor: 'preview-admin', action: 'tls-report.retry', resource: `tls-report:${report.id}`, detail: report.policyDomain, remoteAddress: '127.0.0.1', requestId: `req-tls-report-${Date.now()}`, relatedId: report.id, createdAt: new Date().toISOString(), changes: [] })
     return undefined as T
   }
 

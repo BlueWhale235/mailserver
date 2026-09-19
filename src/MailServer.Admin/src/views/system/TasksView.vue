@@ -24,7 +24,6 @@ interface TaskExecution {
   id: string
   scheduledTaskId: string
   status: 'Running' | 'Succeeded' | 'Failed' | 'Cancelled'
-  nodeId: string
   startedAt: string
   completedAt?: string
   processedCount: number
@@ -291,13 +290,12 @@ onMounted(loadTasks)
       </div>
     </div>
     <v-table>
-      <thead><tr><th>任务</th><th>状态</th><th>节点</th><th>处理结果</th><th>开始时间</th><th>耗时</th><th></th></tr></thead>
+      <thead><tr><th>任务</th><th>状态</th><th>处理结果</th><th>开始时间</th><th>耗时</th><th></th></tr></thead>
       <tbody>
-        <tr v-if="!filteredExecutions.length"><td colspan="7" class="text-center py-10 text-medium-emphasis">没有符合条件的执行记录</td></tr>
+        <tr v-if="!filteredExecutions.length"><td colspan="6" class="text-center py-10 text-medium-emphasis">没有符合条件的执行记录</td></tr>
         <tr v-for="execution in filteredExecutions" v-else :key="execution.id">
           <td><b>{{ executionTaskName(execution) }}</b><small>第 {{ execution.attempt }} 次尝试</small></td>
           <td><StatusPill v-bind="executionStatus(execution.status)" /></td>
-          <td><code>{{ execution.nodeId }}</code></td>
           <td>{{ execution.processedCount }} 项<small v-if="execution.releasedBytes">释放 {{ bytes(execution.releasedBytes) }}</small></td>
           <td>{{ new Date(execution.startedAt).toLocaleString('zh-CN') }}</td>
           <td>{{ executionDuration(execution) }}</td>
@@ -349,7 +347,6 @@ onMounted(loadTasks)
         <div class="detail-grid">
           <span>任务</span><b>{{ executionTaskName(executionDetail) }}</b>
           <span>执行编号</span><code>{{ executionDetail.id }}</code>
-          <span>节点</span><code>{{ executionDetail.nodeId }}</code>
           <span>状态</span><StatusPill v-bind="executionStatus(executionDetail.status)" />
           <span>开始时间</span><b>{{ new Date(executionDetail.startedAt).toLocaleString('zh-CN') }}</b>
           <span>耗时</span><b>{{ executionDuration(executionDetail) }}</b>

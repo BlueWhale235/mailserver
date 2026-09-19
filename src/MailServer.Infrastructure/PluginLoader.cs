@@ -629,7 +629,6 @@ public sealed class PluginPipeline(
                 $"plugin:{manifest.Id}",
                 null,
                 null,
-                null,
                 elapsedMilliseconds),
             cancellationToken);
     }
@@ -651,7 +650,6 @@ public sealed class PluginPipeline(
                 $"plugin:{manifest.Id}",
                 null,
                 null,
-                null,
                 elapsedMilliseconds),
             cancellationToken);
     }
@@ -671,7 +669,6 @@ public sealed class PluginPipeline(
                 manifest.Id,
                 manifest.DisplayName ?? manifest.Id,
                 $"plugin:{manifest.Id}",
-                null,
                 null,
                 null,
                 null,

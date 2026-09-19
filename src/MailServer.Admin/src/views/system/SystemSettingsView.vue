@@ -296,7 +296,7 @@ onMounted(loadAll)
           <v-alert type="info" variant="tonal" density="compact" class="mb-5">这些参数控制 Worker 获取投递任务的节奏。租约应显著长于单批最慢投递时间，避免同一任务被重复领取。</v-alert>
           <div class="field-grid two-columns">
             <div class="field-block"><v-text-field v-model.number="delivery.batchSize" label="每批投递数量" type="number" min="1" max="200" suffix="封" :error-messages="deliveryErrors.batchSize" hide-details="auto" /><p>单个 Worker 每次领取的最大任务数。</p></div>
-            <div class="field-block"><v-text-field v-model.number="delivery.leaseSeconds" label="租约时长" type="number" min="10" max="3600" suffix="秒" :error-messages="deliveryErrors.leaseSeconds" hide-details="auto" /><p>任务处理期间的独占时间，超时后可由其他节点重新领取。</p></div>
+            <div class="field-block"><v-text-field v-model.number="delivery.leaseSeconds" label="租约时长" type="number" min="10" max="3600" suffix="秒" :error-messages="deliveryErrors.leaseSeconds" hide-details="auto" /><p>任务处理期间的独占时间，超时后可被重新领取。</p></div>
             <div class="field-block"><v-text-field v-model.number="delivery.maximumAttempts" label="最大尝试次数" type="number" min="1" max="100" suffix="次" :error-messages="deliveryErrors.maximumAttempts" hide-details="auto" /><p>达到上限后生成退信并停止自动重试。</p></div>
             <div class="field-block"><v-text-field v-model.number="delivery.pollIntervalSeconds" label="空队列轮询间隔" type="number" min="1" max="300" suffix="秒" :error-messages="deliveryErrors.pollIntervalSeconds" hide-details="auto" /><p>没有可投递任务时再次检查队列的等待时间。</p></div>
           </div>

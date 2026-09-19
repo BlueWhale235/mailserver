@@ -133,10 +133,6 @@ namespace MailServer.Migrations.MySql.Migrations
                     b.Property<long?>("DurationMilliseconds")
                         .HasColumnType("bigint");
 
-                    b.Property<string>("NodeId")
-                        .HasMaxLength(128)
-                        .HasColumnType("varchar(128)");
-
                     b.Property<string>("PluginId")
                         .HasMaxLength(128)
                         .HasColumnType("varchar(128)");
@@ -1473,11 +1469,6 @@ namespace MailServer.Migrations.MySql.Migrations
                     b.Property<string>("Error")
                         .HasMaxLength(4096)
                         .HasColumnType("varchar(4096)");
-
-                    b.Property<string>("NodeId")
-                        .IsRequired()
-                        .HasMaxLength(128)
-                        .HasColumnType("varchar(128)");
 
                     b.Property<int>("ProcessedCount")
                         .HasColumnType("int");

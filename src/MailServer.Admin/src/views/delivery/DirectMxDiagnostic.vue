@@ -105,7 +105,7 @@ watch(() => props.refreshKey, () => { if (result.value) void diagnose() })
         <button type="button" @click="useExample('blocked.invalid')">Null MX</button>
       </div>
       <v-alert v-if="error" type="error" variant="tonal" class="mx-5 mb-5" closable @click:close="error = ''">{{ error }}</v-alert>
-      <div class="diagnostic-note"><v-icon size="18">mdi-information-outline</v-icon><p><b>诊断不会阻止外发</b><span>结果只反映当前节点视角；公网 25、PTR 与 IP 信誉仍需管理员确认。</span></p></div>
+      <div class="diagnostic-note"><v-icon size="18">mdi-information-outline</v-icon><p><b>诊断不会阻止外发</b><span>结果只反映本机视角；公网 25、PTR 与 IP 信誉仍需管理员确认。</span></p></div>
     </v-card>
 
     <div class="diagnostic-result-column">

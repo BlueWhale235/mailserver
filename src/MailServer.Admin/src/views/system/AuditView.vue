@@ -14,7 +14,6 @@ interface AuditListItem {
   category: AuditCategory
   status: AuditStatus
   actor: string
-  nodeId?: string
   requestId?: string
   pluginId?: string
   pluginName?: string
@@ -337,7 +336,7 @@ onMounted(loadAudit)
           <td><b>{{ row.content }}</b><small><code>{{ row.number }}</code><span v-if="row.requestId"> · 请求 {{ row.requestId }}</span></small></td>
           <td><span class="category"><v-icon size="16">{{ categoryIcon(row.category) }}</v-icon>{{ categoryLabel(row.category) }}</span></td>
           <td><StatusPill v-bind="statusView(row.status)" /></td>
-          <td>{{ row.actor }}<small v-if="row.nodeId">节点 {{ row.nodeId }}</small></td>
+          <td>{{ row.actor }}</td>
           <td>{{ formatDate(row.createdAt) }}</td>
           <td class="text-end"><v-btn size="small" variant="text" icon="mdi-text-box-search-outline" :aria-label="`查看审计事件 ${row.number} 详情`" @click="openDetail(row)" /></td>
         </tr>
@@ -372,7 +371,6 @@ onMounted(loadAudit)
             <div><dt>来源地址</dt><dd><code>{{ detail.remoteAddress || '—' }}</code></dd></div>
             <div><dt>动作</dt><dd><code>{{ detail.action }}</code></dd></div>
             <div><dt>资源</dt><dd><code>{{ detail.resource }}</code></dd></div>
-            <div><dt>节点</dt><dd><code>{{ detail.nodeId || '—' }}</code></dd></div>
             <div><dt>耗时</dt><dd>{{ formatDuration(detail.durationMilliseconds) }}</dd></div>
             <div><dt>请求 ID</dt><dd><code>{{ detail.requestId || '—' }}</code></dd></div>
             <div><dt>关联 ID</dt><dd><code>{{ detail.relatedId || '—' }}</code></dd></div>

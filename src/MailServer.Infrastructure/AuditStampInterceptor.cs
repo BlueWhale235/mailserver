@@ -7,7 +7,7 @@ using Microsoft.EntityFrameworkCore.Diagnostics;
 namespace MailServer.Infrastructure;
 
 /// <summary>
-/// 在审计记录写入数据库前统一补充请求来源，避免业务服务各自解析代理头或遗漏节点信息。
+/// 在审计记录写入数据库前统一补充请求来源，避免业务服务各自解析代理头或遗漏来源信息。
 /// </summary>
 public sealed class AuditStampInterceptor(
     IHttpContextAccessor httpContextAccessor) : SaveChangesInterceptor
@@ -37,7 +37,6 @@ public sealed class AuditStampInterceptor(
         foreach (var entry in db.ChangeTracker.Entries<AuditRecord>()
                      .Where(x => x.State == EntityState.Added))
         {
-            entry.Entity.NodeId ??= Environment.MachineName;
             entry.Entity.RequestId ??= http?.TraceIdentifier;
             entry.Entity.RemoteAddress ??= operationIp;
         }

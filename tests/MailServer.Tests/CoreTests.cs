@@ -2544,12 +2544,12 @@ public sealed class CoreTests
 
         var service = new AuditLogService(factory);
         var plugins = await service.SearchAsync(
-            new AuditSearchRequest(null, AuditCategory.Plugin, null, null, null, "policy", null, null),
+            new AuditSearchRequest(null, AuditCategory.Plugin, null, null, "policy", null, null),
             1,
             20,
             CancellationToken.None);
         var creates = await service.SearchAsync(
-            new AuditSearchRequest(null, AuditCategory.Create, null, null, null, null, null, null),
+            new AuditSearchRequest(null, AuditCategory.Create, null, null, null, null, null),
             1,
             20,
             CancellationToken.None);
@@ -2590,7 +2590,6 @@ public sealed class CoreTests
         var record = await db.AuditRecords.SingleAsync();
         Assert.Equal("192.0.2.44", record.RemoteAddress);
         Assert.Equal("req-42", record.RequestId);
-        Assert.Equal(Environment.MachineName, record.NodeId);
         Assert.Equal("2001:db8::8", AuditStampInterceptor.Normalize(IPAddress.Parse("2001:db8::8")));
     }
 
@@ -2601,10 +2600,10 @@ public sealed class CoreTests
         var service = new AuditLogService(factory);
 
         await service.RecordPluginDecisionAsync(
-            new PluginAuditEvent("smtp", PluginDecisionKindName.Continue, null, "policy", "Policy", null, null, null, null, 1),
+            new PluginAuditEvent("smtp", PluginDecisionKindName.Continue, null, "policy", "Policy", null, null, null, 1),
             CancellationToken.None);
         await service.RecordPluginDecisionAsync(
-            new PluginAuditEvent("smtp", PluginDecisionKindName.Reject, "blocked", "policy", "Policy", null, "req-1", null, null, 7),
+            new PluginAuditEvent("smtp", PluginDecisionKindName.Reject, "blocked", "policy", "Policy", null, "req-1", null, 7),
             CancellationToken.None);
 
         await using var db = await factory.CreateDbContextAsync();

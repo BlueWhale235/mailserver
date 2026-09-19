@@ -234,3 +234,29 @@
 - 浏览器巡检（`?preview=1`）12 个顶层页面控制台无 error；左侧菜单无「集群」，`/admin/cluster` 正确回落概览。
 
 本轮仍未验证：真实 PostgreSQL/MySQL 迁移在既有数据库上的升级路径、真实后端启动后的端到端写入。总体目标仍未完成。
+
+## 2026-09-19：彻底移除审计与任务中的「节点」维度
+
+集群下线后，审计日志与计划任务执行历史仍在展示「节点 preview-primary」等主备时代残留信息。本轮把节点维度从数据模型到界面整体删除。
+
+后端：
+
+- `TaskExecution` 移除 `NodeId`（必填字段），`AuditRecord` 移除 nullable `NodeId`；`TaskExecutionService` 创建执行记录时不再写入本机标识。
+- `AuditSearchRequest` / `AuditListItemView` / `AuditDetailView` / `PluginAuditEvent` 移除 `NodeId`，审计搜索不再支持按节点过滤；`/api/v1/audit` 去掉 `nodeId` 查询参数。
+- `AuditStampInterceptor` 不再回填节点；`PluginLoader` 三处审计调用同步去掉节点参数。
+- 三套迁移与模型快照删除 `audit_records.NodeId` 与 `task_executions.NodeId` 列。
+
+前端：
+
+- 审计列表「操作人」列移除「节点 xxx」副标题，审计详情移除「节点」字段。
+- 计划任务执行历史移除「节点」列（表头与单元格）与执行详情中的「节点」字段，空态 colspan 由 7 调整为 6。
+- Mock 数据删除全部 `nodeId` 字段；「诊断不会阻止外发」「租约时长」等提示文案由“节点”改为“本机/重新领取”。
+
+验证：
+
+- 后端 `dotnet build MailServer.slnx` 0 警告 0 错误，`dotnet test` 227 项通过。
+- 迁移实测：全新 SQLite 上 `mailserver init` 应用成功，`audit_records`/`task_executions` 无 `NodeId` 列。
+- 前端 ESLint、71 项 Vitest 通过。
+- 浏览器巡检：审计列表/详情、任务执行历史/详情均不再出现「节点」或 `preview-primary`，控制台无 error。
+
+本轮仍未验证：真实后端启动后的审计写入与查询。总体目标仍未完成。

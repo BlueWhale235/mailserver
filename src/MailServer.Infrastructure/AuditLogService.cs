@@ -10,7 +10,6 @@ public sealed record AuditSearchRequest(
     string? Search,
     AuditCategory? Category,
     AuditStatus? Status,
-    string? NodeId,
     string? Actor,
     string? PluginId,
     DateTimeOffset? From,
@@ -23,7 +22,6 @@ public sealed record AuditListItemView(
     AuditCategory Category,
     AuditStatus Status,
     string Actor,
-    string? NodeId,
     string? RequestId,
     string? PluginId,
     string? PluginName,
@@ -42,7 +40,6 @@ public sealed record AuditDetailView(
     string Resource,
     string? Detail,
     string? RemoteAddress,
-    string? NodeId,
     string? RequestId,
     string? RelatedId,
     long? DurationMilliseconds,
@@ -138,8 +135,7 @@ public sealed class AuditLogService(
             ["decision"] = audit.DecisionKind.ToString(),
             ["message"] = message,
             ["elapsedMilliseconds"] = audit.ElapsedMilliseconds,
-            ["requestId"] = audit.RequestId,
-            ["nodeId"] = audit.NodeId ?? Environment.MachineName
+            ["requestId"] = audit.RequestId
         };
         return new AuditRecord
         {
@@ -149,7 +145,6 @@ public sealed class AuditLogService(
             Detail = $"{audit.Stage}: {message}",
             Category = AuditCategory.Plugin,
             Status = status,
-            NodeId = audit.NodeId ?? Environment.MachineName,
             RequestId = audit.RequestId,
             RelatedId = audit.RelatedId,
             DurationMilliseconds = audit.ElapsedMilliseconds,
@@ -253,7 +248,6 @@ public sealed class AuditLogService(
                 _ => query.Where(x => x.Status == status)
             };
         }
-        if (!string.IsNullOrWhiteSpace(request.NodeId)) query = query.Where(x => x.NodeId == request.NodeId);
         if (!string.IsNullOrWhiteSpace(request.Actor)) query = query.Where(x => x.Actor.Contains(request.Actor));
         if (!string.IsNullOrWhiteSpace(request.PluginId)) query = query.Where(x => x.PluginId == request.PluginId || x.Actor == "plugin:" + request.PluginId);
         if (request.From is { } from) query = query.Where(x => x.CreatedAt >= from);
@@ -272,7 +266,6 @@ public sealed class AuditLogService(
             category,
             status,
             DisplayActor(record),
-            record.NodeId,
             record.RequestId,
             record.PluginId,
             record.PluginName,
@@ -294,7 +287,6 @@ public sealed class AuditLogService(
             record.Resource,
             RedactText(record.Detail),
             record.RemoteAddress,
-            record.NodeId,
             record.RequestId,
             record.RelatedId,
             record.DurationMilliseconds,
@@ -413,7 +405,6 @@ public sealed class AuditLogService(
             "folder" or "mailbox-folder" => "邮箱文件夹",
             "plugin" => "插件",
             "task" => "后台任务",
-            "node" => "节点",
             _ => parts[0]
         };
         var operation = parts[^1].ToLowerInvariant() switch
@@ -474,7 +465,6 @@ public sealed class AuditLogService(
             Category = category.ToString(),
             Status = status.ToString(),
             operationIp = record.RemoteAddress,
-            record.NodeId,
             record.RequestId,
             record.RelatedId,
             record.DurationMilliseconds,
@@ -537,7 +527,6 @@ public sealed record PluginAuditEvent(
     string? Resource,
     string? RequestId,
     string? RelatedId,
-    string? NodeId,
     long? ElapsedMilliseconds,
     bool Failed = false);
 
