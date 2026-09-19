@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { api } from '../lib/api'
 import PageHeader from '../components/PageHeader.vue'
 import QueueWorkspace from './delivery/QueueWorkspace.vue'
@@ -9,7 +10,15 @@ import type { DeliverySummary, DeliveryWorkspace } from './delivery/types'
 
 type DeliveryTab = DeliveryWorkspace | 'diagnostic' | 'tls-reports'
 
-const tab = ref<DeliveryTab>('queue')
+const tabKeys = ['queue', 'history', 'bounces', 'diagnostic', 'tls-reports'] as const
+function normalizeTab(value: unknown): DeliveryTab {
+  const candidate = String(value ?? '')
+  return (tabKeys as readonly string[]).includes(candidate) ? candidate as DeliveryTab : 'queue'
+}
+
+const route = useRoute()
+const router = useRouter()
+const tab = ref<DeliveryTab>(normalizeTab(route.query.tab))
 const summary = ref<DeliverySummary | null>(null)
 const summaryLoading = ref(false)
 const error = ref('')
@@ -40,6 +49,18 @@ async function refreshCurrent() {
 }
 
 function changed() { void loadSummary() }
+
+// 工作区写入 URL（?tab=），便于定位、刷新与分享具体视图，与域详情三级菜单保持一致。
+watch(tab, value => {
+  if (String(route.query.tab ?? '') === value) return
+  void router.replace({ query: { ...route.query, tab: value } })
+}, { immediate: true })
+
+// 允许直接通过 URL 进入某个工作区。
+watch(() => route.query.tab, value => {
+  const next = normalizeTab(value)
+  if (next !== tab.value) tab.value = next
+})
 
 onMounted(loadSummary)
 </script>
