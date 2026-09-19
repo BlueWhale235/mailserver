@@ -95,7 +95,7 @@ async function logout() {
       </v-list>
 
       <template #append>
-        <div class="node-state">
+        <div class="nav-info">
           <v-icon size="18">mdi-information-outline</v-icon>
           <div><b>{{ isPreviewMode() ? '演示环境' : '邮件管理控制台' }}</b><small>{{ isPreviewMode() ? '当前展示预览数据' : '服务运行状态请查看概览' }}</small></div>
         </div>

@@ -248,6 +248,19 @@ describe('audit preview API', () => {
     expect(detail.rawJson).toContain('"password": "***"')
   })
 
+  it('no longer exposes legacy cluster or node identifiers after the cluster module was removed', async () => {
+    const records = await mockApi<PagedResult<AuditRecord>>('/audit?page=1&pageSize=100')
+    const serialized = JSON.stringify(records)
+    expect(serialized).not.toContain('preview-primary')
+    expect(serialized).not.toMatch(/nodeId|nodeName/i)
+
+    const tasks = await mockApi<ScheduledTask[]>('/tasks')
+    expect(JSON.stringify(tasks)).not.toMatch(/nodeId|nodeName/i)
+
+    const executions = await mockApi<TaskExecution[]>('/tasks/executions?take=50')
+    expect(JSON.stringify(executions)).not.toMatch(/nodeId|nodeName/i)
+  })
+
   it('exports only selected records and enforces the 1000-record limit', async () => {
     const records = await mockApi<PagedResult<AuditRecord>>('/audit?page=1&pageSize=2')
     const selected = records.items[0]!

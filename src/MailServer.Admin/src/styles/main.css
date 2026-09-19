@@ -105,7 +105,7 @@ a { text-decoration: none; color: inherit; }
 
 .brand b { display: block; font-size: 17px; letter-spacing: -0.2px; }
 .brand small,
-.node-state small { display: block; color: var(--text-muted); font-size: 11px; margin-top: 2px; }
+.nav-info small { display: block; color: var(--text-muted); font-size: 11px; margin-top: 2px; }
 
 .nav-label {
   padding: 16px 24px 6px;
@@ -131,8 +131,8 @@ a { text-decoration: none; color: inherit; }
 .app-nav .v-list-item .v-icon { opacity: 0.85; }
 .app-nav .v-list-item--active .v-icon { opacity: 1; }
 
-/* 节点状态提示 */
-.node-state {
+/* 左侧信息提示 */
+.nav-info {
   display: flex;
   align-items: center;
   gap: 10px;
@@ -144,18 +144,10 @@ a { text-decoration: none; color: inherit; }
   background: #fafbfd;
 }
 
-.state-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--color-success);
-  box-shadow: 0 0 0 4px #e1f6ed;
-}
-
-.node-state b { display: block; }
+.nav-info b { display: block; }
 
 /* 底部用户卡片内的退出按钮 hover 反馈 */
-.node-state + .v-list .v-list-item:hover { background: var(--bg-app); }
+.nav-info + .v-list .v-list-item:hover { background: var(--bg-app); }
 
 /* -------------------------------------------------------------------------
    顶栏
@@ -567,8 +559,6 @@ a { text-decoration: none; color: inherit; }
 
 .open-list article > div { flex: 1; min-width: 0; }
 .open-list p { margin: 0; color: var(--text-muted); font-size: 12px; }
-
-.cluster-metrics .metric-name { font-size: 22px; }
 
 .settings-list {
   display: grid;

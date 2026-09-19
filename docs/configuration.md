@@ -103,7 +103,7 @@ SMTP 客户端认证支持 `AUTH PLAIN` 和 `AUTH LOGIN`。Thunderbird 通常可
 
 MailServer 2.0 仅支持 `DirectMx`：本机查询收件方 MX 并通过 TCP/25 投递，支持无 MX 时 A/AAAA 回退、多 MX/IP 故障转移、STARTTLS、MTA-STS、DANE、TLS-RPT、DKIM 与退信。
 
-部署前应确认公网 25 端口、PTR、SPF、DKIM、DMARC 和发信 IP 信誉。就绪检查失败会持续告警，但不会阻止域外发。旧配置含有 `Relay` 节点时服务会拒绝启动；请重新生成 2.0 配置。
+部署前应确认公网 25 端口、PTR、SPF、DKIM、DMARC 和发信 IP 信誉。就绪检查失败会持续告警，但不会阻止域外发。旧配置含有 `Relay` 配置节时服务会拒绝启动；请重新生成 2.0 配置。
 
 ## 域名证书与 DNS
 

@@ -214,7 +214,7 @@
 后端：
 
 - 删除 `MailServer.Cluster` 项目、`ClusterManagementService` / `ClusterTransport` / `ClusterTransportClient` / `ReplicationJournalInterceptor`，以及领域模型中的集群枚举与实体（节点、证书、租约、快照、复制日志等）。
-- `DependencyInjection` 移除全部集群服务/托管服务注册；`TaskAndClusterServices` 删除复制日志拦截器、集群租约、见证租约、节流器、集群校验/快照任务与复制后台服务，任务执行者改为本机标识（`主机名:进程号`）。
+- `DependencyInjection` 移除全部集群服务/托管服务注册；`TaskAndClusterServices`（现名 `MaintenanceTaskServices`）删除复制日志拦截器、集群租约、见证租约、节流器、集群校验/快照任务与复制后台服务，任务执行者改为本机标识（`主机名:进程号`）。
 - API 移除 `/cluster*` 端点、写入守卫中的“可写主节点”判定与 `/health/ready` 的集群健康依赖，改为本地就绪；SMTP/IMAP 移除“仅主节点接受写入会话”的拒绝分支与等待副本确认逻辑。
 - 权限移除 `cluster.read`/`cluster.manage`；审计移除 `AuditCategory.Node` 与 `cluster.*` 文案映射（保留 `NodeId` 字段用于记录操作来源主机）。
 - 手改三套迁移（SQLite/PostgreSQL/MySQL）与模型快照：删除 `cluster_*`/`replication_*` 建表、索引、实体快照，以及 `scheduled_tasks.IsClusterTask` 列。
@@ -322,3 +322,24 @@
 - 后端未改动。
 
 本轮仍未验证：插件停用/启用与配置保存对真实插件宿主的影响、回收站恢复/永久清理的真实数据联动、消息模板保存后的真实退信内容。总体目标仍未完成。
+
+## 2026-09-19：清理节点/集群时代残留（界面与代码）
+
+按“都去掉节点 preview-primary”的要求，把集群/主备下线后遗留的最后一批痕迹清干净。
+
+已修复：
+
+- **死代码**：`main.css` 删除仅服务集群视图的 `.state-dot`、`.cluster-metrics .metric-name` 规则，并把注释「节点状态提示」改为「左侧信息提示」。
+- **语义化类名**：侧栏底部信息卡片的 `.node-state` 改名为 `.nav-info`（`AppShell.vue` + `main.css`），它与“节点”已无关系，避免继续残留误导性命名。
+- **文件命名**：`TaskAndClusterServices.cs` 实为配额/清理/维护任务服务（已无集群代码），重命名为 `MaintenanceTaskServices.cs`。
+- **文档措辞**：`configuration.md` 中「旧配置含有 `Relay` 节点」改为「`Relay` 配置节」；验收记录中的类名引用同步更新。
+
+经全仓库（含二进制/编译产物）扫描确认：`preview-primary` 现在只出现在本验收文档的历史记录里，源码、Mock、界面模板中不再有任何出现。
+
+验证：
+
+- 新增回归测试：Mock 审计记录、计划任务、任务执行历史序列化后都不得包含 `preview-primary`、`nodeId`、`nodeName`。前端 Vitest 73 项通过（原 72 项）。
+- 前端 ESLint 通过，Vite 生产构建通过；重新构建的 `dist` 资产中不含 `preview-primary`/`主节点`/`集群`/`node-state`。
+- 后端 `dotnet build MailServer.slnx` 0 警告 0 错误；`dotnet test` 227 项通过。
+
+本轮仍未验证：真实后端启动后的端到端写入；`builds/` 下 2026-09-02 的历史发布产物仍含旧 `ClusterView` 包，需在下次 `scripts/publish-portable.ps1` 重新发布时刷新。总体目标仍未完成。
