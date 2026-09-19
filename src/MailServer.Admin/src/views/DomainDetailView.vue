@@ -124,6 +124,14 @@ interface PagedResult<T> {
   totalCount: number
 }
 
+// 后端 PagedQuarantineResult 的分页字段名是 total，与通用 PagedResult 不同。
+interface PagedQuarantineResult<T> {
+  items: T[]
+  page: number
+  pageSize: number
+  total: number
+}
+
 const route = useRoute()
 const router = useRouter()
 const { can } = usePermission()
@@ -552,9 +560,9 @@ async function loadQuarantine() {
     const query = new globalThis.URLSearchParams({ page: String(quarantinePage.value), pageSize: String(quarantinePageSize) })
     if (quarantineSearch.value.trim()) query.set('search', quarantineSearch.value.trim())
     if (quarantineStatus.value) query.set('status', quarantineStatus.value)
-    const result = await api<PagedResult<QuarantineListItem>>(`/domains/${domainId.value}/quarantine?${query}`)
+    const result = await api<PagedQuarantineResult<QuarantineListItem>>(`/domains/${domainId.value}/quarantine?${query}`)
     quarantineRows.value = result.items
-    quarantineTotal.value = result.totalCount
+    quarantineTotal.value = result.total
     if (quarantinePage.value > quarantinePageCount.value) quarantinePage.value = quarantinePageCount.value
   } catch (cause) {
     quarantineRows.value = []

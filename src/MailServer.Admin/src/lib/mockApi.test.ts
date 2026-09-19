@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { mockApi, mockApiDownload } from './mockApi'
+import { enablePreviewMode, mockApi, mockApiDownload } from './mockApi'
 
 interface PagedResult<T> {
   items: T[]
@@ -511,6 +511,17 @@ describe('domain-detail preview API', () => {
     const clearedHealth = await mockApi<{ hasCertificate: boolean }>(`/domains/${targetDomainId}/health`)
     expect(clearedHealth.hasCertificate).toBe(false)
   })
+  it('exposes quarantine paging as total to match the backend PagedQuarantineResult', async () => {
+    await enablePreviewMode()
+    const domainId = '9e8fef40-335f-4d7a-a6c5-7379bb9aa401'
+    const result = await mockApi<{ items: unknown[]; page: number; pageSize: number; total: number }>(
+      `/domains/${domainId}/quarantine?page=1&pageSize=10`)
+    // 域详情页依赖 total 字段渲染分页；缺失会显示「共 条记录 / 第 1 / NaN 页」。
+    expect(typeof result.total).toBe('number')
+    expect(result.total).toBeGreaterThan(0)
+    expect(result).not.toHaveProperty('totalCount')
+  })
+
   it('manages accounts, aliases, rules, quarantine, audit and domain queue through the preview API', async () => {
     const domainName = 'northwind.cn'
     const suffix = crypto.randomUUID().slice(0, 8)
