@@ -36,7 +36,7 @@ describe('API client', () => {
       .mockResolvedValueOnce(Response.json({ token: 'csrf' }))
       .mockResolvedValueOnce(new Response(null, { status })))
     const { api } = await import('./api')
-    await expect(api<void>('/cluster/transport/repair', { method: 'POST' })).resolves.toBeUndefined()
+    await expect(api<void>('/tasks/task-1/run', { method: 'POST' })).resolves.toBeUndefined()
   })
 
   it('preserves JSON returned by an accepted background task', async () => {

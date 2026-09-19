@@ -10,7 +10,6 @@ using System.Net.Sockets;
 using System.Reflection;
 using System.Security.AccessControl;
 using System.Security.Cryptography;
-using System.Security.Cryptography.X509Certificates;
 using System.Security.Principal;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -52,7 +51,6 @@ internal static class MailServerCli
                 "admin" => await AdminAsync(parsed),
                 "domain" => await DomainAsync(parsed),
                 "account" => await AccountAsync(parsed),
-                "cluster" => await ClusterAsync(parsed),
                 "run" => await RunHostAsync(parsed),
                 _ => Fail($"Unknown command '{command}'.")
             };
@@ -298,263 +296,11 @@ internal static class MailServerCli
         return 0;
     }
 
-    private static async Task<int> ClusterAsync(CliArguments args)
-    {
-        var operation = args.Positionals.ElementAtOrDefault(1)?.ToLowerInvariant();
-        if (operation == "force-remove")
-        {
-            var nodeIdOrName = args.Get("node-id") ?? throw new ArgumentException("--node-id is required.");
-            var localConfigPath = GetExistingConfigPath(args);
-            Environment.SetEnvironmentVariable(PortableConfiguration.EnvironmentVariable, localConfigPath);
-            await using var localServices = BuildServices(LoadConfiguration(localConfigPath));
-            var clusters = localServices.GetRequiredService<ClusterManagementService>();
-            var nodeIdToRemove = await clusters.ResolveNodeIdAsync(nodeIdOrName, CancellationToken.None);
-            await clusters
-                .RemoveNodeAsync(nodeIdToRemove, "cli", CancellationToken.None, forceRequested: true);
-            Console.WriteLine($"Node force-removed locally: {nodeIdToRemove}");
-            var health = await localServices.GetRequiredService<IClusterHealthService>().GetAsync(CancellationToken.None);
-            Console.WriteLine(health.Writable
-                ? "This was the final child node; local primary writes were restored automatically."
-                : "This node remains read-only until every remaining child node is removed.");
-            Console.WriteLine("The remote server was not contacted or erased; shut it down or isolate it before it can write independently.");
-            return 0;
-        }
-        if (operation == "force-leave")
-        {
-            var confirmName = args.Get("confirm-name") ?? throw new ArgumentException("--confirm-name is required.");
-            var localConfigPath = GetExistingConfigPath(args);
-            Environment.SetEnvironmentVariable(PortableConfiguration.EnvironmentVariable, localConfigPath);
-            await using var localServices = BuildServices(LoadConfiguration(localConfigPath));
-            await localServices.GetRequiredService<ClusterManagementService>()
-                .ForceLeaveAsync(confirmName, "cli", CancellationToken.None);
-            Console.WriteLine("This server left the cluster and is now configured for standalone operation.");
-            Console.WriteLine("No remote server was contacted or erased. Clean up or reinitialize remote nodes separately.");
-            return 0;
-        }
-        if (operation == "recover-primary")
-        {
-            var confirmName = args.Get("confirm-name") ?? throw new ArgumentException("--confirm-name is required.");
-            if (!args.HasFlag("confirm-nodes-fenced"))
-                throw new ArgumentException("--confirm-nodes-fenced is required.");
-            var localConfigPath = GetExistingConfigPath(args);
-            Environment.SetEnvironmentVariable(PortableConfiguration.EnvironmentVariable, localConfigPath);
-            await using var localServices = BuildServices(LoadConfiguration(localConfigPath));
-            await localServices.GetRequiredService<ClusterManagementService>().RecoverPrimaryAsync(
-                new RecoverPrimaryRequest(confirmName, true), "cli", CancellationToken.None);
-            Console.WriteLine("Primary write access recovered. Keep every removed remote node fenced until it is reinitialized.");
-            return 0;
-        }
-        if (operation != "join")
-            return Fail("Usage: mailserver cluster join ... | force-remove --node-id <id-or-name> | force-leave --confirm-name <name> | recover-primary --confirm-name <name> --confirm-nodes-fenced");
-        var endpoint = RequireTlsArgument(args.Get("endpoint"), "--endpoint");
-        var advertiseEndpoint = RequireTlsArgument(args.Get("advertise-endpoint") ?? args.Get("advertise-url"), "--advertise-endpoint");
-        var token = args.Get("token") ?? throw new ArgumentException("--token is required.");
-        var name = args.Get("name") ?? throw new ArgumentException("--name is required.");
-        var generatedNodeId = $"{Environment.MachineName.ToLowerInvariant()}-{Guid.NewGuid():N}";
-        var nodeId = args.Get("node-id") ?? generatedNodeId[..Math.Min(generatedNodeId.Length, 41)];
-        var configPath = GetExistingConfigPath(args);
-        var configuration = LoadConfiguration(configPath);
-        var storageRoot = Path.GetFullPath(configuration[$"{StorageOptions.SectionName}:RootPath"] ?? "data/messages");
-        ClusterJoinWireResponse joined;
-        ClusterTransportJoinFiles files;
-        await using (var services = BuildServices(configuration))
-        {
-            var factory = services.GetRequiredService<IDbContextFactory<MailDbContext>>();
-            await using var db = await factory.CreateDbContextAsync();
-            var populated = await ReplicationModelDescriptor.FindPopulatedEntityTypesAsync(db, CancellationToken.None);
-            var containsClusterIdentity = await db.ClusterConfigurations.AnyAsync()
-                || await db.ClusterNodes.AnyAsync()
-                || await db.ClusterNodeCertificates.AnyAsync()
-                || await db.ClusterCertificateAuthorities.AnyAsync();
-            if (containsClusterIdentity || populated.Count > 0)
-                throw new InvalidOperationException(
-                    $"The joining node must use an empty application database. Conflicting tables: {string.Join(", ", populated.DefaultIfEmpty("cluster identity"))}.");
-            if (Directory.Exists(storageRoot) && Directory.EnumerateFiles(storageRoot, "*", SearchOption.AllDirectories).Any())
-                throw new InvalidOperationException("The joining node must use an empty message storage directory.");
-
-            var transport = services.GetRequiredService<ClusterTransportClient>();
-            var fingerprint = await services.GetRequiredService<ReplicationSchemaFingerprintProvider>().GetAsync(CancellationToken.None);
-            (joined, files) = await transport.JoinAsync(
-                endpoint, token, nodeId, name, advertiseEndpoint, fingerprint, CancellationToken.None);
-        }
-
-        var originalConfiguration = await File.ReadAllTextAsync(configPath);
-        var root = JsonNode.Parse(originalConfiguration) as JsonObject
-            ?? throw new InvalidDataException("Configuration root must be a JSON object.");
-        var cluster = root[ClusterOptions.SectionName] as JsonObject ?? new JsonObject();
-        root[ClusterOptions.SectionName] = cluster;
-        cluster["Enabled"] = true;
-        cluster["RecoveryRequired"] = false;
-        cluster["NodeId"] = joined.NodeId;
-        cluster["NodeName"] = name;
-        cluster["Role"] = joined.Role.ToString();
-        cluster["Endpoint"] = advertiseEndpoint;
-        cluster["PrimaryEndpoint"] = joined.PrimaryEndpoint;
-        cluster["WitnessEndpoint"] = joined.WitnessEndpoint ?? string.Empty;
-        var clusterSecurityDir = Path.Combine(Path.GetDirectoryName(configPath)!, "cluster");
-        Directory.CreateDirectory(clusterSecurityDir);
-        var caPath = Path.Combine(clusterSecurityDir, "ca.crt");
-        var certificatePath = Path.Combine(clusterSecurityDir, "node.crt");
-        var privateKeyPath = Path.Combine(clusterSecurityDir, "node.key");
-        var originalCa = await ReadOptionalFileAsync(caPath);
-        var originalCertificate = await ReadOptionalFileAsync(certificatePath);
-        var originalPrivateKey = await ReadOptionalFileAsync(privateKeyPath);
-        var transportConfig = root[ClusterTransportOptions.SectionName] as JsonObject ?? new JsonObject();
-        root[ClusterTransportOptions.SectionName] = transportConfig;
-        transportConfig["Enabled"] = true;
-        transportConfig["AdvertiseEndpoint"] = advertiseEndpoint;
-        transportConfig["TrustedCaPath"] = caPath;
-        transportConfig["CertificatePath"] = certificatePath;
-        transportConfig["PrivateKeyPath"] = privateKeyPath;
-        try
-        {
-            await File.WriteAllTextAsync(caPath, files.CaCertificatePem);
-            await File.WriteAllTextAsync(certificatePath, files.NodeCertificatePem);
-            await File.WriteAllTextAsync(privateKeyPath, files.NodePrivateKeyPem);
-            await File.WriteAllTextAsync(configPath, root.ToJsonString(JsonOptions));
-            ProtectConfigurationFile(configPath);
-            await InitializeJoinedNodeAsync(configuration, joined, files, name, advertiseEndpoint, CancellationToken.None);
-        }
-        catch
-        {
-            await File.WriteAllTextAsync(configPath, originalConfiguration);
-            await RestoreOptionalFileAsync(caPath, originalCa);
-            await RestoreOptionalFileAsync(certificatePath, originalCertificate);
-            await RestoreOptionalFileAsync(privateKeyPath, originalPrivateKey);
-            throw;
-        }
-
-        Console.WriteLine($"Joined cluster: {joined.ClusterName} ({joined.ClusterId})");
-        Console.WriteLine($"Node: {joined.NodeId} [{joined.Role}]");
-        Console.WriteLine(joined.Role == ClusterNodeRole.Witness
-            ? "下一步：运行 mailserver run cluster 启动见证节点。"
-            : "下一步：重启 MailServer，让 mTLS 集群通信和同步开始工作。");
-        return 0;
-    }
-
-    private static async Task InitializeJoinedNodeAsync(
-        IConfiguration configuration,
-        ClusterJoinWireResponse joined,
-        ClusterTransportJoinFiles files,
-        string nodeName,
-        string advertiseEndpoint,
-        CancellationToken cancellationToken)
-    {
-        await using var services = BuildServices(configuration);
-        var factory = services.GetRequiredService<IDbContextFactory<MailDbContext>>();
-        await using var db = await factory.CreateDbContextAsync(cancellationToken);
-        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
-
-        // Defaults may have been created while this database was still standalone.
-        // They are authoritative on the primary, so discard the local identities.
-        db.TaskExecutions.RemoveRange(await db.TaskExecutions.ToListAsync(cancellationToken));
-        db.TaskLeases.RemoveRange(await db.TaskLeases.ToListAsync(cancellationToken));
-        db.ScheduledTasks.RemoveRange(await db.ScheduledTasks.ToListAsync(cancellationToken));
-
-        using var ca = X509Certificate2.CreateFromPem(files.CaCertificatePem);
-        using var primaryCertificate = X509Certificate2.CreateFromPem(files.PrimaryCertificatePem);
-        using var localCertificate = X509Certificate2.CreateFromPem(files.NodeCertificatePem);
-        var now = DateTimeOffset.UtcNow;
-        db.ClusterConfigurations.Add(new ClusterConfiguration
-        {
-            Id = joined.ClusterId,
-            Name = joined.ClusterName,
-            PrimaryNodeId = files.PrimaryNodeId,
-            ClusterCaThumbprint = ca.Thumbprint,
-            CaCertificatePem = files.CaCertificatePem,
-            CreatedBy = "cluster-join",
-            CreatedAt = now
-        });
-        db.ClusterNodes.AddRange(
-            new ClusterNode
-            {
-                Id = files.PrimaryNodeId,
-                Name = files.PrimaryNodeId,
-                Role = ClusterNodeRole.Primary,
-                Status = ClusterNodeStatus.Healthy,
-                Endpoint = joined.PrimaryEndpoint,
-                CertificateThumbprint = primaryCertificate.Thumbprint,
-                ProtocolVersion = ClusterBinaryProtocol.ProtocolVersion,
-                LastHeartbeatAt = now
-            },
-            new ClusterNode
-            {
-                Id = joined.NodeId,
-                Name = nodeName,
-                Role = joined.Role,
-                Status = joined.Role == ClusterNodeRole.Witness ? ClusterNodeStatus.Healthy : ClusterNodeStatus.Synchronizing,
-                Endpoint = advertiseEndpoint,
-                CertificateThumbprint = localCertificate.Thumbprint,
-                ProtocolVersion = ClusterBinaryProtocol.ProtocolVersion,
-                LastHeartbeatAt = now,
-                InitializationProgress = joined.Role == ClusterNodeRole.Witness ? 100 : 0
-            });
-        db.ClusterNodeCertificates.AddRange(
-            CreateJoinedCertificate(files.PrimaryNodeId, files.PrimaryCertificatePem, primaryCertificate, now),
-            CreateJoinedCertificate(joined.NodeId, files.NodeCertificatePem, localCertificate, now));
-        db.ReplicationCursors.Add(new ReplicationCursor { NodeId = joined.NodeId, UpdatedAt = now });
-        await db.SaveChangesAsync(cancellationToken);
-        await transaction.CommitAsync(cancellationToken);
-    }
-
-    private static ClusterNodeCertificate CreateJoinedCertificate(
-        string nodeId,
-        string pem,
-        X509Certificate2 certificate,
-        DateTimeOffset createdAt) => new()
-        {
-            NodeId = nodeId,
-            Thumbprint = certificate.Thumbprint ?? Convert.ToHexString(SHA256.HashData(certificate.RawData)),
-            CertificatePem = pem,
-            NotBefore = certificate.NotBefore.ToUniversalTime(),
-            NotAfter = certificate.NotAfter.ToUniversalTime(),
-            CreatedAt = createdAt
-        };
-
-    private static async Task<string?> ReadOptionalFileAsync(string path) =>
-        File.Exists(path) ? await File.ReadAllTextAsync(path) : null;
-
-    private static async Task RestoreOptionalFileAsync(string path, string? content)
-    {
-        if (content is null)
-        {
-            if (File.Exists(path)) File.Delete(path);
-            return;
-        }
-        await File.WriteAllTextAsync(path, content);
-    }
-
-    private static string RequireTlsArgument(string? value, string name)
-    {
-        if (!Uri.TryCreate(value, UriKind.Absolute, out var uri) || uri.Scheme != "tls")
-            throw new ArgumentException($"{name} must be an absolute tls:// URL.");
-        return uri.ToString().TrimEnd('/');
-    }
-
     private static async Task<int> RunHostAsync(CliArguments args)
     {
         var host = args.Positionals.ElementAtOrDefault(1)?.ToLowerInvariant() ?? "all";
         var configPath = GetExistingConfigPath(args);
         var configuration = LoadConfiguration(configPath);
-        if (host == "all" && IsWitnessNode(configuration))
-            return Fail("This node is configured as a Witness. Use 'mailserver run cluster' instead of 'mailserver run all'.");
-        if (host == "cluster")
-        {
-            var cluster = configuration.GetSection(ClusterOptions.SectionName).Get<ClusterOptions>() ?? new ClusterOptions();
-            var transport = configuration.GetSection(ClusterTransportOptions.SectionName).Get<ClusterTransportOptions>() ?? new ClusterTransportOptions();
-            if (ClusterHostValidator.IsNotJoinedYet(cluster, transport))
-                return FailClusterNotJoined();
-            var errors = ClusterHostValidator.ValidateWitnessHost(cluster, transport).ToArray();
-            if (errors.Length > 0)
-            {
-        Console.Error.WriteLine("见证节点集群配置已损坏或不完整。");
-        foreach (var error in errors) Console.Error.WriteLine(error);
-        Console.Error.WriteLine();
-        Console.Error.WriteLine("这个节点看起来已经加入过集群，但本地身份文件或设置已经不可用。");
-        Console.Error.WriteLine("不要手动创建替代证书。请先在主节点后台撤销该节点，再创建新的见证节点邀请，然后重新运行 'mailserver cluster join'。");
-                return 1;
-            }
-        }
         Environment.SetEnvironmentVariable(PortableConfiguration.EnvironmentVariable, configPath);
         string assemblyName;
         switch (host)
@@ -576,11 +322,8 @@ internal static class MailServerCli
             case "worker":
                 assemblyName = "MailServer.Worker";
                 break;
-            case "cluster":
-                assemblyName = "MailServer.Cluster";
-                break;
             default:
-                return Fail("Usage: mailserver run all|api|smtp|imap|worker|cluster");
+                return Fail("Usage: mailserver run all|api|smtp|imap|worker");
         }
 
         var assembly = Assembly.Load(assemblyName);
@@ -599,26 +342,6 @@ internal static class MailServerCli
         }
         if (invocation is Task task) await task;
         return 0;
-    }
-
-    private static bool IsWitnessNode(IConfiguration configuration) =>
-        Enum.TryParse<ClusterNodeRole>(configuration["Cluster:Role"], true, out var role)
-        && role == ClusterNodeRole.Witness
-        && configuration.GetValue("Cluster:Enabled", false);
-
-    private static int FailClusterNotJoined()
-    {
-        Console.Error.WriteLine("这个见证节点还没有加入集群。");
-        Console.Error.WriteLine();
-        Console.Error.WriteLine("见证节点启动顺序：");
-        Console.Error.WriteLine("1. 先在主节点后台打开“集群管理”，点击“添加见证节点”。");
-        Console.Error.WriteLine("2. 在见证服务器上运行后台生成的加入命令，例如：");
-        Console.Error.WriteLine("   mailserver cluster join --endpoint tls://<primary>:2526 --token <token> --name witness-1 --advertise-endpoint tls://<witness>:2526");
-        Console.Error.WriteLine("3. 等 join 自动生成 ca.crt、node.crt 和 node.key 后，再启动见证节点：");
-        Console.Error.WriteLine("   mailserver run cluster");
-        Console.Error.WriteLine();
-        Console.Error.WriteLine("集群证书由 'mailserver cluster join' 向主节点申请签发并写入本机，不需要手动准备或自签。");
-        return 1;
     }
 
     private static ServiceProvider BuildServices(IConfiguration configuration)
@@ -709,14 +432,6 @@ internal static class MailServerCli
         }
     }
 
-    private static IEnumerable<string> ValidateClusterHostConfiguration(IConfiguration configuration)
-    {
-        var cluster = configuration.GetSection(ClusterOptions.SectionName).Get<ClusterOptions>() ?? new ClusterOptions();
-        var transport = configuration.GetSection(ClusterTransportOptions.SectionName).Get<ClusterTransportOptions>() ?? new ClusterTransportOptions();
-        foreach (var error in ClusterHostValidator.ValidateWitnessHost(cluster, transport))
-            yield return error;
-    }
-
     private static void CheckCertificate(PemCertificateOptions options, string purpose)
     {
         using var certificate = PemCertificateLoader.LoadOptional(options, purpose);
@@ -799,41 +514,6 @@ internal static class MailServerCli
                 MaxTargetsPerRule = 20
             },
             ["Plugins"] = new { Path = "plugins" },
-            ["Cluster"] = new
-            {
-                Enabled = false,
-                RecoveryRequired = false,
-                Role = ClusterNodeRole.Primary,
-                Endpoint = "",
-                PrimaryEndpoint = "",
-                WitnessEndpoint = "",
-                ReplicationPollSeconds = 2,
-                LeaseSeconds = 15,
-                AcknowledgementTimeoutSeconds = 10,
-                AllowDegradedWrites = false
-            },
-            ["ClusterTransport"] = new
-            {
-                Enabled = false,
-                ListenAddress = "0.0.0.0",
-                Port = 2526,
-                AdvertiseEndpoint = "",
-                CertificatePath = "security-assets/cluster/node.crt",
-                PrivateKeyPath = "security-assets/cluster/node.key",
-                TrustedCaPath = "security-assets/cluster/ca.crt",
-                ConnectTimeoutSeconds = 15,
-                ContentChunkBytes = 65536
-            },
-            ["ClusterSyncThrottle"] = new
-            {
-                Enabled = true,
-                SampleIntervalSeconds = 10,
-                BusyHoldSeconds = 60,
-                RecoverySamples = 3,
-                NormalBatchSize = 200,
-                BusyMetadataBatchSize = 20,
-                CpuBusyPercent = 85
-            },
             ["Certificates"] = new
             {
                 DefaultMailHostName = "mail.localhost",
@@ -983,17 +663,9 @@ internal static class MailServerCli
               mailserver admin create|password <name> --password <value>
               mailserver domain add <domain>
               mailserver account create|password|enable|disable <address> [--password <value>]
-              mailserver cluster join --endpoint tls://<primary>:2526 --token <token> --name <node> --advertise-endpoint tls://<node>:2526
-              mailserver cluster force-remove --node-id <id-or-name>
-              mailserver cluster force-leave --confirm-name <name>
-              mailserver cluster recover-primary --confirm-name <name> --confirm-nodes-fenced
-              mailserver run all|api|smtp|imap|worker|cluster
+              mailserver run all|api|smtp|imap|worker
 
             默认配置文件是 ./mailserver.json，可用 --config 或 MAILSERVER_CONFIG 覆盖。
-            见证节点部署顺序：
-              1. 在主节点后台生成见证节点邀请。
-              2. 在见证服务器执行 'mailserver cluster join ...' 获取 CA 和节点证书。
-              3. 执行 'mailserver run cluster'。见证节点只需要开放集群 TLS 端口。
             """);
 
     private sealed class EndpointProbe

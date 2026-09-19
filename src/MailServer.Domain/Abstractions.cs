@@ -11,11 +11,6 @@ public sealed record ScheduledTaskRunResult(int ProcessedCount, long ReleasedByt
 public sealed record RecycleBinItem(Guid QueueId, CleanupResourceType ResourceType, Guid? ResourceId,
     string DisplayName, long EstimatedBytes, DateTimeOffset DeletedAt, DateTimeOffset PurgeAfter, CleanupQueueStatus Status);
 
-/// <summary>
-/// 集群健康状态视图。Writable 表示当前节点是否允许处理写入型请求和协议会话。
-/// </summary>
-public sealed record ClusterHealth(bool Alive, bool Writable, string NodeId, ClusterNodeRole Role,
-    bool HasQuorum, long LastSequence, long ReplicationLag);
 
 /// <summary>
 /// 创建隔离邮件的请求。调用方提供原始内容流，服务负责保存内容并生成审核记录。
@@ -102,27 +97,6 @@ public interface IQuotaReconciliationService
     Task<ScheduledTaskRunResult> ReconcileAsync(CancellationToken cancellationToken);
 }
 
-public interface IReplicationJournal
-{
-    Task<long> AppendAsync(string entityType, string entityKey, ReplicationOperation operation,
-        string payloadJson, string? contentKey, CancellationToken cancellationToken);
-}
-
-public interface IReplicationTransport
-{
-    Task<bool> WaitForAcknowledgementAsync(long sequence, CancellationToken cancellationToken);
-}
-
-public interface IClusterLeaseService
-{
-    Task<bool> IsWritableAsync(CancellationToken cancellationToken);
-    Task<bool> TryAcquirePrimaryAsync(CancellationToken cancellationToken);
-}
-
-public interface IClusterHealthService
-{
-    Task<ClusterHealth> GetAsync(CancellationToken cancellationToken);
-}
 
 public interface IQuarantineService
 {

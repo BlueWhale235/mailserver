@@ -633,7 +633,7 @@ describe('domain-detail preview API', () => {
       body: JSON.stringify({ name: 'bad direction', direction: 'Sideways', matchMode: 'All', targetMailboxName: 'Sent', isEnabled: true, conditions: [{ field: 'Subject', operator: 'ContainsAny', values: ['x'] }] }),
     })).rejects.toThrow('规则方向无效')
 
-    // --- cleanup rule + cluster/admin password branches ---
+    // --- cleanup rule + admin password branches ---
     await mockApi(`/domains/${domainId}/rules/${created.id}`, { method: 'DELETE' })
     await mockApi('/admins/me/password', { method: 'POST', body: JSON.stringify({ currentPassword: 'preview-password', newPassword: 'new-preview-password' }) })
     await expect(mockApi('/admins/me/password', { method: 'POST', body: JSON.stringify({ currentPassword: 'wrong', newPassword: 'new-preview-password' }) })).rejects.toThrow('当前密码不正确')
@@ -654,16 +654,5 @@ describe('domain-detail preview API', () => {
     const search = await mockApi<PagedResult<{ id: string }>>('/domains/search?search=qa-&page=1&pageSize=50')
     expect(search.items.some(item => item.id === created.id)).toBe(false)
     expect(search.items.some(item => item.id === second.id)).toBe(false)
-  })
-
-  it('promotes, resets replication and deletes the preview cluster', async () => {
-    const before = await mockApi<{ nodes: unknown[]; cursors: Array<{ nodeId: string; lastAppliedSequence: number }> }>('/cluster')
-    const standby = before.cursors[0]!
-    await mockApi(`/cluster/replication/${standby.nodeId}/reset`, { method: 'POST' })
-    const afterReset = await mockApi<{ cursors: Array<{ nodeId: string; lastAppliedSequence: number }> }>('/cluster')
-    expect(afterReset.cursors.find(cursor => cursor.nodeId === standby.nodeId)?.lastAppliedSequence).toBe(0)
-
-    await expect(mockApi('/cluster/promote', { method: 'POST' })).rejects.toThrow('本机已是主节点')
-    await expect(mockApi('/cluster?confirmName=wrong-name', { method: 'DELETE' })).rejects.toThrow('集群名称不匹配')
   })
 })

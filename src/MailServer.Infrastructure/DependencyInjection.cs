@@ -35,23 +35,11 @@ public static class DependencyInjection
         services.Configure<AdminServerOptions>(configuration.GetSection(AdminServerOptions.SectionName));
         services.Configure<TransportSecurityOptions>(configuration.GetSection(TransportSecurityOptions.SectionName));
         services.Configure<MaintenanceOptions>(configuration.GetSection(MaintenanceOptions.SectionName));
-        services.Configure<ClusterOptions>(configuration.GetSection(ClusterOptions.SectionName));
-        services.Configure<ClusterTransportOptions>(configuration.GetSection(ClusterTransportOptions.SectionName));
-        services.Configure<ClusterSyncThrottleOptions>(configuration.GetSection(ClusterSyncThrottleOptions.SectionName));
-        services.AddSingleton(new ClusterRuntimeState(
-            configuration.GetValue("Cluster:Enabled", false),
-            configuration.GetValue("Cluster:RecoveryRequired", false)));
-        services.AddSingleton<ClusterTransportRuntimeState>();
-        services.AddHostedService<ClusterRuntimeBootstrap>();
         services.AddHttpContextAccessor();
         services.AddSingleton<AuditStampInterceptor>();
-        services.AddSingleton<ReplicationJournalInterceptor>();
         services.AddPooledDbContextFactory<MailDbContext>((provider, options) =>
         {
-            // 所有数据库写入都经过复制日志拦截器，集群同步依赖它记录实体变更。
-            options.AddInterceptors(
-                provider.GetRequiredService<AuditStampInterceptor>(),
-                provider.GetRequiredService<ReplicationJournalInterceptor>());
+            options.AddInterceptors(provider.GetRequiredService<AuditStampInterceptor>());
             var migrationsAssembly = database.Provider.MigrationsAssemblyName();
             switch (database.Provider)
             {
@@ -114,29 +102,13 @@ public static class DependencyInjection
         services.AddSingleton<CleanupQueueService>();
         services.AddSingleton<ICleanupQueueService>(provider => provider.GetRequiredService<CleanupQueueService>());
         services.AddSingleton<IRecycleBinService>(provider => provider.GetRequiredService<CleanupQueueService>());
-        services.AddSingleton<IReplicationJournal, ReplicationJournal>();
-        services.AddSingleton<IReplicationTransport, DatabaseReplicationTransport>();
-        services.AddSingleton<ReplicationSchemaFingerprintProvider>();
         services.AddSingleton<QuarantineService>();
         services.AddSingleton<IQuarantineService>(provider => provider.GetRequiredService<QuarantineService>());
-        services.AddSingleton<ClusterLeaseService>();
-        services.AddSingleton<ClusterCertificateService>();
-        services.AddSingleton<ClusterPluginPackageService>();
-        services.AddSingleton<ClusterTransportClient>();
-        services.AddSingleton<ClusterSyncThrottle>();
-        services.AddSingleton<ClusterManagementService>();
-        services.AddSingleton<WitnessLeaseService>();
-        services.AddHttpClient("cluster-witness", client => client.Timeout = TimeSpan.FromSeconds(10));
-        services.AddHttpClient("cluster-replication", client => client.Timeout = TimeSpan.FromSeconds(60));
-        services.AddSingleton<IClusterLeaseService>(provider => provider.GetRequiredService<ClusterLeaseService>());
-        services.AddSingleton<IClusterHealthService>(provider => provider.GetRequiredService<ClusterLeaseService>());
         services.AddSingleton<IScheduledTaskHandler, CleanupTaskHandler>();
         services.AddSingleton<IScheduledTaskHandler, QuotaTaskHandler>();
         services.AddSingleton<IScheduledTaskHandler, CacheCleanupTaskHandler>();
-        services.AddSingleton<IScheduledTaskHandler, ReplicationCheckTaskHandler>();
         services.AddSingleton<IScheduledTaskHandler, OrphanStorageTaskHandler>();
         services.AddSingleton<IScheduledTaskHandler, StorageIntegrityTaskHandler>();
-        services.AddSingleton<IScheduledTaskHandler, ReplicationSnapshotTaskHandler>();
         services.AddSingleton<IScheduledTaskHandler, MailboxFolderDeletionTaskHandler>();
         services.AddSingleton<TaskExecutionService>();
         services.AddSingleton<ITaskScheduler>(provider => provider.GetRequiredService<TaskExecutionService>());
@@ -153,12 +125,6 @@ public static class DependencyInjection
         services.AddSingleton<IPluginQuarantineStore, PluginQuarantineStore>();
         services.AddSingleton<AdminApplicationService>();
         services.AddSingleton<IOutboundTransport, DirectMxTransport>();
-        return services;
-    }
-
-    public static IServiceCollection AddClusterTransportHost(this IServiceCollection services)
-    {
-        services.AddHostedService<ClusterTransportService>();
         return services;
     }
 

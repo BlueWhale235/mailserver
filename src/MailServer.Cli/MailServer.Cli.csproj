@@ -8,8 +8,6 @@
   <ItemGroup>
     <ProjectReference Include="../MailServer.Api/MailServer.Api.csproj"
                       GlobalPropertiesToRemove="RuntimeIdentifier;SelfContained;PublishSingleFile" />
-    <ProjectReference Include="../MailServer.Cluster/MailServer.Cluster.csproj"
-                      GlobalPropertiesToRemove="RuntimeIdentifier;SelfContained;PublishSingleFile" />
     <ProjectReference Include="../MailServer.Imap/MailServer.Imap.csproj"
                       GlobalPropertiesToRemove="RuntimeIdentifier;SelfContained;PublishSingleFile" />
     <ProjectReference Include="../MailServer.Infrastructure/MailServer.Infrastructure.csproj" />
@@ -69,9 +67,6 @@
                                Or '%(ResolvedFileToPublish.RelativePath)' == 'MailServer.Api.deps.json'
                                Or '%(ResolvedFileToPublish.RelativePath)' == 'MailServer.Api.runtimeconfig.json'
                                Or $([System.String]::Copy('%(ResolvedFileToPublish.RelativePath)').StartsWith('MailServer.Api.staticwebassets.'))
-                               Or '%(ResolvedFileToPublish.RelativePath)' == 'MailServer.Cluster.exe'
-                               Or '%(ResolvedFileToPublish.RelativePath)' == 'MailServer.Cluster.deps.json'
-                               Or '%(ResolvedFileToPublish.RelativePath)' == 'MailServer.Cluster.runtimeconfig.json'
                                Or '%(ResolvedFileToPublish.RelativePath)' == 'MailServer.Smtp.exe'
                                Or '%(ResolvedFileToPublish.RelativePath)' == 'MailServer.Smtp.deps.json'
                                Or '%(ResolvedFileToPublish.RelativePath)' == 'MailServer.Smtp.runtimeconfig.json'
@@ -82,7 +77,6 @@
                                Or '%(ResolvedFileToPublish.RelativePath)' == 'MailServer.Worker.deps.json'
                                Or '%(ResolvedFileToPublish.RelativePath)' == 'MailServer.Worker.runtimeconfig.json'
                                Or ('$(PublishSingleFile)' == 'true' And '%(ResolvedFileToPublish.RelativePath)' == 'MailServer.Api.dll')
-                               Or ('$(PublishSingleFile)' == 'true' And '%(ResolvedFileToPublish.RelativePath)' == 'MailServer.Cluster.dll')
                                Or ('$(PublishSingleFile)' == 'true' And '%(ResolvedFileToPublish.RelativePath)' == 'MailServer.Smtp.dll')
                                Or ('$(PublishSingleFile)' == 'true' And '%(ResolvedFileToPublish.RelativePath)' == 'MailServer.Imap.dll')
                                Or ('$(PublishSingleFile)' == 'true' And '%(ResolvedFileToPublish.RelativePath)' == 'MailServer.Worker.dll')" />
@@ -93,11 +87,10 @@
     <ItemGroup>
       <_ReferencedHostPublishFile Include="$(PublishDir)MailServer.Api.exe;$(PublishDir)MailServer.Api.deps.json;$(PublishDir)MailServer.Api.runtimeconfig.json;$(PublishDir)MailServer.Api.pdb" />
       <_ReferencedHostPublishFile Include="$(PublishDir)MailServer.Api.staticwebassets.*.json" />
-      <_ReferencedHostPublishFile Include="$(PublishDir)MailServer.Cluster.exe;$(PublishDir)MailServer.Cluster.deps.json;$(PublishDir)MailServer.Cluster.runtimeconfig.json;$(PublishDir)MailServer.Cluster.pdb" />
       <_ReferencedHostPublishFile Include="$(PublishDir)MailServer.Smtp.exe;$(PublishDir)MailServer.Smtp.deps.json;$(PublishDir)MailServer.Smtp.runtimeconfig.json;$(PublishDir)MailServer.Smtp.pdb" />
       <_ReferencedHostPublishFile Include="$(PublishDir)MailServer.Imap.exe;$(PublishDir)MailServer.Imap.deps.json;$(PublishDir)MailServer.Imap.runtimeconfig.json;$(PublishDir)MailServer.Imap.pdb" />
       <_ReferencedHostPublishFile Include="$(PublishDir)MailServer.Worker.exe;$(PublishDir)MailServer.Worker.deps.json;$(PublishDir)MailServer.Worker.runtimeconfig.json;$(PublishDir)MailServer.Worker.pdb" />
-      <_ReferencedHostPublishFile Include="$(PublishDir)MailServer.Api.dll;$(PublishDir)MailServer.Cluster.dll;$(PublishDir)MailServer.Smtp.dll;$(PublishDir)MailServer.Imap.dll;$(PublishDir)MailServer.Worker.dll" Condition="'$(PublishSingleFile)' == 'true'" />
+      <_ReferencedHostPublishFile Include="$(PublishDir)MailServer.Api.dll;$(PublishDir)MailServer.Smtp.dll;$(PublishDir)MailServer.Imap.dll;$(PublishDir)MailServer.Worker.dll" Condition="'$(PublishSingleFile)' == 'true'" />
       <_ReferencedHostPublishFile Include="$(PublishDir)*.pdb" />
     </ItemGroup>
     <Delete Files="@(_ReferencedHostPublishFile)" TreatErrorsAsWarnings="true" />

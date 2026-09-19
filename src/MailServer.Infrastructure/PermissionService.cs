@@ -31,8 +31,6 @@ public static class PermissionCodes
     public const string DnsManage = "dns.manage";
     public const string TaskRead = "task.read";
     public const string TaskManage = "task.manage";
-    public const string ClusterRead = "cluster.read";
-    public const string ClusterManage = "cluster.manage";
 
     public const string ApiKeyList = ApiKeyRead;
     public const string ApiKeyCreate = ApiKeyManage;
@@ -104,7 +102,6 @@ public static class PermissionCodes
             [SettingsRead] = SettingsManage,
             [DnsRead] = DnsManage,
             [TaskRead] = TaskManage,
-            [ClusterRead] = ClusterManage,
             [DomainQuarantineRead] = DomainQuarantineManage,
             [DomainRead] = DomainManage
         };
@@ -270,12 +267,10 @@ public sealed class PermissionService(IDbContextFactory<MailDbContext> dbFactory
             Item(PermissionCodes.DnsRead, "DNS 诊断只读", "执行 DNS 诊断并查看结果。", domainScope: false),
             Item(PermissionCodes.DnsManage, "DNS 诊断管理", "预留给需要写入 DNS 诊断配置的管理操作。", domainScope: false)
         ]),
-        Group("operations", "任务与集群",
+        Group("operations", "任务中心",
         [
             Item(PermissionCodes.TaskRead, "任务中心只读", "查看定时任务、执行历史和回收站。", domainScope: false),
-            Item(PermissionCodes.TaskManage, "任务中心管理", "配置、执行任务以及恢复或永久清理回收项。", domainScope: false),
-            Item(PermissionCodes.ClusterRead, "集群只读", "查看节点、同步和仲裁状态。", domainScope: false),
-            Item(PermissionCodes.ClusterManage, "集群管理", "管理同步并执行受控集群切换。", domainScope: false)
+            Item(PermissionCodes.TaskManage, "任务中心管理", "配置、执行任务以及恢复或永久清理回收项。", domainScope: false)
         ])
     ];
 

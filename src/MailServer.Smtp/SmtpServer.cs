@@ -80,8 +80,7 @@ public sealed class SmtpServerService(
     ILogger<SmtpServerService> logger,
     IpFirewallService? firewall = null,
     IOptions<SmtpAbuseOptions>? abuseOptions = null,
-    SystemSettingsService? systemSettings = null,
-    IClusterLeaseService? clusterLease = null) : BackgroundService
+    SystemSettingsService? systemSettings = null) : BackgroundService
 {
     private readonly SmtpServerOptions _options = options.Value;
     private readonly List<TcpListener> _listeners = [];
@@ -199,12 +198,6 @@ public sealed class SmtpServerService(
                     stream,
                     TimeSpan.FromSeconds(smtpSettings.CommandTimeoutSeconds),
                     _options.MaximumMessageBytes);
-                if (clusterLease is not null && !await clusterLease.IsWritableAsync(serverCancellationToken))
-                {
-                    // 只有主节点接受写入型协议会话，避免多节点同时落库造成队列和 UID 状态分叉。
-                    await connection.ReplyAsync("421 4.3.2 This node is not the writable cluster primary", serverCancellationToken);
-                    return;
-                }
                 using (var scope = scopeFactory.CreateScope())
                 {
                     var pipeline = scope.ServiceProvider.GetService<PluginPipeline>();
@@ -658,25 +651,6 @@ public sealed class SmtpServerService(
                                         serverCancellationToken);
                                     state.ResetTransaction();
                                     break;
-                                }
-                                var replication = scope.ServiceProvider.GetService<IReplicationTransport>();
-                                var replicationFactory = scope.ServiceProvider.GetService<IDbContextFactory<MailDbContext>>();
-                                if (replication is not null && replicationFactory is not null)
-                                {
-                                    // 已提交本地后等待副本确认；超时返回 451，让上游稍后重投以降低主备切换丢信风险。
-                                    await using var replicationDb = await replicationFactory.CreateDbContextAsync(serverCancellationToken);
-                                    var sequence = await replicationDb.ReplicationLogs
-                                        .MaxAsync(x => (long?)x.Sequence, serverCancellationToken) ?? 0;
-                                    if (!await replication.WaitForAcknowledgementAsync(sequence, serverCancellationToken))
-                                    {
-                                        logger.LogWarning(
-                                            "SMTP DATA {MessageId} was committed locally but standby acknowledgement timed out at replication sequence {Sequence}.",
-                                            accepted.MessageId,
-                                            sequence);
-                                        await connection.ReplyAsync("451 4.3.0 Standby replication acknowledgement timed out", serverCancellationToken);
-                                        state.ResetTransaction();
-                                        break;
-                                    }
                                 }
                                 logger.LogInformation(
                                     "SMTP DATA accepted from {Remote}: messageId={MessageId}, sender={Sender}, recipientCount={RecipientCount}, localDeliveries={LocalDeliveries}, queuedDeliveries={QueuedDeliveries}.",

@@ -44,7 +44,7 @@ export const useAuthStore = defineStore('auth', () => {
     const snapshot = permissions.value
     if (snapshot.fullAccess) return true
     const canonical = code.trim().toLowerCase()
-    const reads = ['domain.read', 'api-key.read', 'admin.account.read', 'firewall.read', 'queue.read', 'settings.read', 'dns.read', 'task.read', 'cluster.read', 'domain.quarantine.read']
+    const reads = ['domain.read', 'api-key.read', 'admin.account.read', 'firewall.read', 'queue.read', 'settings.read', 'dns.read', 'task.read', 'domain.quarantine.read']
     const candidates = reads.includes(canonical) ? [canonical, canonical.replace(/\.read$/, '.manage')] : [canonical]
     const includes = (grants: string[], value: string) => grants.some(grant => grant.toLowerCase() === value)
     if (domainId) {

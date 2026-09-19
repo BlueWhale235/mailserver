@@ -105,12 +105,6 @@ public enum TaskExecutionStatus { Running, Succeeded, Failed, Cancelled }
 public enum CleanupResourceType { Domain, Account, Mailbox, MailboxMessage, ContentFile }
 public enum CleanupQueueStatus { Pending, Processing, Completed, Failed, Restored }
 public enum QuotaLedgerOperation { Add, Remove, Reconcile }
-public enum ClusterNodeRole { Primary, Standby, Witness }
-public enum ClusterNodeStatus { Unknown, Healthy, Unreachable, Synchronizing, ReadOnly }
-public enum ClusterSyncStatus { Idle, Synchronizing, Throttled, Failed, CatchingUp }
-public enum ClusterSnapshotStatus { Pending, Building, Ready, Applying, Completed, Failed }
-public enum ClusterCertificateStatus { Active, Grace, Revoked, Expired }
-public enum ReplicationOperation { Upsert, Delete, Snapshot }
 public enum QuarantineStatus { PendingReview, Released, Deleted }
 public enum MailboxFolderDeletionStatus { Pending, Running, Failed, Completed }
 
@@ -426,7 +420,6 @@ public sealed class ScheduledTask
     public required string Name { get; set; }
     public bool IsSystem { get; set; } = true;
     public bool IsEnabled { get; set; } = true;
-    public bool IsClusterTask { get; set; } = true;
     public int IntervalMinutes { get; set; } = 60;
     public int TimeoutSeconds { get; set; } = 600;
     public int BatchSize { get; set; } = 100;
@@ -488,163 +481,6 @@ public sealed class QuotaLedgerEntry
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
 }
 
-public sealed class ClusterNode
-{
-    public required string Id { get; set; }
-    public required string Name { get; set; }
-    public ClusterNodeRole Role { get; set; }
-    public ClusterNodeStatus Status { get; set; }
-    public string Endpoint { get; set; } = string.Empty;
-    public string Version { get; set; } = string.Empty;
-    public DateTimeOffset LastHeartbeatAt { get; set; }
-    public long AppliedSequence { get; set; }
-    public long SafeSequence { get; set; }
-    public int ProtocolVersion { get; set; } = 1;
-    public string? CertificateThumbprint { get; set; }
-    public string? PluginPackageSetHash { get; set; }
-    public int InitializationProgress { get; set; }
-    public string? LastError { get; set; }
-    public DateTimeOffset JoinedAt { get; set; } = DateTimeOffset.UtcNow;
-    public DateTimeOffset? RevokedAt { get; set; }
-}
-
-public sealed class ClusterConfiguration
-{
-    public Guid Id { get; set; } = Guid.NewGuid();
-    public required string Name { get; set; }
-    public required string PrimaryNodeId { get; set; }
-    public string? ClusterCaThumbprint { get; set; }
-    public string? ProtectedCaPrivateKeyPem { get; set; }
-    public string? CaCertificatePem { get; set; }
-    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
-    public required string CreatedBy { get; set; }
-}
-
-public sealed class ClusterCertificateAuthority
-{
-    public Guid Id { get; set; } = Guid.NewGuid();
-    public required string Thumbprint { get; set; }
-    public required string CertificatePem { get; set; }
-    public required string ProtectedPrivateKeyPem { get; set; }
-    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
-    public DateTimeOffset NotBefore { get; set; }
-    public DateTimeOffset NotAfter { get; set; }
-    public string CreatedBy { get; set; } = "system";
-}
-
-public sealed class ClusterJoinInvitation
-{
-    public Guid Id { get; set; } = Guid.NewGuid();
-    public required string TokenHash { get; set; }
-    public ClusterNodeRole Role { get; set; }
-    public DateTimeOffset ExpiresAt { get; set; }
-    public DateTimeOffset? UsedAt { get; set; }
-    public DateTimeOffset? RevokedAt { get; set; }
-    public required string CreatedBy { get; set; }
-    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
-}
-
-public sealed class ClusterNodeCertificate
-{
-    public Guid Id { get; set; } = Guid.NewGuid();
-    public required string NodeId { get; set; }
-    public required string Thumbprint { get; set; }
-    public required string CertificatePem { get; set; }
-    public ClusterCertificateStatus Status { get; set; } = ClusterCertificateStatus.Active;
-    public DateTimeOffset NotBefore { get; set; }
-    public DateTimeOffset NotAfter { get; set; }
-    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
-    public DateTimeOffset? GraceUntil { get; set; }
-    public DateTimeOffset? RevokedAt { get; set; }
-}
-
-public sealed class ClusterCertificateRevocation
-{
-    public Guid Id { get; set; } = Guid.NewGuid();
-    public required string Thumbprint { get; set; }
-    public required string NodeId { get; set; }
-    public string Reason { get; set; } = "revoked";
-    public DateTimeOffset RevokedAt { get; set; } = DateTimeOffset.UtcNow;
-}
-
-public sealed class ClusterPluginPackage
-{
-    public Guid Id { get; set; } = Guid.NewGuid();
-    public required string PluginId { get; set; }
-    public required string Version { get; set; }
-    public required string ManifestHash { get; set; }
-    public required string PackageHash { get; set; }
-    public DateTimeOffset ScannedAt { get; set; } = DateTimeOffset.UtcNow;
-}
-
-public sealed class ClusterPluginPackageFile
-{
-    public Guid Id { get; set; } = Guid.NewGuid();
-    public required string PluginId { get; set; }
-    public required string RelativePath { get; set; }
-    public required string ContentHash { get; set; }
-    public long Length { get; set; }
-    public DateTimeOffset ScannedAt { get; set; } = DateTimeOffset.UtcNow;
-}
-
-public sealed class ClusterSnapshot
-{
-    public Guid Id { get; set; } = Guid.NewGuid();
-    public required string NodeId { get; set; }
-    public long BaseSequence { get; set; }
-    public ClusterSnapshotStatus Status { get; set; } = ClusterSnapshotStatus.Pending;
-    public int TotalItems { get; set; }
-    public int CompletedItems { get; set; }
-    public string? LastError { get; set; }
-    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
-    public DateTimeOffset? CompletedAt { get; set; }
-}
-
-public sealed class ReplicationLog
-{
-    public long Sequence { get; set; }
-    public Guid BatchId { get; set; }
-    public required string EntityType { get; set; }
-    public required string EntityKey { get; set; }
-    public ReplicationOperation Operation { get; set; }
-    public string PayloadJson { get; set; } = "{}";
-    public string? ContentKey { get; set; }
-    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
-}
-
-public sealed class ReplicationCursor
-{
-    public required string NodeId { get; set; }
-    public long LastAppliedSequence { get; set; }
-    public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
-    public string? LastError { get; set; }
-    public DateTimeOffset? LastAttemptAt { get; set; }
-    public DateTimeOffset? LastSuccessAt { get; set; }
-    public long LastSuccessSequence { get; set; }
-    public int LastBatchCount { get; set; }
-    public int LastContentDownloads { get; set; }
-    public long LastDurationMilliseconds { get; set; }
-    public ClusterSyncStatus SyncStatus { get; set; } = ClusterSyncStatus.Idle;
-    public string? PauseReason { get; set; }
-    public string? LastDetailJson { get; set; }
-}
-
-public sealed class ClusterLease
-{
-    public required string Name { get; set; }
-    public required string OwnerNodeId { get; set; }
-    public long Term { get; set; }
-    public DateTimeOffset ExpiresAt { get; set; }
-}
-
-public sealed class ClusterEvent
-{
-    public Guid Id { get; set; } = Guid.NewGuid();
-    public required string Type { get; set; }
-    public required string NodeId { get; set; }
-    public string Detail { get; set; } = string.Empty;
-    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
-}
 
 public sealed class SentCopyJob
 {
@@ -797,7 +633,6 @@ public enum AuditCategory
     Update,
     Delete,
     BackgroundTask,
-    Node,
     Security,
     Plugin,
     Other

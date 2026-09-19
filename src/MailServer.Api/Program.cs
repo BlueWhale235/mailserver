@@ -26,7 +26,6 @@ builder.Configuration.AddPortableConfiguration();
 builder.Logging.AddMailServerLogging(builder.Configuration);
 var adminCertificate = AdminWebHosting.ConfigureAdminListeners(builder);
 builder.Services.AddMailServerInfrastructure(builder.Configuration);
-builder.Services.AddClusterTransportHost();
 var runAll = builder.Configuration.GetValue("RunAll:Enabled", false);
 // RunAll 模式用于单进程便携部署；生产拆分部署时 API 只加载管理端相关插件和服务。
 builder.Services.AddMailServerPlugins(builder.Configuration, runAll ? "all" : "api");
@@ -75,7 +74,6 @@ if (runAll)
     builder.Services.AddHostedService<SentCopyBackgroundService>();
     builder.Services.AddHostedService<TlsReportBackgroundService>();
     builder.Services.AddHostedService<MaintenanceBackgroundService>();
-    builder.Services.AddHostedService<ReplicationBackgroundService>();
 }
 builder.Services.ConfigureHttpJsonOptions(options =>
     options.SerializerOptions.Converters.Add(new JsonStringEnumConverter()));
@@ -240,33 +238,6 @@ app.Use(async (context, next) =>
 });
 app.Use(async (context, next) =>
 {
-    var isMutation = !HttpMethods.IsGet(context.Request.Method)
-                     && !HttpMethods.IsHead(context.Request.Method)
-                     && !HttpMethods.IsOptions(context.Request.Method);
-    var recoveryOperation = (HttpMethods.IsDelete(context.Request.Method)
-                             && (context.Request.Path.Equals("/api/v1/cluster")
-                                 || context.Request.Path.StartsWithSegments("/api/v1/cluster/nodes")))
-                            || (HttpMethods.IsPost(context.Request.Method)
-                                && context.Request.Path.Equals("/api/v1/cluster/recover-primary"));
-    var exempt = context.Request.Path.StartsWithSegments("/api/v1/health")
-                 || context.Request.Path.StartsWithSegments("/api/v1/auth/token")
-                 || context.Request.Path.StartsWithSegments("/api/v1/session")
-                 || recoveryOperation;
-    if (isMutation && !exempt)
-    {
-        // 所有管理端写操作必须落在可写主节点，避免多节点同时修改数据库状态。
-        var cluster = context.RequestServices.GetRequiredService<IClusterLeaseService>();
-        if (!await cluster.IsWritableAsync(context.RequestAborted))
-        {
-            context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
-            await context.Response.WriteAsJsonAsync(new { error = "This node is not the writable cluster primary." });
-            return;
-        }
-    }
-    await next();
-});
-app.Use(async (context, next) =>
-{
     if (context.Request.Path.StartsWithSegments("/swagger")
         && context.User.Identity?.IsAuthenticated != true)
     {
@@ -293,11 +264,7 @@ app.MapGet("/api/v1/health", async (IDbContextFactory<MailDbContext> factory, Ca
 }).AllowAnonymous();
 
 app.MapGet("/api/v1/health/live", () => Results.Ok(new { status = "alive" })).AllowAnonymous();
-app.MapGet("/api/v1/health/ready", async (IClusterHealthService cluster, CancellationToken cancellationToken) =>
-{
-    var health = await cluster.GetAsync(cancellationToken);
-    return health.Writable ? Results.Ok(health) : Results.Json(health, statusCode: StatusCodes.Status503ServiceUnavailable);
-}).AllowAnonymous();
+app.MapGet("/api/v1/health/ready", () => Results.Ok(new { status = "ready" })).AllowAnonymous();
 app.MapPost("/api/v1/auth/token", async (
     LoginRequest request,
     AdminApplicationService administration,
@@ -369,122 +336,6 @@ api.MapDelete("/recycle-bin/{id:guid}", async (Guid id, IRecycleBinService recyc
     await recycle.PurgeAsync(id, cancellationToken);
     return Results.NoContent();
 }).RequirePermission(PermissionCodes.TaskManage);
-api.MapGet("/cluster", async (ClusterManagementService clusters, CancellationToken cancellationToken) =>
-    Results.Ok(await clusters.GetOverviewAsync(cancellationToken)))
-    .RequirePermission(PermissionCodes.ClusterRead);
-api.MapPost("/cluster", async (
-    CreateClusterRequest request,
-    HttpContext http,
-    ClusterManagementService clusters,
-    CancellationToken cancellationToken) =>
-{
-    try { return Results.Ok(await clusters.CreateAsync(request, Actor(http), cancellationToken)); }
-    catch (ArgumentException exception) { return Results.BadRequest(new { error = exception.Message }); }
-    catch (InvalidOperationException exception) { return Results.Conflict(new { error = exception.Message }); }
-}).RequirePermission(PermissionCodes.ClusterManage);
-api.MapDelete("/cluster", async (
-    string confirmName,
-    HttpContext http,
-    ClusterManagementService clusters,
-    CancellationToken cancellationToken) =>
-{
-    try
-    {
-        await clusters.DeleteClusterAsync(confirmName, Actor(http), cancellationToken);
-        return Results.NoContent();
-    }
-    catch (InvalidOperationException exception) { return Results.Conflict(new { error = exception.Message }); }
-}).RequirePermission(PermissionCodes.ClusterManage);
-api.MapGet("/cluster/invitations", async (ClusterManagementService clusters, CancellationToken cancellationToken) =>
-    Results.Ok(await clusters.ListInvitationsAsync(cancellationToken)))
-    .RequirePermission(PermissionCodes.ClusterManage);
-api.MapPost("/cluster/invitations", async (
-    CreateClusterInvitationRequest request,
-    HttpContext http,
-    ClusterManagementService clusters,
-    CancellationToken cancellationToken) =>
-{
-    try { return Results.Ok(await clusters.CreateInvitationAsync(request.Role, Actor(http), cancellationToken)); }
-    catch (ArgumentException exception) { return Results.BadRequest(new { error = exception.Message }); }
-    catch (InvalidOperationException exception) { return Results.Conflict(new { error = exception.Message }); }
-}).RequirePermission(PermissionCodes.ClusterManage);
-api.MapDelete("/cluster/invitations/{id:guid}", async (
-    Guid id,
-    HttpContext http,
-    ClusterManagementService clusters,
-    CancellationToken cancellationToken) =>
-{
-    try
-    {
-        await clusters.RevokeInvitationAsync(id, Actor(http), cancellationToken);
-        return Results.NoContent();
-    }
-    catch (KeyNotFoundException) { return Results.NotFound(new { error = "Invitation not found." }); }
-}).RequirePermission(PermissionCodes.ClusterManage);
-api.MapDelete("/cluster/nodes/{nodeId}", async (
-    string nodeId,
-    HttpContext http,
-    ClusterManagementService clusters,
-    CancellationToken cancellationToken) =>
-{
-    try { await clusters.RemoveNodeAsync(nodeId, Actor(http), cancellationToken); return Results.NoContent(); }
-    catch (KeyNotFoundException) { return Results.NotFound(); }
-    catch (InvalidOperationException exception) { return Results.Conflict(new { error = exception.Message }); }
-}).RequirePermission(PermissionCodes.ClusterManage);
-api.MapPost("/cluster/recover-primary", async (
-    RecoverPrimaryRequest request,
-    HttpContext http,
-    ClusterManagementService clusters,
-    CancellationToken cancellationToken) =>
-{
-    try
-    {
-        await clusters.RecoverPrimaryAsync(request, Actor(http), cancellationToken);
-        return Results.Ok(new { recovered = true });
-    }
-    catch (InvalidOperationException exception) { return Results.Conflict(new { error = exception.Message }); }
-}).RequirePermission(PermissionCodes.ClusterManage);
-api.MapPost("/cluster/nodes/{nodeId}/resync", async (
-    string nodeId,
-    HttpContext http,
-    ClusterManagementService clusters,
-    CancellationToken cancellationToken) =>
-{
-    try
-    {
-        await clusters.RequestResynchronizationAsync(nodeId, Actor(http), cancellationToken);
-        return Results.Accepted();
-    }
-    catch (KeyNotFoundException) { return Results.NotFound(new { error = "Standby node not found." }); }
-}).RequirePermission(PermissionCodes.ClusterManage);
-api.MapPost("/cluster/promote", async (IClusterLeaseService lease, CancellationToken cancellationToken) =>
-    await lease.TryAcquirePrimaryAsync(cancellationToken)
-        ? Results.Ok(new { promoted = true })
-        : Results.Conflict(new { error = "The witness did not grant the primary lease." }))
-    .RequirePermission(PermissionCodes.ClusterManage);
-api.MapPost("/cluster/transport/repair", async (
-    HttpContext http,
-    ClusterManagementService clusters,
-    CancellationToken cancellationToken) =>
-{
-    try { await clusters.RepairLocalPrimaryTransportAsync(Actor(http), cancellationToken); return Results.Accepted(); }
-    catch (InvalidOperationException exception) { return Results.Conflict(new { error = exception.Message }); }
-}).RequirePermission(PermissionCodes.ClusterManage);
-api.MapPost("/cluster/replication/{nodeId}/reset", async (
-    string nodeId,
-    IDbContextFactory<MailDbContext> factory,
-    CancellationToken cancellationToken) =>
-{
-    await using var db = await factory.CreateDbContextAsync(cancellationToken);
-    var cursor = await db.ReplicationCursors.SingleOrDefaultAsync(x => x.NodeId == nodeId, cancellationToken);
-    if (cursor is null) return Results.NotFound();
-    cursor.LastAppliedSequence = 0;
-    cursor.LastError = "Full resynchronization requested by administrator.";
-    cursor.UpdatedAt = DateTimeOffset.UtcNow;
-    await db.SaveChangesAsync(cancellationToken);
-    return Results.NoContent();
-}).RequirePermission(PermissionCodes.ClusterManage);
-
 api.MapGet("/audit", async (
     string? search,
     AuditCategory? category,

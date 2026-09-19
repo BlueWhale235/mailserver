@@ -36,7 +36,6 @@ const pageOptions = computed(() => [
   { title: '概览', value: '/', permission: 'dashboard.read' },
   { title: '域与邮箱', value: '/domains', permission: 'domain.read' },
   { title: '投递', value: '/delivery', permission: 'queue.read' },
-  { title: '集群', value: '/cluster', permission: 'cluster.read' },
   { title: '管理员与权限', value: '/system/admins', permission: 'admin.account.read' },
   { title: 'API Key', value: '/system/api-keys', permission: 'api-key.read' },
   { title: '计划任务', value: '/system/tasks', permission: 'task.read' },
@@ -56,7 +55,6 @@ const items = [
   { title: '域与邮箱', icon: 'mdi-at', to: '/domains' },
   { title: '投递', icon: 'mdi-send-outline', to: '/delivery' },
   { title: '邮件安全', icon: 'mdi-shield-check-outline', to: '/security' },
-  { title: '集群', icon: 'mdi-server-network', to: '/cluster' },
   { title: '系统', icon: 'mdi-cog-outline', to: '/system' },
 ]
 
@@ -99,7 +97,7 @@ async function logout() {
       <template #append>
         <div class="node-state">
           <v-icon size="18">mdi-information-outline</v-icon>
-          <div><b>{{ isPreviewMode() ? '演示环境' : '邮件管理控制台' }}</b><small>{{ isPreviewMode() ? '当前展示预览数据' : '节点健康状态请查看集群' }}</small></div>
+          <div><b>{{ isPreviewMode() ? '演示环境' : '邮件管理控制台' }}</b><small>{{ isPreviewMode() ? '当前展示预览数据' : '服务运行状态请查看概览' }}</small></div>
         </div>
         <v-list nav density="comfortable">
           <v-list-item

@@ -55,8 +55,7 @@ public sealed record AuditDetailView(
 public sealed record AuditExportRequest(Guid[] Ids);
 
 public sealed class AuditLogService(
-    IDbContextFactory<MailDbContext> dbFactory,
-    IOptions<ClusterOptions> cluster)
+    IDbContextFactory<MailDbContext> dbFactory)
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
@@ -140,7 +139,7 @@ public sealed class AuditLogService(
             ["message"] = message,
             ["elapsedMilliseconds"] = audit.ElapsedMilliseconds,
             ["requestId"] = audit.RequestId,
-            ["nodeId"] = audit.NodeId ?? cluster.Value.NodeId
+            ["nodeId"] = audit.NodeId ?? Environment.MachineName
         };
         return new AuditRecord
         {
@@ -150,7 +149,7 @@ public sealed class AuditLogService(
             Detail = $"{audit.Stage}: {message}",
             Category = AuditCategory.Plugin,
             Status = status,
-            NodeId = audit.NodeId ?? cluster.Value.NodeId,
+            NodeId = audit.NodeId ?? Environment.MachineName,
             RequestId = audit.RequestId,
             RelatedId = audit.RelatedId,
             DurationMilliseconds = audit.ElapsedMilliseconds,
@@ -178,7 +177,6 @@ public sealed class AuditLogService(
             || action.Contains("cleanup", StringComparison.OrdinalIgnoreCase)
             || action.Contains("snapshot", StringComparison.OrdinalIgnoreCase))
             return AuditCategory.BackgroundTask;
-        if (action.StartsWith("cluster.", StringComparison.OrdinalIgnoreCase)) return AuditCategory.Node;
         if (action.Contains("password", StringComparison.OrdinalIgnoreCase)
             || action.Contains("api-key", StringComparison.OrdinalIgnoreCase)
             || action.Contains("firewall", StringComparison.OrdinalIgnoreCase))
@@ -236,7 +234,6 @@ public sealed class AuditLogService(
                     || (x.Category == null && (x.Action.Contains("delete") || x.Action.Contains("revoke") || x.Action.Contains("purge")))),
                 AuditCategory.BackgroundTask => query.Where(x => x.Category == category
                     || (x.Category == null && (x.Action.StartsWith("task.") || x.Action.Contains("reconcile") || x.Action.Contains("cleanup") || x.Action.Contains("snapshot")))),
-                AuditCategory.Node => query.Where(x => x.Category == category || (x.Category == null && x.Action.StartsWith("cluster."))),
                 AuditCategory.Security => query.Where(x => x.Category == category
                     || (x.Category == null && (x.Action.Contains("password") || x.Action.Contains("api-key") || x.Action.Contains("firewall")))),
                 AuditCategory.Update => query.Where(x => x.Category == category
@@ -344,9 +341,6 @@ public sealed class AuditLogService(
             ["admin.delete"] = "删除管理员",
             ["task.run"] = "执行后台任务",
             ["task.update"] = "编辑后台任务",
-            ["cluster.node.join"] = "节点加入",
-            ["cluster.node.recover"] = "节点恢复",
-            ["cluster.node.unreachable"] = "节点不可达",
             ["plugin.settings.update"] = "修改插件配置",
             ["plugin.order.update"] = "调整插件顺序",
             ["plugin.load.succeeded"] = "插件加载成功",
@@ -393,9 +387,6 @@ public sealed class AuditLogService(
         "admin.delete" => "删除管理员",
         "task.run" => "后台任务执行",
         "task.update" => "编辑后台任务",
-        "cluster.node.join" => "节点加入",
-        "cluster.node.recover" => "节点恢复",
-        "cluster.node.unreachable" => "节点不可达",
         "plugin.settings.update" => "插件配置变更",
         "plugin.order.update" => "插件顺序调整",
         "plugin.load.failed" => "插件加载失败",
@@ -422,7 +413,7 @@ public sealed class AuditLogService(
             "folder" or "mailbox-folder" => "邮箱文件夹",
             "plugin" => "插件",
             "task" => "后台任务",
-            "cluster" or "node" => "节点",
+            "node" => "节点",
             _ => parts[0]
         };
         var operation = parts[^1].ToLowerInvariant() switch

@@ -206,3 +206,31 @@
 - 后端 `dotnet test` 260 项通过（新增 `OutgoingRuleCanRejectAndForwardSentCopies`）；前端 ESLint、76 项 Vitest 与 TypeScript/Vite 构建通过（主包仍大于 500 kB 告警，属已知项）。
 
 本轮仍未验证：真实后端已启动后的规则增删改与 SMTP 直连退信、不同权限下的规则可见性、通配符在超大邮件正文上的性能表现。总体目标仍未完成。
+
+## 2026-09-19：移除集群与主备复制模块
+
+按产品决定，集群/主备/见证（Cluster / Replication / Witness）整块能力暂时下线，从代码库中整体删除，回归单机部署形态。
+
+后端：
+
+- 删除 `MailServer.Cluster` 项目、`ClusterManagementService` / `ClusterTransport` / `ClusterTransportClient` / `ReplicationJournalInterceptor`，以及领域模型中的集群枚举与实体（节点、证书、租约、快照、复制日志等）。
+- `DependencyInjection` 移除全部集群服务/托管服务注册；`TaskAndClusterServices` 删除复制日志拦截器、集群租约、见证租约、节流器、集群校验/快照任务与复制后台服务，任务执行者改为本机标识（`主机名:进程号`）。
+- API 移除 `/cluster*` 端点、写入守卫中的“可写主节点”判定与 `/health/ready` 的集群健康依赖，改为本地就绪；SMTP/IMAP 移除“仅主节点接受写入会话”的拒绝分支与等待副本确认逻辑。
+- 权限移除 `cluster.read`/`cluster.manage`；审计移除 `AuditCategory.Node` 与 `cluster.*` 文案映射（保留 `NodeId` 字段用于记录操作来源主机）。
+- 手改三套迁移（SQLite/PostgreSQL/MySQL）与模型快照：删除 `cluster_*`/`replication_*` 建表、索引、实体快照，以及 `scheduled_tasks.IsClusterTask` 列。
+- CLI 移除 `cluster join|force-remove|force-leave|recover-primary` 与 `run cluster`，帮助文案与默认配置同步；`MailServer.slnx` 与各 csproj 移除项目引用。
+- 配置删除 `Cluster`/`ClusterTransport`/`ClusterSyncThrottle` 配置节；文档与 README 移除集群章节。
+
+前端：
+
+- 删除 `ClusterView` 与管理端集群组件、mock 集群预览状态与 `/cluster*` mock 端点；左侧菜单与“查找功能页面”移除「集群」入口，路由移除 `/cluster`（访问 `/admin/cluster` 回落仪表盘）。
+- 审计类别移除「节点与集群」，计划任务移除「集群主节点/集群检查」文案与 `cluster.verify` 预览任务，登录页与页面描述同步去除“集群”措辞。
+
+验证：
+
+- 后端 `dotnet build MailServer.slnx`：0 警告 0 错误；`dotnet test`：227 项通过（原 260 项中 33 项集群用例随模块移除）。
+- 迁移实测：`mailserver init` 在全新 SQLite 上成功应用，schema 中不再出现任何 `cluster_*`/`replication_*` 表。
+- 前端 ESLint、71 项 Vitest 通过，Vite 生产构建通过。
+- 浏览器巡检（`?preview=1`）12 个顶层页面控制台无 error；左侧菜单无「集群」，`/admin/cluster` 正确回落概览。
+
+本轮仍未验证：真实 PostgreSQL/MySQL 迁移在既有数据库上的升级路径、真实后端启动后的端到端写入。总体目标仍未完成。

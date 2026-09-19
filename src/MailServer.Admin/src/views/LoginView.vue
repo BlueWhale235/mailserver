@@ -117,7 +117,7 @@ async function submit() {
 
       <div class="login-panel">
         <h2 id="login-title">欢迎回来</h2>
-        <p class="login-subtitle">登录后管理域、投递、安全策略与集群状态</p>
+        <p class="login-subtitle">登录后管理域、投递、安全策略与运行状态</p>
 
         <v-form ref="form" class="login-form" :aria-busy="loading" @submit.prevent="submit">
           <v-alert v-if="error" role="alert" type="error" variant="tonal" density="compact" class="login-notice">

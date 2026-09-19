@@ -11,7 +11,6 @@ builder.Services.AddHostedService<DeliveryWorker>();
 builder.Services.AddHostedService<SentCopyBackgroundService>();
 builder.Services.AddHostedService<TlsReportBackgroundService>();
 builder.Services.AddHostedService<MaintenanceBackgroundService>();
-builder.Services.AddHostedService<ReplicationBackgroundService>();
 
 var host = builder.Build();
 await host.Services.VerifyMailDatabaseAsync();

@@ -62,8 +62,7 @@ public sealed partial class ImapServerService(
     IOptions<ImapServerOptions> options,
     DomainCertificateProvider certificateProvider,
     ILogger<ImapServerService> logger,
-    IpFirewallService? firewall = null,
-    IClusterLeaseService? clusterLease = null) : BackgroundService
+    IpFirewallService? firewall = null) : BackgroundService
 {
     private const int MaximumBodyStructureDepth = 64;
     private const int MaximumBodyStructureParts = 2048;
@@ -166,12 +165,6 @@ public sealed partial class ImapServerService(
                     stream,
                     TimeSpan.FromSeconds(_options.CommandTimeoutSeconds),
                     _options.MaximumAppendBytes);
-                if (clusterLease is not null && !await clusterLease.IsWritableAsync(cancellationToken))
-                {
-                    // IMAP 命令可能修改 flag、邮箱和 UID 状态，因此只允许主节点提供会话服务。
-                    await connection.WriteLineAsync("* BYE This node is not the writable cluster primary", cancellationToken);
-                    return;
-                }
                 using (var scope = scopeFactory.CreateScope())
                 {
                     var pipeline = scope.ServiceProvider.GetService<PluginPipeline>();

@@ -16,7 +16,6 @@ const router = createRouter({
         { path: 'delivery', name: 'delivery', component: () => import('./views/DeliveryView.vue') },
         { path: 'security', name: 'security', component: () => import('./views/SecurityView.vue') },
         { path: 'security/quarantine', name: 'quarantine', component: () => import('./views/QuarantineView.vue') },
-        { path: 'cluster', name: 'cluster', component: () => import('./views/ClusterView.vue') },
         { path: 'system', name: 'system', component: () => import('./views/SystemView.vue') },
         { path: 'system/admins', name: 'system-admins', component: () => import('./views/system/AdminsView.vue') },
         { path: 'system/api-keys', name: 'system-api-keys', component: () => import('./views/system/ApiKeysView.vue') },

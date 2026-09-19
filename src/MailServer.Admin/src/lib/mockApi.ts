@@ -1,8 +1,5 @@
-import type { ClusterInvitation } from './clusterInvitations'
 import { inspectFirewallInput } from './firewallInput'
 import type { DomainCertificateInspection } from './domainCertificate'
-
-const previewInvitations: ClusterInvitation[] = []
 
 interface MockDomain {
   id: string
@@ -204,7 +201,6 @@ interface MockScheduledTask {
   name: string
   isSystem: boolean
   isEnabled: boolean
-  isClusterTask: boolean
   intervalMinutes: number
   timeoutSeconds: number
   batchSize: number
@@ -241,7 +237,7 @@ interface MockRecycleBinItem {
   status: MockCleanupQueueStatus
 }
 
-type MockAuditCategory = 'Create' | 'Update' | 'Delete' | 'BackgroundTask' | 'Node' | 'Security' | 'Plugin' | 'Other'
+type MockAuditCategory = 'Create' | 'Update' | 'Delete' | 'BackgroundTask' | 'Security' | 'Plugin' | 'Other'
 type MockAuditStatus = 'Running' | 'Succeeded' | 'Failed' | 'Warning'
 
 interface MockAuditEntry {
@@ -304,49 +300,6 @@ let previewMode = import.meta.env.DEV && (
   || globalThis.sessionStorage.getItem(previewStorageKey) === '1')
 const now = new Date('2026-09-18T12:30:00Z')
 let previewSession = true
-const previewCluster = {
-  configuration: { id: 'preview-cluster', name: '预览集群', primaryNodeId: 'preview-primary' },
-  health: { alive: true, writable: true, nodeId: 'preview-primary', role: 'Primary', hasQuorum: true, lastSequence: 1250, replicationLag: 0 },
-  recoveryRequired: false,
-  transport: { enabled: true, isListening: false, status: 'failed', advertiseEndpoint: 'tls://primary.example.test:7443', lastError: '演示状态：传输监听失败，可测试修复流程。' },
-  nodes: [
-    { id: 'preview-primary', name: '演示主节点', role: 'Primary', status: 'Healthy', endpoint: 'tls://primary.example.test:7443', version: '2.0.0', lastHeartbeatAt: '2026-09-17T06:00:00Z', appliedSequence: 1250, safeSequence: 1240, initializationProgress: 100 },
-    { id: 'preview-standby', name: '演示副本', role: 'Standby', status: 'ReadOnly', endpoint: 'tls://standby.example.test:7443', version: '2.0.0', lastHeartbeatAt: '2026-09-17T05:59:50Z', appliedSequence: 1240, safeSequence: 1240, initializationProgress: 100 },
-  ],
-  cursors: [{ nodeId: 'preview-standby', lastAppliedSequence: 1240, syncStatus: 'CatchingUp', lastSuccessAt: '2026-09-17T05:59:45Z', lastError: '' }],
-}
-let previewClusterCreated = false
-let previewPrimaryRecovered = false
-function clusterPreviewState() {
-  const scenario = new globalThis.URLSearchParams(globalThis.location.search).get('clusterState')
-  if (scenario === 'unconfigured') {
-    if (!previewClusterCreated) return {
-      configuration: null,
-      health: { alive: true, writable: true, nodeId: 'local-node', role: 'Primary', hasQuorum: true, lastSequence: 0, replicationLag: 0 },
-      recoveryRequired: false,
-      transport: { enabled: false, isListening: false, status: 'disabled', advertiseEndpoint: '', lastError: '' },
-      nodes: [], cursors: [],
-    }
-    const created = structuredClone(previewCluster)
-    created.nodes = created.nodes.filter(node => node.role === 'Primary')
-    created.cursors = []
-    created.transport.enabled = true
-    created.transport.isListening = true
-    created.transport.status = 'listening'
-    created.transport.lastError = ''
-    return created
-  }
-  if (scenario === 'recovery') {
-    const state = structuredClone(previewCluster)
-    state.nodes = state.nodes.filter(node => node.role === 'Primary')
-    state.cursors = []
-    state.recoveryRequired = !previewPrimaryRecovered
-    state.health.writable = previewPrimaryRecovered
-    state.health.hasQuorum = previewPrimaryRecovered
-    return state
-  }
-  return structuredClone(previewCluster)
-}
 let previewFirewall = [{ id: 'e548a192-5f60-4798-af3f-fae386ca52b1', cidr: '192.0.2.0/24', note: '演示拦截规则', isEnabled: true }]
 const previewPermissionCatalog = [
   { key: 'global', name: '全局访问', permissions: [
@@ -377,11 +330,9 @@ const previewPermissionCatalog = [
     { code: 'dns.read', name: 'DNS 诊断只读', description: '执行并查看 DNS 诊断。', groupKey: 'system', supportsDomainScope: false },
     { code: 'dns.manage', name: 'DNS 诊断管理', description: '管理 DNS 诊断配置。', groupKey: 'system', supportsDomainScope: false },
   ] },
-  { key: 'operations', name: '任务与集群', permissions: [
+  { key: 'operations', name: '任务中心', permissions: [
     { code: 'task.read', name: '任务中心只读', description: '查看计划任务、执行历史和回收站。', groupKey: 'operations', supportsDomainScope: false },
     { code: 'task.manage', name: '任务中心管理', description: '配置和执行任务，管理回收项。', groupKey: 'operations', supportsDomainScope: false },
-    { code: 'cluster.read', name: '集群只读', description: '查看节点、同步和仲裁状态。', groupKey: 'operations', supportsDomainScope: false },
-    { code: 'cluster.manage', name: '集群管理', description: '管理同步和受控集群恢复。', groupKey: 'operations', supportsDomainScope: false },
   ] },
 ]
 let previewAdmins: MockAdmin[] = [
@@ -444,34 +395,28 @@ const previewApiKeyGrants: Record<string, MockPermissionGrant[]> = {
 const previewTasks: MockScheduledTask[] = [
   {
     id: 'f0e1d2c3-b4a5-4678-9012-000000000001', type: 'cache.cleanup', name: '缓存清理',
-    isSystem: true, isEnabled: true, isClusterTask: false, intervalMinutes: 60, timeoutSeconds: 600,
+    isSystem: true, isEnabled: true, intervalMinutes: 60, timeoutSeconds: 600,
     batchSize: 500, maximumAttempts: 3, status: 'Idle', nextRunAt: '2026-09-18T05:00:00Z', lastRunAt: '2026-09-18T04:00:00Z',
   },
   {
     id: 'f0e1d2c3-b4a5-4678-9012-000000000002', type: 'cleanup.recycle', name: '回收队列清理',
-    isSystem: true, isEnabled: true, isClusterTask: true, intervalMinutes: 1440, timeoutSeconds: 900,
+    isSystem: true, isEnabled: true, intervalMinutes: 1440, timeoutSeconds: 900,
     batchSize: 100, maximumAttempts: 3, status: 'Idle', nextRunAt: '2026-09-19T02:00:00Z', lastRunAt: '2026-09-18T02:00:00Z',
   },
   {
-    id: 'f0e1d2c3-b4a5-4678-9012-000000000003', type: 'cluster.verify', name: '主备同步检查',
-    isSystem: true, isEnabled: true, isClusterTask: true, intervalMinutes: 5, timeoutSeconds: 120,
-    batchSize: 100, maximumAttempts: 3, status: 'Failed', nextRunAt: '2026-09-18T04:25:00Z', lastRunAt: '2026-09-18T04:20:00Z',
-  },
-  {
     id: 'f0e1d2c3-b4a5-4678-9012-000000000004', type: 'quota.reconcile', name: '配额重新计算',
-    isSystem: true, isEnabled: false, isClusterTask: true, intervalMinutes: 43200, timeoutSeconds: 3600,
+    isSystem: true, isEnabled: false, intervalMinutes: 43200, timeoutSeconds: 3600,
     batchSize: 100, maximumAttempts: 3, status: 'Paused', nextRunAt: '2026-10-01T02:00:00Z', lastRunAt: '2026-09-01T02:00:00Z',
   },
   {
     id: 'f0e1d2c3-b4a5-4678-9012-000000000005', type: 'storage.integrity-check', name: '存储完整性检查',
-    isSystem: true, isEnabled: true, isClusterTask: true, intervalMinutes: 1440, timeoutSeconds: 7200,
+    isSystem: true, isEnabled: true, intervalMinutes: 1440, timeoutSeconds: 7200,
     batchSize: 1000, maximumAttempts: 3, status: 'Running', nextRunAt: '2026-09-19T03:00:00Z', lastRunAt: '2026-09-18T04:18:00Z',
   },
 ]
 
 let previewTaskExecutions: MockTaskExecution[] = [
   { id: '0aa00000-0000-4000-8000-000000000001', scheduledTaskId: 'f0e1d2c3-b4a5-4678-9012-000000000005', status: 'Running', nodeId: 'preview-primary:4102', startedAt: '2026-09-18T04:18:00Z', processedCount: 386, releasedBytes: 0, attempt: 1 },
-  { id: '0aa00000-0000-4000-8000-000000000002', scheduledTaskId: 'f0e1d2c3-b4a5-4678-9012-000000000003', status: 'Failed', nodeId: 'preview-primary:4102', startedAt: '2026-09-18T04:20:00Z', completedAt: '2026-09-18T04:20:08Z', processedCount: 1, releasedBytes: 0, attempt: 1, error: '副本节点 preview-standby 心跳超时 38 秒' },
   { id: '0aa00000-0000-4000-8000-000000000003', scheduledTaskId: 'f0e1d2c3-b4a5-4678-9012-000000000001', status: 'Succeeded', nodeId: 'preview-primary:4102', startedAt: '2026-09-18T04:00:00Z', completedAt: '2026-09-18T04:00:03Z', processedCount: 218, releasedBytes: 73400320, attempt: 1 },
   { id: '0aa00000-0000-4000-8000-000000000004', scheduledTaskId: 'f0e1d2c3-b4a5-4678-9012-000000000002', status: 'Succeeded', nodeId: 'preview-primary:4102', startedAt: '2026-09-18T02:00:00Z', completedAt: '2026-09-18T02:00:11Z', processedCount: 14, releasedBytes: 187695104, attempt: 1 },
   { id: '0aa00000-0000-4000-8000-000000000005', scheduledTaskId: 'f0e1d2c3-b4a5-4678-9012-000000000004', status: 'Succeeded', nodeId: 'preview-primary:4102', startedAt: '2026-09-01T02:00:00Z', completedAt: '2026-09-01T02:01:22Z', processedCount: 248, releasedBytes: 0, attempt: 1 },
@@ -480,10 +425,10 @@ let previewTaskExecutions: MockTaskExecution[] = [
 let previewAuditEntries: MockAuditEntry[] = [
   {
     id: '1a100000-0000-4000-8000-000000000001', number: '1a100000', content: '执行后台任务', category: 'BackgroundTask', status: 'Failed',
-    actor: 'system', action: 'task.run', resource: 'task:cluster.verify', detail: '副本节点 preview-standby 心跳超时 38 秒', remoteAddress: '127.0.0.1',
-    nodeId: 'preview-primary', requestId: 'req-task-9041', relatedId: '0aa00000-0000-4000-8000-000000000002', durationMilliseconds: 8042,
+    actor: 'system', action: 'task.run', resource: 'task:quota.reconcile', detail: '配额台账与邮箱用量不一致，已中止并等待下次重试', remoteAddress: '127.0.0.1',
+    nodeId: 'preview-primary', requestId: 'req-task-9041', relatedId: '0aa00000-0000-4000-8000-000000000003', durationMilliseconds: 8042,
     createdAt: '2026-09-18T04:20:08Z', changes: [],
-    rawJson: JSON.stringify({ action: 'task.run', task: 'cluster.verify', status: 'Failed', token: '***', operationIp: '127.0.0.1' }, null, 2),
+    rawJson: JSON.stringify({ action: 'task.run', task: 'quota.reconcile', status: 'Failed', token: '***', operationIp: '127.0.0.1' }, null, 2),
   },
   {
     id: '1a100000-0000-4000-8000-000000000002', number: '1a100001', content: '邮件格式校验 插件隔离邮件', category: 'Plugin', status: 'Warning',
@@ -505,10 +450,10 @@ let previewAuditEntries: MockAuditEntry[] = [
     rawJson: JSON.stringify({ action: 'api-key.refresh', apiKey: '***', operationIp: '192.0.2.18' }, null, 2),
   },
   {
-    id: '1a100000-0000-4000-8000-000000000005', number: '1a100004', content: '节点不可达', category: 'Node', status: 'Warning',
-    actor: 'system', action: 'cluster.node.unreachable', resource: 'node:preview-standby', detail: '连续 3 次心跳检查失败', nodeId: 'preview-primary',
-    requestId: 'req-cluster-3301', durationMilliseconds: 30012, createdAt: '2026-09-18T03:25:47Z', changes: [],
-    rawJson: JSON.stringify({ nodeId: 'preview-standby', heartbeatFailures: 3 }, null, 2),
+    id: '1a100000-0000-4000-8000-000000000005', number: '1a100004', content: 'DNS 诊断失败', category: 'Other', status: 'Warning',
+    actor: 'system', action: 'domain.dns.diagnose', resource: 'domain:northwind.cn', detail: 'SPF 记录未生效，等待 DNS 传播', nodeId: 'preview-primary',
+    requestId: 'req-dns-3301', durationMilliseconds: 30012, createdAt: '2026-09-18T03:25:47Z', changes: [],
+    rawJson: JSON.stringify({ domain: 'northwind.cn', record: 'SPF', status: 'missing' }, null, 2),
   },
   {
     id: '1a100000-0000-4000-8000-000000000006', number: '1a100005', content: '创建管理员', category: 'Create', status: 'Succeeded',
@@ -1008,54 +953,6 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
   if (path.split('?')[0] === '/quarantine/domains') return domains.map(domain => ({ id: domain.id, name: domain.name })) as T
   const url = new globalThis.URL(path, 'http://preview.local')
   const method = (init.method || 'GET').toUpperCase()
-  if (url.pathname === '/cluster/invitations' && method === 'GET') return structuredClone(previewInvitations) as T
-  if (url.pathname === '/cluster/invitations' && method === 'POST') {
-    const { role } = JSON.parse(String(init.body))
-    if (!['Standby', 'Witness'].includes(role)) throw new Error('只能邀请副本或见证节点')
-    if (previewCluster.nodes.some(node => node.role === role)) throw new Error('该角色已有节点')
-    const invitation: ClusterInvitation = { id: globalThis.crypto.randomUUID(), role, expiresAt: new Date(Date.now() + 15 * 60_000).toISOString(), used: false, revoked: false, token: null }
-    previewInvitations.unshift(invitation)
-    return { ...invitation, token: 'preview-only-not-a-real-credential-' + globalThis.crypto.randomUUID() } as T
-  }
-  const revokeInvitation = url.pathname.match(/^\/cluster\/invitations\/([^/]+)$/)
-  if (revokeInvitation && method === 'DELETE') {
-    const item = previewInvitations.find(invitation => invitation.id === revokeInvitation[1])
-    if (!item) throw new Error('邀请不存在')
-    item.revoked = true
-    return undefined as T
-  }
-  if (url.pathname === '/cluster' && method === 'GET') return clusterPreviewState() as T
-  if (url.pathname === '/cluster' && method === 'POST') {
-    const input = JSON.parse(String(init.body))
-    if (!input.name?.trim()) throw new Error('集群名称不能为空')
-    if (!String(input.endpoint).startsWith('tls://')) throw new Error('集群端点必须使用 tls://')
-    previewClusterCreated = true
-    previewCluster.configuration.name = input.name.trim()
-    previewCluster.nodes[0]!.endpoint = input.endpoint
-    previewCluster.transport.advertiseEndpoint = input.endpoint
-    return { id: previewCluster.configuration.id, name: previewCluster.configuration.name, primaryNodeId: previewCluster.configuration.primaryNodeId } as T
-  }
-  if (url.pathname === '/cluster/recover-primary' && method === 'POST') {
-    const input = JSON.parse(String(init.body))
-    if (input.confirmName !== previewCluster.configuration.name || input.confirmNodesFenced !== true) throw new Error('恢复确认信息不完整')
-    previewPrimaryRecovered = true
-    return { recovered: true } as T
-  }
-  if (url.pathname === '/cluster/transport/repair' && method === 'POST') {
-    previewCluster.transport.isListening = true
-    previewCluster.transport.status = 'listening'
-    previewCluster.transport.lastError = ''
-    return undefined as T
-  }
-  const clusterResync = url.pathname.match(/^\/cluster\/nodes\/([^/]+)\/resync$/)
-  if (clusterResync && method === 'POST') {
-    const node = previewCluster.nodes.find(item => item.id === decodeURIComponent(clusterResync[1]!) && item.role === 'Standby')
-    if (!node) throw new Error('未找到副本节点')
-    node.status = 'Synchronizing'; node.initializationProgress = 0
-    const cursor = previewCluster.cursors.find(item => item.nodeId === node.id)
-    if (cursor) { cursor.lastAppliedSequence = 0; cursor.lastError = '已请求全量重新同步' }
-    return undefined as T
-  }
   if (url.pathname === '/firewall/rules') {
     if (method === 'POST') {
       const input = JSON.parse(String(init.body))
@@ -1126,7 +1023,7 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
     if (task.status === 'Running') throw new Error('任务正在运行，不能重复触发')
     const startedAt = new Date()
     const executionId = globalThis.crypto.randomUUID()
-    const processedCount = task.type === 'cleanup.recycle' ? 6 : task.type === 'cluster.verify' ? 2 : 128
+    const processedCount = task.type === 'cleanup.recycle' ? 6 : 128
     const releasedBytes = task.type.includes('cleanup') ? 48 * 1024 * 1024 : 0
     previewTaskExecutions = [{
       id: executionId, scheduledTaskId: task.id, status: 'Succeeded', nodeId: 'preview-primary:4102',
@@ -2155,50 +2052,6 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
       return undefined as T
     }
     deliveryJobs = deliveryJobs.filter(item => item.id !== job.id)
-    return undefined as T
-  }
-
-  if (url.pathname === '/cluster/promote' && method === 'POST') {
-    const promoted = previewCluster.health.role !== 'Primary'
-    if (!promoted) throw new Error('本机已是主节点，无需提升')
-    previewCluster.configuration.primaryNodeId = previewCluster.health.nodeId
-    previewCluster.health.role = 'Primary'
-    previewCluster.health.writable = true
-    previewCluster.nodes.forEach(node => { if (node.id === previewCluster.health.nodeId) node.role = 'Primary' })
-    return { promoted: true } as T
-  }
-
-  const clusterNodeMatch = url.pathname.match(/^\/cluster\/nodes\/([^/]+)$/)
-  if (clusterNodeMatch && method === 'DELETE') {
-    const nodeId = decodeURIComponent(clusterNodeMatch[1]!)
-    if (!previewCluster.nodes.some(node => node.id === nodeId)) throw new Error('集群节点不存在')
-    if (nodeId === previewCluster.health.nodeId) throw new Error('不能移除本机节点')
-    previewCluster.nodes = previewCluster.nodes.filter(node => node.id !== nodeId)
-    previewCluster.cursors = previewCluster.cursors.filter(cursor => cursor.nodeId !== nodeId)
-    return undefined as T
-  }
-
-  const clusterReplicationMatch = url.pathname.match(/^\/cluster\/replication\/([^/]+)\/reset$/)
-  if (clusterReplicationMatch && method === 'POST') {
-    const nodeId = decodeURIComponent(clusterReplicationMatch[1]!)
-    const cursor = previewCluster.cursors.find(candidate => candidate.nodeId === nodeId)
-    if (!cursor) throw new Error('复制游标不存在')
-    cursor.lastAppliedSequence = 0
-    cursor.syncStatus = 'CatchingUp'
-    cursor.lastError = ''
-    return undefined as T
-  }
-
-  if (url.pathname === '/cluster' && method === 'DELETE') {
-    const confirmName = url.searchParams.get('confirmName') ?? ''
-    if (confirmName !== previewCluster.configuration.name) throw new Error('集群名称不匹配，请重新输入')
-    previewCluster.nodes = []
-    previewCluster.cursors = []
-    previewCluster.configuration = { id: 'local-node', name: '未配置', primaryNodeId: 'local-node' }
-    previewCluster.transport.enabled = false
-    previewCluster.transport.isListening = false
-    previewCluster.transport.status = 'disabled'
-    previewCluster.transport.lastError = ''
     return undefined as T
   }
 

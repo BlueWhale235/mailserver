@@ -6,9 +6,6 @@
     <Project Path="src/MailServer.Cli/MailServer.Cli.csproj">
       <Platform Solution="*|x64" Project="x64" />
     </Project>
-    <Project Path="src/MailServer.Cluster/MailServer.Cluster.csproj">
-      <Platform Solution="*|x64" Project="x64" />
-    </Project>
     <Project Path="src/MailServer.Domain/MailServer.Domain.csproj">
       <Platform Solution="*|x64" Project="x64" />
     </Project>

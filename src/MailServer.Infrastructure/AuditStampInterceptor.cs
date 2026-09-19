@@ -3,7 +3,6 @@ using MailServer.Domain;
 using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
-using Microsoft.Extensions.Options;
 
 namespace MailServer.Infrastructure;
 
@@ -11,8 +10,7 @@ namespace MailServer.Infrastructure;
 /// 在审计记录写入数据库前统一补充请求来源，避免业务服务各自解析代理头或遗漏节点信息。
 /// </summary>
 public sealed class AuditStampInterceptor(
-    IHttpContextAccessor httpContextAccessor,
-    IOptions<ClusterOptions> cluster) : SaveChangesInterceptor
+    IHttpContextAccessor httpContextAccessor) : SaveChangesInterceptor
 {
     public override InterceptionResult<int> SavingChanges(
         DbContextEventData eventData,
@@ -39,7 +37,7 @@ public sealed class AuditStampInterceptor(
         foreach (var entry in db.ChangeTracker.Entries<AuditRecord>()
                      .Where(x => x.State == EntityState.Added))
         {
-            entry.Entity.NodeId ??= cluster.Value.NodeId;
+            entry.Entity.NodeId ??= Environment.MachineName;
             entry.Entity.RequestId ??= http?.TraceIdentifier;
             entry.Entity.RemoteAddress ??= operationIp;
         }

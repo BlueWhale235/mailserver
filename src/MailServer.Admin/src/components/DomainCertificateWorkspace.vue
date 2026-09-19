@@ -241,6 +241,8 @@ async function applyCertificate() {
     inspection.value = null
     inspectedSignature.value = ''
     notice.value = mode.value === 'path' ? '已绑定服务器路径证书并立即生效。' : '证书已上传并立即生效。'
+    // 启用成功后回到「当前证书」，让管理员立即核对生效结果，而不是停留在空的表单上。
+    activeSection.value = 'current'
     resetSecrets()
     emit('changed', saved)
   } catch (cause) {

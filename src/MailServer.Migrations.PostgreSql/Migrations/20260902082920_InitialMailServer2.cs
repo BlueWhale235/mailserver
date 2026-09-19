@@ -97,201 +97,6 @@ namespace MailServer.Migrations.PostgreSql.Migrations
                 });
 
             migrationBuilder.CreateTable(
-                name: "cluster_certificate_authorities",
-                columns: table => new
-                {
-                    Id = table.Column<Guid>(type: "uuid", nullable: false),
-                    Thumbprint = table.Column<string>(type: "character varying(128)", maxLength: 128, nullable: false),
-                    CertificatePem = table.Column<string>(type: "character varying(32768)", maxLength: 32768, nullable: false),
-                    ProtectedPrivateKeyPem = table.Column<string>(type: "character varying(32768)", maxLength: 32768, nullable: false),
-                    CreatedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
-                    NotBefore = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
-                    NotAfter = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
-                    CreatedBy = table.Column<string>(type: "character varying(256)", maxLength: 256, nullable: false)
-                },
-                constraints: table =>
-                {
-                    table.PrimaryKey("PK_cluster_certificate_authorities", x => x.Id);
-                });
-
-            migrationBuilder.CreateTable(
-                name: "cluster_certificate_revocations",
-                columns: table => new
-                {
-                    Id = table.Column<Guid>(type: "uuid", nullable: false),
-                    Thumbprint = table.Column<string>(type: "character varying(128)", maxLength: 128, nullable: false),
-                    NodeId = table.Column<string>(type: "character varying(128)", maxLength: 128, nullable: false),
-                    Reason = table.Column<string>(type: "character varying(512)", maxLength: 512, nullable: false),
-                    RevokedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false)
-                },
-                constraints: table =>
-                {
-                    table.PrimaryKey("PK_cluster_certificate_revocations", x => x.Id);
-                });
-
-            migrationBuilder.CreateTable(
-                name: "cluster_configuration",
-                columns: table => new
-                {
-                    Id = table.Column<Guid>(type: "uuid", nullable: false),
-                    Name = table.Column<string>(type: "character varying(128)", maxLength: 128, nullable: false),
-                    PrimaryNodeId = table.Column<string>(type: "character varying(128)", maxLength: 128, nullable: false),
-                    ClusterCaThumbprint = table.Column<string>(type: "character varying(128)", maxLength: 128, nullable: true),
-                    ProtectedCaPrivateKeyPem = table.Column<string>(type: "character varying(32768)", maxLength: 32768, nullable: true),
-                    CaCertificatePem = table.Column<string>(type: "character varying(32768)", maxLength: 32768, nullable: true),
-                    CreatedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
-                    CreatedBy = table.Column<string>(type: "character varying(256)", maxLength: 256, nullable: false)
-                },
-                constraints: table =>
-                {
-                    table.PrimaryKey("PK_cluster_configuration", x => x.Id);
-                });
-
-            migrationBuilder.CreateTable(
-                name: "cluster_events",
-                columns: table => new
-                {
-                    Id = table.Column<Guid>(type: "uuid", nullable: false),
-                    Type = table.Column<string>(type: "character varying(64)", maxLength: 64, nullable: false),
-                    NodeId = table.Column<string>(type: "character varying(128)", maxLength: 128, nullable: false),
-                    Detail = table.Column<string>(type: "character varying(4096)", maxLength: 4096, nullable: false),
-                    CreatedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false)
-                },
-                constraints: table =>
-                {
-                    table.PrimaryKey("PK_cluster_events", x => x.Id);
-                });
-
-            migrationBuilder.CreateTable(
-                name: "cluster_join_invitations",
-                columns: table => new
-                {
-                    Id = table.Column<Guid>(type: "uuid", nullable: false),
-                    TokenHash = table.Column<string>(type: "character varying(128)", maxLength: 128, nullable: false),
-                    Role = table.Column<string>(type: "character varying(32)", maxLength: 32, nullable: false),
-                    ExpiresAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
-                    UsedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true),
-                    RevokedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true),
-                    CreatedBy = table.Column<string>(type: "character varying(256)", maxLength: 256, nullable: false),
-                    CreatedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false)
-                },
-                constraints: table =>
-                {
-                    table.PrimaryKey("PK_cluster_join_invitations", x => x.Id);
-                });
-
-            migrationBuilder.CreateTable(
-                name: "cluster_leases",
-                columns: table => new
-                {
-                    Name = table.Column<string>(type: "character varying(64)", maxLength: 64, nullable: false),
-                    OwnerNodeId = table.Column<string>(type: "character varying(128)", maxLength: 128, nullable: false),
-                    Term = table.Column<long>(type: "bigint", nullable: false),
-                    ExpiresAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false)
-                },
-                constraints: table =>
-                {
-                    table.PrimaryKey("PK_cluster_leases", x => x.Name);
-                });
-
-            migrationBuilder.CreateTable(
-                name: "cluster_node_certificates",
-                columns: table => new
-                {
-                    Id = table.Column<Guid>(type: "uuid", nullable: false),
-                    NodeId = table.Column<string>(type: "character varying(128)", maxLength: 128, nullable: false),
-                    Thumbprint = table.Column<string>(type: "character varying(128)", maxLength: 128, nullable: false),
-                    CertificatePem = table.Column<string>(type: "character varying(32768)", maxLength: 32768, nullable: false),
-                    Status = table.Column<string>(type: "character varying(32)", maxLength: 32, nullable: false),
-                    NotBefore = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
-                    NotAfter = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
-                    CreatedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
-                    GraceUntil = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true),
-                    RevokedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true)
-                },
-                constraints: table =>
-                {
-                    table.PrimaryKey("PK_cluster_node_certificates", x => x.Id);
-                });
-
-            migrationBuilder.CreateTable(
-                name: "cluster_nodes",
-                columns: table => new
-                {
-                    Id = table.Column<string>(type: "character varying(128)", maxLength: 128, nullable: false),
-                    Name = table.Column<string>(type: "character varying(128)", maxLength: 128, nullable: false),
-                    Role = table.Column<string>(type: "character varying(32)", maxLength: 32, nullable: false),
-                    Status = table.Column<string>(type: "character varying(32)", maxLength: 32, nullable: false),
-                    Endpoint = table.Column<string>(type: "character varying(2048)", maxLength: 2048, nullable: false),
-                    Version = table.Column<string>(type: "character varying(64)", maxLength: 64, nullable: false),
-                    LastHeartbeatAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
-                    AppliedSequence = table.Column<long>(type: "bigint", nullable: false),
-                    SafeSequence = table.Column<long>(type: "bigint", nullable: false),
-                    ProtocolVersion = table.Column<int>(type: "integer", nullable: false),
-                    CertificateThumbprint = table.Column<string>(type: "character varying(128)", maxLength: 128, nullable: true),
-                    PluginPackageSetHash = table.Column<string>(type: "character varying(128)", maxLength: 128, nullable: true),
-                    InitializationProgress = table.Column<int>(type: "integer", nullable: false),
-                    LastError = table.Column<string>(type: "character varying(4096)", maxLength: 4096, nullable: true),
-                    JoinedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
-                    RevokedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true)
-                },
-                constraints: table =>
-                {
-                    table.PrimaryKey("PK_cluster_nodes", x => x.Id);
-                });
-
-            migrationBuilder.CreateTable(
-                name: "cluster_plugin_package_files",
-                columns: table => new
-                {
-                    Id = table.Column<Guid>(type: "uuid", nullable: false),
-                    PluginId = table.Column<string>(type: "character varying(128)", maxLength: 128, nullable: false),
-                    RelativePath = table.Column<string>(type: "character varying(512)", maxLength: 512, nullable: false),
-                    ContentHash = table.Column<string>(type: "character varying(128)", maxLength: 128, nullable: false),
-                    Length = table.Column<long>(type: "bigint", nullable: false),
-                    ScannedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false)
-                },
-                constraints: table =>
-                {
-                    table.PrimaryKey("PK_cluster_plugin_package_files", x => x.Id);
-                });
-
-            migrationBuilder.CreateTable(
-                name: "cluster_plugin_packages",
-                columns: table => new
-                {
-                    Id = table.Column<Guid>(type: "uuid", nullable: false),
-                    PluginId = table.Column<string>(type: "character varying(128)", maxLength: 128, nullable: false),
-                    Version = table.Column<string>(type: "character varying(64)", maxLength: 64, nullable: false),
-                    ManifestHash = table.Column<string>(type: "character varying(128)", maxLength: 128, nullable: false),
-                    PackageHash = table.Column<string>(type: "character varying(128)", maxLength: 128, nullable: false),
-                    ScannedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false)
-                },
-                constraints: table =>
-                {
-                    table.PrimaryKey("PK_cluster_plugin_packages", x => x.Id);
-                });
-
-            migrationBuilder.CreateTable(
-                name: "cluster_snapshots",
-                columns: table => new
-                {
-                    Id = table.Column<Guid>(type: "uuid", nullable: false),
-                    NodeId = table.Column<string>(type: "character varying(128)", maxLength: 128, nullable: false),
-                    BaseSequence = table.Column<long>(type: "bigint", nullable: false),
-                    Status = table.Column<string>(type: "character varying(32)", maxLength: 32, nullable: false),
-                    TotalItems = table.Column<int>(type: "integer", nullable: false),
-                    CompletedItems = table.Column<int>(type: "integer", nullable: false),
-                    LastError = table.Column<string>(type: "character varying(4096)", maxLength: 4096, nullable: true),
-                    CreatedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
-                    CompletedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true)
-                },
-                constraints: table =>
-                {
-                    table.PrimaryKey("PK_cluster_snapshots", x => x.Id);
-                });
-
-            migrationBuilder.CreateTable(
                 name: "firewall_rules",
                 columns: table => new
                 {
@@ -388,48 +193,6 @@ namespace MailServer.Migrations.PostgreSql.Migrations
                 });
 
             migrationBuilder.CreateTable(
-                name: "replication_cursors",
-                columns: table => new
-                {
-                    NodeId = table.Column<string>(type: "character varying(128)", maxLength: 128, nullable: false),
-                    LastAppliedSequence = table.Column<long>(type: "bigint", nullable: false),
-                    UpdatedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false),
-                    LastError = table.Column<string>(type: "character varying(4096)", maxLength: 4096, nullable: true),
-                    LastAttemptAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true),
-                    LastSuccessAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true),
-                    LastSuccessSequence = table.Column<long>(type: "bigint", nullable: false),
-                    LastBatchCount = table.Column<int>(type: "integer", nullable: false),
-                    LastContentDownloads = table.Column<int>(type: "integer", nullable: false),
-                    LastDurationMilliseconds = table.Column<long>(type: "bigint", nullable: false),
-                    SyncStatus = table.Column<string>(type: "character varying(32)", maxLength: 32, nullable: false, defaultValue: "Idle"),
-                    PauseReason = table.Column<string>(type: "character varying(1024)", maxLength: 1024, nullable: true),
-                    LastDetailJson = table.Column<string>(type: "character varying(4096)", maxLength: 4096, nullable: true)
-                },
-                constraints: table =>
-                {
-                    table.PrimaryKey("PK_replication_cursors", x => x.NodeId);
-                });
-
-            migrationBuilder.CreateTable(
-                name: "replication_log",
-                columns: table => new
-                {
-                    Sequence = table.Column<long>(type: "bigint", nullable: false)
-                        .Annotation("Npgsql:ValueGenerationStrategy", NpgsqlValueGenerationStrategy.IdentityByDefaultColumn),
-                    BatchId = table.Column<Guid>(type: "uuid", nullable: false),
-                    EntityType = table.Column<string>(type: "character varying(128)", maxLength: 128, nullable: false),
-                    EntityKey = table.Column<string>(type: "character varying(256)", maxLength: 256, nullable: false),
-                    Operation = table.Column<string>(type: "character varying(32)", maxLength: 32, nullable: false),
-                    PayloadJson = table.Column<string>(type: "character varying(65535)", maxLength: 65535, nullable: false),
-                    ContentKey = table.Column<string>(type: "character varying(64)", maxLength: 64, nullable: true),
-                    CreatedAt = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: false)
-                },
-                constraints: table =>
-                {
-                    table.PrimaryKey("PK_replication_log", x => x.Sequence);
-                });
-
-            migrationBuilder.CreateTable(
                 name: "scheduled_tasks",
                 columns: table => new
                 {
@@ -438,7 +201,6 @@ namespace MailServer.Migrations.PostgreSql.Migrations
                     Name = table.Column<string>(type: "character varying(128)", maxLength: 128, nullable: false),
                     IsSystem = table.Column<bool>(type: "boolean", nullable: false),
                     IsEnabled = table.Column<bool>(type: "boolean", nullable: false),
-                    IsClusterTask = table.Column<bool>(type: "boolean", nullable: false),
                     IntervalMinutes = table.Column<int>(type: "integer", nullable: false),
                     TimeoutSeconds = table.Column<int>(type: "integer", nullable: false),
                     BatchSize = table.Column<int>(type: "integer", nullable: false),
@@ -1086,57 +848,6 @@ namespace MailServer.Migrations.PostgreSql.Migrations
                 columns: new[] { "Status", "PurgeAfter" });
 
             migrationBuilder.CreateIndex(
-                name: "IX_cluster_certificate_authorities_Thumbprint",
-                table: "cluster_certificate_authorities",
-                column: "Thumbprint",
-                unique: true);
-
-            migrationBuilder.CreateIndex(
-                name: "IX_cluster_certificate_revocations_Thumbprint",
-                table: "cluster_certificate_revocations",
-                column: "Thumbprint",
-                unique: true);
-
-            migrationBuilder.CreateIndex(
-                name: "IX_cluster_events_CreatedAt",
-                table: "cluster_events",
-                column: "CreatedAt");
-
-            migrationBuilder.CreateIndex(
-                name: "IX_cluster_join_invitations_TokenHash",
-                table: "cluster_join_invitations",
-                column: "TokenHash",
-                unique: true);
-
-            migrationBuilder.CreateIndex(
-                name: "IX_cluster_node_certificates_NodeId",
-                table: "cluster_node_certificates",
-                column: "NodeId");
-
-            migrationBuilder.CreateIndex(
-                name: "IX_cluster_node_certificates_Thumbprint",
-                table: "cluster_node_certificates",
-                column: "Thumbprint",
-                unique: true);
-
-            migrationBuilder.CreateIndex(
-                name: "IX_cluster_plugin_package_files_PluginId_RelativePath",
-                table: "cluster_plugin_package_files",
-                columns: new[] { "PluginId", "RelativePath" },
-                unique: true);
-
-            migrationBuilder.CreateIndex(
-                name: "IX_cluster_plugin_packages_PluginId",
-                table: "cluster_plugin_packages",
-                column: "PluginId",
-                unique: true);
-
-            migrationBuilder.CreateIndex(
-                name: "IX_cluster_snapshots_NodeId_CreatedAt",
-                table: "cluster_snapshots",
-                columns: new[] { "NodeId", "CreatedAt" });
-
-            migrationBuilder.CreateIndex(
                 name: "IX_delivery_attempts_CreatedAt",
                 table: "delivery_attempts",
                 column: "CreatedAt");
@@ -1300,16 +1011,6 @@ namespace MailServer.Migrations.PostgreSql.Migrations
                 unique: true);
 
             migrationBuilder.CreateIndex(
-                name: "IX_replication_log_BatchId",
-                table: "replication_log",
-                column: "BatchId");
-
-            migrationBuilder.CreateIndex(
-                name: "IX_replication_log_CreatedAt",
-                table: "replication_log",
-                column: "CreatedAt");
-
-            migrationBuilder.CreateIndex(
                 name: "IX_scheduled_tasks_IsEnabled_NextRunAt",
                 table: "scheduled_tasks",
                 columns: new[] { "IsEnabled", "NextRunAt" });
@@ -1387,39 +1088,6 @@ namespace MailServer.Migrations.PostgreSql.Migrations
                 name: "cleanup_queue");
 
             migrationBuilder.DropTable(
-                name: "cluster_certificate_authorities");
-
-            migrationBuilder.DropTable(
-                name: "cluster_certificate_revocations");
-
-            migrationBuilder.DropTable(
-                name: "cluster_configuration");
-
-            migrationBuilder.DropTable(
-                name: "cluster_events");
-
-            migrationBuilder.DropTable(
-                name: "cluster_join_invitations");
-
-            migrationBuilder.DropTable(
-                name: "cluster_leases");
-
-            migrationBuilder.DropTable(
-                name: "cluster_node_certificates");
-
-            migrationBuilder.DropTable(
-                name: "cluster_nodes");
-
-            migrationBuilder.DropTable(
-                name: "cluster_plugin_package_files");
-
-            migrationBuilder.DropTable(
-                name: "cluster_plugin_packages");
-
-            migrationBuilder.DropTable(
-                name: "cluster_snapshots");
-
-            migrationBuilder.DropTable(
                 name: "delivery_attempts");
 
             migrationBuilder.DropTable(
@@ -1460,12 +1128,6 @@ namespace MailServer.Migrations.PostgreSql.Migrations
 
             migrationBuilder.DropTable(
                 name: "quota_ledger");
-
-            migrationBuilder.DropTable(
-                name: "replication_cursors");
-
-            migrationBuilder.DropTable(
-                name: "replication_log");
 
             migrationBuilder.DropTable(
                 name: "sent_copy_jobs");

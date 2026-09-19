@@ -2420,101 +2420,6 @@ public sealed class CoreTests
     }
 
     [Fact]
-    public async Task WitnessLeaseAllowsOnlyOneWriterUntilLeaseExpires()
-    {
-        var factory = CreateFactory();
-        var now = DateTimeOffset.UtcNow;
-        var witness = new WitnessLeaseService(factory, new FixedClock(now));
-        var first = await witness.AcquireAsync(new WitnessLeaseRequest("node-a", 15), CancellationToken.None);
-        var second = await witness.AcquireAsync(new WitnessLeaseRequest("node-b", 15), CancellationToken.None);
-        Assert.True(first.Granted);
-        Assert.False(second.Granted);
-        Assert.Equal(first.Term, second.Term);
-    }
-
-    [Fact]
-    public async Task AuditLogSearchInfersLegacyRecordsAndRedactsSensitiveRawJson()
-    {
-        var factory = CreateFactory();
-        await using (var db = await factory.CreateDbContextAsync())
-        {
-            db.AuditRecords.AddRange(
-                new AuditRecord
-                {
-                    Actor = "admin",
-                    Action = "domain.create",
-                    Resource = "domain:example",
-                    Detail = "example.com"
-                },
-                new AuditRecord
-                {
-                    Actor = "plugin:policy",
-                    Action = "plugin.runtime.reject",
-                    Resource = "plugin:policy",
-                    Detail = "blocked",
-                    Category = AuditCategory.Plugin,
-                    Status = AuditStatus.Warning,
-                    PluginId = "policy",
-                    PluginName = "Policy",
-                    RemoteAddress = "2001:db8::1",
-                    RawJson = "{\"pluginId\":\"policy\",\"secret\":\"plain\",\"decision\":\"Reject\",\"message\":\"被拒绝\"}"
-                });
-            await db.SaveChangesAsync();
-        }
-
-        var service = new AuditLogService(factory, Options.Create(new ClusterOptions { NodeId = "node-a" }));
-        var plugins = await service.SearchAsync(
-            new AuditSearchRequest(null, AuditCategory.Plugin, null, null, null, "policy", null, null),
-            1,
-            20,
-            CancellationToken.None);
-        var creates = await service.SearchAsync(
-            new AuditSearchRequest(null, AuditCategory.Create, null, null, null, null, null, null),
-            1,
-            20,
-            CancellationToken.None);
-        var detail = await service.GetAsync(plugins.Items.Single().Id, CancellationToken.None);
-
-        Assert.Single(plugins.Items);
-        Assert.Equal(AuditCategory.Plugin, plugins.Items.Single().Category);
-        Assert.Single(creates.Items);
-        Assert.Equal(AuditCategory.Create, creates.Items.Single().Category);
-        Assert.Contains("\"secret\": \"***\"", detail.RawJson);
-        Assert.Contains("\"operationIp\": \"2001:db8::1\"", detail.RawJson);
-        Assert.Contains("message", detail.RawJson, StringComparison.Ordinal);
-        Assert.DoesNotContain("plain", detail.RawJson);
-    }
-
-    [Fact]
-    public async Task AuditStampInterceptorRecordsRequestIpRequestIdAndNode()
-    {
-        var http = new DefaultHttpContext();
-        http.TraceIdentifier = "req-42";
-        http.Connection.RemoteIpAddress = IPAddress.Parse("::ffff:192.0.2.44");
-        var accessor = new HttpContextAccessor { HttpContext = http };
-        var interceptor = new AuditStampInterceptor(accessor, Options.Create(new ClusterOptions { NodeId = "node-a" }));
-        var options = new DbContextOptionsBuilder<MailDbContext>()
-            .UseInMemoryDatabase($"mailserver-audit-stamp-{Guid.NewGuid():N}")
-            .AddInterceptors(interceptor)
-            .Options;
-
-        await using var db = new MailDbContext(options);
-        db.AuditRecords.Add(new AuditRecord
-        {
-            Actor = "admin",
-            Action = "domain.create",
-            Resource = "domain:example"
-        });
-        await db.SaveChangesAsync();
-
-        var record = await db.AuditRecords.SingleAsync();
-        Assert.Equal("192.0.2.44", record.RemoteAddress);
-        Assert.Equal("req-42", record.RequestId);
-        Assert.Equal("node-a", record.NodeId);
-        Assert.Equal("2001:db8::8", AuditStampInterceptor.Normalize(IPAddress.Parse("2001:db8::8")));
-    }
-
-    [Fact]
     public async Task AuditReadPermissionIsSeparateFromDashboardRead()
     {
         var factory = CreateFactory();
@@ -2552,891 +2457,6 @@ public sealed class CoreTests
         Assert.Contains(PermissionCodes.AuditRead, catalog);
         Assert.True(await permissions.HasPermissionAsync(user, PermissionCodes.DashboardRead, null, CancellationToken.None));
         Assert.False(await permissions.HasPermissionAsync(user, PermissionCodes.AuditRead, null, CancellationToken.None));
-    }
-
-    [Fact]
-    public async Task PluginAuditWriterSkipsContinueAndRecordsSignificantDecision()
-    {
-        var factory = CreateFactory();
-        var service = new AuditLogService(factory, Options.Create(new ClusterOptions { NodeId = "node-a" }));
-
-        await service.RecordPluginDecisionAsync(
-            new PluginAuditEvent("smtp", PluginDecisionKindName.Continue, null, "policy", "Policy", null, null, null, null, 1),
-            CancellationToken.None);
-        await service.RecordPluginDecisionAsync(
-            new PluginAuditEvent("smtp", PluginDecisionKindName.Reject, "blocked", "policy", "Policy", null, "req-1", null, null, 7),
-            CancellationToken.None);
-
-        await using var db = await factory.CreateDbContextAsync();
-        var record = await db.AuditRecords.SingleAsync();
-        Assert.Equal(AuditCategory.Plugin, record.Category);
-        Assert.Equal(AuditStatus.Succeeded, record.Status);
-        Assert.Equal("policy", record.PluginId);
-        Assert.Equal("req-1", record.RequestId);
-        Assert.DoesNotContain("Content", record.RawJson ?? string.Empty);
-    }
-
-    [Fact]
-    public async Task ClusterInvitationIsSingleUseAndLimitedToFixedRoles()
-    {
-        var factory = CreateFactory();
-        var now = new DateTimeOffset(2026, 7, 14, 8, 0, 0, TimeSpan.Zero);
-        var protectionRoot = Path.Combine(Path.GetTempPath(), $"mailserver-cluster-protection-{Guid.NewGuid():N}");
-        var previousConfig = Environment.GetEnvironmentVariable(PortableConfiguration.EnvironmentVariable);
-        try
-        {
-            Directory.CreateDirectory(protectionRoot);
-            var configPath = Path.Combine(protectionRoot, "mailserver.json");
-            await File.WriteAllTextAsync(configPath, "{}");
-            Environment.SetEnvironmentVariable(PortableConfiguration.EnvironmentVariable, configPath);
-            var dataProtection = DataProtectionProvider.Create(new DirectoryInfo(protectionRoot));
-            var certificates = new ClusterCertificateService(factory, dataProtection, new FixedClock(now));
-            var schemaFingerprint = new ReplicationSchemaFingerprintProvider(factory);
-            var plugins = new ClusterPluginPackageService(Options.Create(new PluginOptions { Path = Path.Combine(protectionRoot, "plugins") }));
-            var service = new ClusterManagementService(
-                factory,
-                Options.Create(new ClusterOptions { NodeId = "primary-a", NodeName = "Primary A" }),
-                new FixedClock(now),
-                new ClusterRuntimeState(false),
-                new ClusterTransportRuntimeState(),
-                new FixedOptionsMonitor<ClusterTransportOptions>(new ClusterTransportOptions()),
-                certificates,
-                schemaFingerprint,
-                plugins,
-                new FixedClusterHealth());
-
-            var created = await service.CreateAsync(new CreateClusterRequest("prod", "tls://primary.example.test:2526"), "admin", CancellationToken.None);
-            var primaryCertificatePath = Path.Combine(protectionRoot, "security-assets", "cluster", "node.crt");
-            using (var primaryCertificate = X509Certificate2.CreateFromPem(
-                await File.ReadAllTextAsync(primaryCertificatePath)))
-            {
-                Assert.Equal(
-                    ["primary.example.test"],
-                    primaryCertificate.Extensions.OfType<X509SubjectAlternativeNameExtension>()
-                        .Single().EnumerateDnsNames().ToArray());
-            }
-
-            string originalPrimaryThumbprint;
-            using (var primaryCertificate = X509Certificate2.CreateFromPem(
-                await File.ReadAllTextAsync(primaryCertificatePath)))
-                originalPrimaryThumbprint = primaryCertificate.Thumbprint;
-            await service.RepairLocalPrimaryTransportAsync("admin", CancellationToken.None);
-            using (var repairedCertificate = X509Certificate2.CreateFromPem(
-                await File.ReadAllTextAsync(primaryCertificatePath)))
-            {
-                Assert.NotEqual(originalPrimaryThumbprint, repairedCertificate.Thumbprint);
-                Assert.Equal(
-                    ["primary.example.test"],
-                    repairedCertificate.Extensions.OfType<X509SubjectAlternativeNameExtension>()
-                        .Single().EnumerateDnsNames().ToArray());
-            }
-
-            var invitation = await service.CreateInvitationAsync(ClusterNodeRole.Standby, "admin", CancellationToken.None);
-            using var standbyKey = RSA.Create(2048);
-            var standbyRequest = new CertificateRequest("CN=primary-a", standbyKey, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
-            var untrustedSan = new SubjectAlternativeNameBuilder();
-            untrustedSan.AddDnsName("attacker.example.test");
-            standbyRequest.CertificateExtensions.Add(untrustedSan.Build());
-            var csr = standbyRequest.CreateSigningRequestPem();
-            await Assert.ThrowsAsync<InvalidOperationException>(() => service.JoinWithCertificateAsync(
-                new ClusterJoinWireRequest(
-                    invitation.Token!,
-                    "standby-a",
-                    "Standby A",
-                    "tls://standby.example.test:2526",
-                    csr,
-                    new string('0', 64)),
-                CancellationToken.None));
-            await using (var db = await factory.CreateDbContextAsync())
-            {
-                Assert.Null((await db.ClusterJoinInvitations.SingleAsync(x => x.Id == invitation.Id)).UsedAt);
-                Assert.False(await db.ClusterNodes.AnyAsync(x => x.Id == "standby-a"));
-            }
-            var joined = await service.JoinWithCertificateAsync(
-                new ClusterJoinWireRequest(
-                    invitation.Token!,
-                    "standby-a",
-                    "Standby A",
-                    "tls://standby.example.test:2526",
-                    csr,
-                    await schemaFingerprint.GetAsync(CancellationToken.None)),
-                CancellationToken.None);
-
-            Assert.Equal("primary-a", created.PrimaryNodeId);
-            Assert.Equal(ClusterNodeRole.Standby, joined.Result.Role);
-            Assert.NotEmpty(joined.CaCertificatePem);
-            Assert.NotEmpty(joined.NodeCertificatePem);
-            using (var joinedCertificate = X509Certificate2.CreateFromPem(joined.NodeCertificatePem))
-            {
-                Assert.Equal("standby-a", joinedCertificate.GetNameInfo(X509NameType.SimpleName, false));
-                Assert.Equal(
-                    ["standby.example.test"],
-                    joinedCertificate.Extensions.OfType<X509SubjectAlternativeNameExtension>()
-                        .Single().EnumerateDnsNames().ToArray());
-            }
-            await using (var db = await factory.CreateDbContextAsync())
-                Assert.True(await db.ClusterNodeCertificates.AnyAsync(x => x.NodeId == "standby-a"));
-            await Assert.ThrowsAsync<UnauthorizedAccessException>(() =>
-                service.JoinAsync(new ClusterJoinRequest(invitation.Token!, "standby-b", "Standby B", "tls://standby-b.example.test:2526"), CancellationToken.None));
-            await Assert.ThrowsAsync<InvalidOperationException>(() =>
-                service.CreateInvitationAsync(ClusterNodeRole.Standby, "admin", CancellationToken.None));
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(PortableConfiguration.EnvironmentVariable, previousConfig);
-            if (Directory.Exists(protectionRoot)) Directory.Delete(protectionRoot, true);
-        }
-    }
-
-    [Theory]
-    [InlineData("tls://192.0.2.10:2526", "192.0.2.10")]
-    [InlineData("tls://[2001:db8::10]:2526", "2001:db8::10")]
-    public async Task ClusterNodeCertificateUsesEndpointIpAddressSan(string endpoint, string expectedAddress)
-    {
-        var factory = CreateFactory();
-        var protectionRoot = Path.Combine(Path.GetTempPath(), $"mailserver-cluster-cert-{Guid.NewGuid():N}");
-        try
-        {
-            Directory.CreateDirectory(protectionRoot);
-            var certificates = new ClusterCertificateService(
-                factory,
-                DataProtectionProvider.Create(new DirectoryInfo(protectionRoot)),
-                new FixedClock(new DateTimeOffset(2026, 7, 14, 8, 0, 0, TimeSpan.Zero)));
-            using var key = RSA.Create(2048);
-            var csr = new CertificateRequest("CN=node-a", key, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1)
-                .CreateSigningRequestPem();
-
-            var issued = await certificates.SignNodeCertificateAsync(
-                "node-a", "Node A", endpoint, csr, "test", CancellationToken.None);
-
-            using var certificate = X509Certificate2.CreateFromPem(issued.CertificatePem);
-            var addresses = certificate.Extensions.OfType<X509SubjectAlternativeNameExtension>()
-                .Single().EnumerateIPAddresses().ToArray();
-            Assert.Equal([IPAddress.Parse(expectedAddress)], addresses);
-        }
-        finally
-        {
-            if (Directory.Exists(protectionRoot)) Directory.Delete(protectionRoot, true);
-        }
-    }
-
-    [Theory]
-    [InlineData(SslPolicyErrors.None, true)]
-    [InlineData(SslPolicyErrors.RemoteCertificateChainErrors, true)]
-    [InlineData(SslPolicyErrors.RemoteCertificateNameMismatch, false)]
-    [InlineData(SslPolicyErrors.RemoteCertificateNotAvailable, false)]
-    [InlineData(SslPolicyErrors.RemoteCertificateChainErrors | SslPolicyErrors.RemoteCertificateNameMismatch, false)]
-    public void ClusterJoinBootstrapAcceptsOnlyCleanOrPrivateCaChainErrors(SslPolicyErrors errors, bool expected)
-    {
-        Assert.Equal(expected, ClusterTransportClient.IsBootstrapServerCertificateAccepted(errors));
-    }
-
-    [Fact]
-    public void ClusterTrustedCaLoaderAcceptsCertificateOnlyPem()
-    {
-        var path = Path.Combine(Path.GetTempPath(), $"mailserver-cluster-ca-{Guid.NewGuid():N}.crt");
-        try
-        {
-            using var key = RSA.Create(2048);
-            var request = new CertificateRequest("CN=Test Cluster CA", key, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
-            request.CertificateExtensions.Add(new X509BasicConstraintsExtension(true, false, 0, true));
-            using var source = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-1), DateTimeOffset.UtcNow.AddDays(1));
-            File.WriteAllText(path, PemEncoding.WriteString("CERTIFICATE", source.RawData));
-
-            using var loaded = ClusterTransportClient.LoadCertificateOnly(path);
-
-            Assert.Equal(source.Thumbprint, loaded.Thumbprint);
-            Assert.False(loaded.HasPrivateKey);
-        }
-        finally
-        {
-            if (File.Exists(path)) File.Delete(path);
-        }
-    }
-
-    [Fact]
-    public void ReplicationSchemaFingerprintIsProviderIndependentAndDetectsChanges()
-    {
-        SqliteNative.Initialize();
-        using var sqlite = new MailDbContext(new DbContextOptionsBuilder<MailDbContext>()
-            .UseSqlite("Data Source=:memory:").Options);
-        using var postgres = new MailDbContext(new DbContextOptionsBuilder<MailDbContext>()
-            .UseNpgsql("Host=localhost;Database=mailserver;Username=test;Password=test").Options);
-        using var mysql = new MailDbContext(new DbContextOptionsBuilder<MailDbContext>()
-            .UseMySQL("Server=localhost;Database=mailserver;User=test;Password=test").Options);
-
-        var sqliteFingerprint = ReplicationModelDescriptor.ComputeFingerprint(sqlite.Model);
-        Assert.Equal(64, sqliteFingerprint.Length);
-        Assert.Equal(sqliteFingerprint, ReplicationModelDescriptor.ComputeFingerprint(postgres.Model));
-        Assert.Equal(sqliteFingerprint, ReplicationModelDescriptor.ComputeFingerprint(mysql.Model));
-        Assert.NotEqual(
-            ReplicationModelDescriptor.ComputeFingerprint(["entity|pk=Id|properties=Id:System.Int32:False"]),
-            ReplicationModelDescriptor.ComputeFingerprint(["entity|pk=Id|properties=Id:System.Int64:False"]));
-        Assert.Equal(2, ClusterBinaryProtocol.ProtocolVersion);
-    }
-
-    [Fact]
-    public async Task ClusterBinaryProtocolUsesItsResolverForWitnessResponses()
-    {
-        var expected = new WitnessLeaseResponse(true, 9, new DateTimeOffset(2026, 7, 14, 12, 0, 0, TimeSpan.Zero), "primary-a", 42);
-        var requestId = Guid.NewGuid();
-        await using var stream = new MemoryStream();
-        await ClusterBinaryProtocol.WriteAsync(stream, ClusterMessageType.WitnessLeaseResponse, requestId, expected, CancellationToken.None);
-        stream.Position = 0;
-
-        var actual = await ClusterBinaryProtocol.ReadAsync<WitnessLeaseResponse>(stream, CancellationToken.None);
-
-        Assert.Equal(ClusterMessageType.WitnessLeaseResponse, actual.Type);
-        Assert.Equal(requestId, actual.RequestId);
-        Assert.Equal(expected, actual.Payload);
-    }
-
-    [Fact]
-    public async Task StandbyReplicationReplacesLocalScheduledTaskIdentityAtomically()
-    {
-        var factory = CreateFactory();
-        var localId = Guid.NewGuid();
-        var primaryId = Guid.NewGuid();
-        await using (var db = await factory.CreateDbContextAsync())
-        {
-            db.ScheduledTasks.Add(new ScheduledTask { Id = localId, Type = "cache.cleanup", Name = "local default", IsClusterTask = false });
-            await db.SaveChangesAsync();
-        }
-        var clock = new FixedClock(new DateTimeOffset(2026, 7, 15, 1, 0, 0, TimeSpan.Zero));
-        var service = new ReplicationBackgroundService(
-            factory,
-            null!,
-            Options.Create(new ClusterOptions { Enabled = true, Role = ClusterNodeRole.Standby, NodeId = "standby-a" }),
-            new ClusterRuntimeState(true),
-            null!,
-            null!,
-            null!,
-            null!,
-            clock,
-            NullLogger<ReplicationBackgroundService>.Instance);
-        var authoritative = new ScheduledTask
-        {
-            Id = primaryId,
-            Type = "cache.cleanup",
-            Name = "primary task",
-            IsClusterTask = false,
-            IntervalMinutes = 30
-        };
-
-        await service.ApplyEntryAsync(new ReplicationLog
-        {
-            Sequence = 17,
-            BatchId = Guid.NewGuid(),
-            EntityType = typeof(ScheduledTask).FullName!,
-            EntityKey = primaryId.ToString(),
-            Operation = ReplicationOperation.Upsert,
-            PayloadJson = JsonSerializer.Serialize(authoritative)
-        }, CancellationToken.None);
-
-        await using var resultDb = await factory.CreateDbContextAsync();
-        var task = await resultDb.ScheduledTasks.SingleAsync(x => x.Type == "cache.cleanup");
-        Assert.Equal(primaryId, task.Id);
-        Assert.Equal("primary task", task.Name);
-        Assert.Equal(17, (await resultDb.ReplicationCursors.SingleAsync(x => x.NodeId == "standby-a")).LastAppliedSequence);
-        Assert.True(await resultDb.ReplicationLogs.AnyAsync(x => x.Sequence == 17));
-    }
-
-    [Fact]
-    public async Task WitnessTrustsOnlyConfiguredPrimaryUnderLocalClusterCa()
-    {
-        var factory = CreateFactory();
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-witness-trust-{Guid.NewGuid():N}");
-        try
-        {
-            Directory.CreateDirectory(root);
-            var clock = new FixedClock(new DateTimeOffset(2026, 7, 15, 2, 0, 0, TimeSpan.Zero));
-            var service = new ClusterCertificateService(
-                factory,
-                DataProtectionProvider.Create(new DirectoryInfo(root)),
-                clock,
-                new FixedOptionsMonitor<ClusterOptions>(new ClusterOptions { Role = ClusterNodeRole.Witness }));
-            using var key = RSA.Create(2048);
-            var issued = await service.SignNodeCertificateAsync(
-                "primary-a",
-                "Primary A",
-                "tls://primary.example.test:2526",
-                new CertificateRequest("CN=forged", key, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1).CreateSigningRequestPem(),
-                "test",
-                CancellationToken.None);
-            var ca = await service.EnsureAuthorityAsync("test", CancellationToken.None);
-            await using (var db = await factory.CreateDbContextAsync())
-            {
-                db.ClusterNodeCertificates.RemoveRange(db.ClusterNodeCertificates);
-                db.ClusterConfigurations.Add(new ClusterConfiguration
-                {
-                    Name = "production",
-                    PrimaryNodeId = "primary-a",
-                    CaCertificatePem = ca.CertificatePem,
-                    ClusterCaThumbprint = ca.Thumbprint,
-                    CreatedBy = "test"
-                });
-                await db.SaveChangesAsync();
-            }
-            using var certificate = X509Certificate2.CreateFromPem(issued.CertificatePem);
-
-            Assert.True(await service.ValidatePeerAsync(certificate, "primary-a", CancellationToken.None));
-            Assert.False(await service.ValidatePeerAsync(certificate, "another-primary", CancellationToken.None));
-
-            await using (var db = await factory.CreateDbContextAsync())
-            {
-                db.ClusterCertificateRevocations.Add(new ClusterCertificateRevocation
-                {
-                    NodeId = "primary-a",
-                    Thumbprint = certificate.Thumbprint,
-                    Reason = "test"
-                });
-                await db.SaveChangesAsync();
-            }
-            Assert.False(await service.ValidatePeerAsync(certificate, "primary-a", CancellationToken.None));
-        }
-        finally
-        {
-            if (Directory.Exists(root)) Directory.Delete(root, true);
-        }
-    }
-
-    [Fact]
-    public async Task PrimaryKeepsLocalLeaseUntilWitnessFirstActivation()
-    {
-        var factory = CreateFactory();
-        var clock = new FixedClock(new DateTimeOffset(2026, 7, 15, 3, 0, 0, TimeSpan.Zero));
-        await using (var db = await factory.CreateDbContextAsync())
-        {
-            db.ClusterConfigurations.Add(new ClusterConfiguration
-            {
-                Name = "production", PrimaryNodeId = "primary-a", CreatedBy = "test"
-            });
-            db.ClusterNodes.AddRange(
-                new ClusterNode { Id = "primary-a", Name = "Primary A", Role = ClusterNodeRole.Primary, Status = ClusterNodeStatus.Healthy },
-                new ClusterNode
-                {
-                    Id = "witness-a", Name = "Witness A", Role = ClusterNodeRole.Witness,
-                    Status = ClusterNodeStatus.Synchronizing, Endpoint = "tls://127.0.0.1:1"
-                });
-            await db.SaveChangesAsync();
-        }
-        var options = new FixedOptionsMonitor<ClusterOptions>(new ClusterOptions
-        {
-            Enabled = true,
-            NodeId = "primary-a",
-            Role = ClusterNodeRole.Primary,
-            Endpoint = "tls://primary.example.test:2526",
-            LeaseSeconds = 15
-        });
-        var lease = new ClusterLeaseService(
-            factory,
-            options,
-            clock,
-            new ClusterTransportClient(Options.Create(new ClusterTransportOptions { ConnectTimeoutSeconds = 5 })),
-            new ReplicationSchemaFingerprintProvider(factory),
-            new ClusterRuntimeState(true),
-            NullLogger<ClusterLeaseService>.Instance);
-
-        Assert.True(await lease.TryAcquirePrimaryAsync(CancellationToken.None));
-        await using var resultDb = await factory.CreateDbContextAsync();
-        Assert.True(await resultDb.ClusterLeases.AnyAsync(x =>
-            x.Name == "primary" && x.OwnerNodeId == "primary-a" && x.ExpiresAt > clock.UtcNow));
-        Assert.Equal(ClusterNodeStatus.Synchronizing,
-            (await resultDb.ClusterNodes.SingleAsync(x => x.Id == "witness-a")).Status);
-    }
-
-    [Fact]
-    public async Task ClusterNodeRemovalAndClusterDeletionPreserveBusinessData()
-    {
-        var factory = CreateFactory();
-        var now = new DateTimeOffset(2026, 7, 14, 10, 0, 0, TimeSpan.Zero);
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-cluster-delete-{Guid.NewGuid():N}");
-        var previousConfig = Environment.GetEnvironmentVariable(PortableConfiguration.EnvironmentVariable);
-        try
-        {
-            Directory.CreateDirectory(root);
-            var configPath = Path.Combine(root, "mailserver.json");
-            await File.WriteAllTextAsync(configPath, "{}");
-            Environment.SetEnvironmentVariable(PortableConfiguration.EnvironmentVariable, configPath);
-            var runtime = new ClusterRuntimeState(false);
-            var transportRuntime = new ClusterTransportRuntimeState();
-            var fingerprint = new ReplicationSchemaFingerprintProvider(factory);
-            var certificates = new ClusterCertificateService(
-                factory,
-                DataProtectionProvider.Create(new DirectoryInfo(root)),
-                new FixedClock(now));
-            var service = new ClusterManagementService(
-                factory,
-                Options.Create(new ClusterOptions { NodeId = "primary-a", NodeName = "Primary A" }),
-                new FixedClock(now),
-                runtime,
-                transportRuntime,
-                new FixedOptionsMonitor<ClusterTransportOptions>(new ClusterTransportOptions()),
-                certificates,
-                fingerprint,
-                new ClusterPluginPackageService(Options.Create(new PluginOptions { Path = Path.Combine(root, "plugins") })),
-                new FixedClusterHealth());
-
-            await service.CreateAsync(new CreateClusterRequest("production", "tls://primary.example.test:2526"), "admin", CancellationToken.None);
-            string originalCaThumbprint;
-            string certificatePath;
-            await using (var db = await factory.CreateDbContextAsync())
-                originalCaThumbprint = (await db.ClusterCertificateAuthorities.SingleAsync()).Thumbprint;
-            var config = JsonNode.Parse(await File.ReadAllTextAsync(configPath))!.AsObject();
-            certificatePath = config[ClusterTransportOptions.SectionName]!["CertificatePath"]!.GetValue<string>();
-
-            await Assert.ThrowsAsync<InvalidOperationException>(() =>
-                service.RemoveNodeAsync("primary-a", "admin", CancellationToken.None));
-
-            async Task JoinStandbyAsync()
-            {
-                var invitation = await service.CreateInvitationAsync(ClusterNodeRole.Standby, "admin", CancellationToken.None);
-                using var key = RSA.Create(2048);
-                var csr = new CertificateRequest("CN=standby-a", key, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1)
-                    .CreateSigningRequestPem();
-                await service.JoinWithCertificateAsync(
-                    new ClusterJoinWireRequest(
-                        invitation.Token!, "standby-a", "Standby A", "tls://standby.example.test:2526", csr,
-                        await fingerprint.GetAsync(CancellationToken.None)),
-                    CancellationToken.None);
-            }
-
-            await JoinStandbyAsync();
-            await using (var db = await factory.CreateDbContextAsync())
-            {
-                db.ReplicationCursors.Add(new ReplicationCursor { NodeId = "standby-a", LastAppliedSequence = 12 });
-                await db.SaveChangesAsync();
-            }
-
-            await service.RemoveNodeAsync("standby-a", "admin", CancellationToken.None);
-            await using (var db = await factory.CreateDbContextAsync())
-            {
-                Assert.False(await db.ClusterNodes.AnyAsync(x => x.Id == "standby-a"));
-                Assert.False(await db.ReplicationCursors.AnyAsync(x => x.NodeId == "standby-a"));
-                Assert.False(await db.ClusterSnapshots.AnyAsync(x => x.NodeId == "standby-a"));
-                Assert.True(await db.ClusterNodeCertificates.AnyAsync(x => x.NodeId == "standby-a" && x.Status == ClusterCertificateStatus.Revoked));
-                Assert.True(await db.ClusterCertificateRevocations.AnyAsync(x => x.NodeId == "standby-a"));
-                Assert.True(await db.AuditRecords.AnyAsync(x => x.Action == "cluster.node.remove"));
-            }
-
-            await JoinStandbyAsync();
-            await using (var db = await factory.CreateDbContextAsync())
-            {
-                db.Domains.Add(new MailDomain { Name = "example.test" });
-                await db.SaveChangesAsync();
-            }
-
-            await Assert.ThrowsAsync<InvalidOperationException>(() =>
-                service.DeleteClusterAsync("wrong-name", "admin", CancellationToken.None));
-            var childLocalService = new ClusterManagementService(
-                factory,
-                Options.Create(new ClusterOptions { NodeId = "standby-a", NodeName = "Standby A", Role = ClusterNodeRole.Standby }),
-                new FixedClock(now),
-                runtime,
-                transportRuntime,
-                new FixedOptionsMonitor<ClusterTransportOptions>(new ClusterTransportOptions()),
-                certificates,
-                fingerprint,
-                new ClusterPluginPackageService(Options.Create(new PluginOptions { Path = Path.Combine(root, "plugins") })),
-                new FixedClusterHealth(writable: false));
-            await childLocalService.ForceLeaveAsync("production", "cli", CancellationToken.None);
-
-            await using (var db = await factory.CreateDbContextAsync())
-            {
-                Assert.True(await db.Domains.AnyAsync(x => x.Name == "example.test"));
-                Assert.Empty(await db.ClusterConfigurations.ToListAsync());
-                Assert.Empty(await db.ClusterNodes.ToListAsync());
-                Assert.Empty(await db.ClusterCertificateAuthorities.ToListAsync());
-                Assert.Empty(await db.ClusterNodeCertificates.ToListAsync());
-                Assert.Empty(await db.ReplicationLogs.ToListAsync());
-                Assert.True(await db.AuditRecords.AnyAsync(x => x.Action == "cluster.force-leave"));
-            }
-            var disabledConfig = JsonNode.Parse(await File.ReadAllTextAsync(configPath))!.AsObject();
-            Assert.False(disabledConfig[ClusterOptions.SectionName]!["Enabled"]!.GetValue<bool>());
-            Assert.Equal(string.Empty, disabledConfig[ClusterOptions.SectionName]!["NodeId"]!.GetValue<string>());
-            Assert.False(disabledConfig[ClusterTransportOptions.SectionName]!["Enabled"]!.GetValue<bool>());
-            Assert.False(File.Exists(certificatePath));
-            Assert.False(runtime.Enabled);
-            Assert.True(transportRuntime.StopRequested);
-
-            await service.CreateAsync(new CreateClusterRequest("replacement", "tls://primary.example.test:2526"), "admin", CancellationToken.None);
-            Assert.True(runtime.Enabled);
-            Assert.False(transportRuntime.StopRequested);
-            await using (var db = await factory.CreateDbContextAsync())
-            {
-                Assert.NotEqual(originalCaThumbprint, (await db.ClusterCertificateAuthorities.SingleAsync()).Thumbprint);
-                Assert.True(await db.Domains.AnyAsync(x => x.Name == "example.test"));
-            }
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(PortableConfiguration.EnvironmentVariable, previousConfig);
-            if (Directory.Exists(root)) Directory.Delete(root, true);
-        }
-    }
-
-    [Fact]
-    public async Task ForceRemovalLocksUntilFinalChildThenAutomaticallyRenewsLease()
-    {
-        var factory = CreateFactory();
-        var now = new DateTimeOffset(2026, 7, 14, 11, 0, 0, TimeSpan.Zero);
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-cluster-recovery-{Guid.NewGuid():N}");
-        var previousConfig = Environment.GetEnvironmentVariable(PortableConfiguration.EnvironmentVariable);
-        try
-        {
-            Directory.CreateDirectory(root);
-            var configPath = Path.Combine(root, "mailserver.json");
-            await File.WriteAllTextAsync(configPath, "{}");
-            Environment.SetEnvironmentVariable(PortableConfiguration.EnvironmentVariable, configPath);
-            var runtime = new ClusterRuntimeState(false);
-            var fingerprint = new ReplicationSchemaFingerprintProvider(factory);
-            var service = new ClusterManagementService(
-                factory,
-                Options.Create(new ClusterOptions { NodeId = "primary-a", NodeName = "Primary A", LeaseSeconds = 15 }),
-                new FixedClock(now),
-                runtime,
-                new ClusterTransportRuntimeState(),
-                new FixedOptionsMonitor<ClusterTransportOptions>(new ClusterTransportOptions()),
-                new ClusterCertificateService(factory, DataProtectionProvider.Create(new DirectoryInfo(root)), new FixedClock(now)),
-                fingerprint,
-                new ClusterPluginPackageService(Options.Create(new PluginOptions { Path = Path.Combine(root, "plugins") })),
-                new FixedClusterHealth(writable: false));
-
-            await service.CreateAsync(new CreateClusterRequest("production", "tls://primary.example.test:2526"), "admin", CancellationToken.None);
-            async Task JoinAsync(ClusterNodeRole role, string id, string name, string endpoint)
-            {
-                var invitation = await service.CreateInvitationAsync(role, "admin", CancellationToken.None);
-                using var key = RSA.Create(2048);
-                var csr = new CertificateRequest($"CN={id}", key, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1)
-                    .CreateSigningRequestPem();
-                await service.JoinWithCertificateAsync(new ClusterJoinWireRequest(
-                    invitation.Token!, id, name, endpoint, csr,
-                    await fingerprint.GetAsync(CancellationToken.None)), CancellationToken.None);
-            }
-
-            await JoinAsync(ClusterNodeRole.Witness, "witness-a", "Witness A", "tls://witness.example.test:2526");
-            await JoinAsync(ClusterNodeRole.Standby, "standby-a", "Standby A", "tls://standby.example.test:2526");
-
-            await service.RemoveNodeAsync("witness-a", "admin", CancellationToken.None);
-
-            Assert.True(runtime.RecoveryRequired);
-            var lockedConfig = JsonNode.Parse(await File.ReadAllTextAsync(configPath))!.AsObject();
-            Assert.True(lockedConfig[ClusterOptions.SectionName]!["RecoveryRequired"]!.GetValue<bool>());
-            Assert.Equal("standby-a", await service.ResolveNodeIdAsync("Standby A", CancellationToken.None));
-            await service.RemoveNodeAsync("standby-a", "admin", CancellationToken.None);
-
-            Assert.False(runtime.RecoveryRequired);
-            var recoveredConfig = JsonNode.Parse(await File.ReadAllTextAsync(configPath))!.AsObject();
-            Assert.False(recoveredConfig[ClusterOptions.SectionName]!["RecoveryRequired"]!.GetValue<bool>());
-            Assert.Equal(string.Empty, recoveredConfig[ClusterOptions.SectionName]!["WitnessEndpoint"]!.GetValue<string>());
-            await using var db = await factory.CreateDbContextAsync();
-            var lease = await db.ClusterLeases.SingleAsync(x => x.Name == "primary");
-            Assert.Equal("primary-a", lease.OwnerNodeId);
-            Assert.Equal(2, lease.Term);
-            Assert.Equal(now.AddSeconds(15), lease.ExpiresAt);
-            Assert.True(await db.AuditRecords.AnyAsync(x => x.Action == "cluster.node.force-remove"));
-            Assert.True(await db.AuditRecords.AnyAsync(x => x.Action == "cluster.primary.auto-recover"));
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(PortableConfiguration.EnvironmentVariable, previousConfig);
-            if (Directory.Exists(root)) Directory.Delete(root, true);
-        }
-    }
-
-    [Fact]
-    public void ClusterDisconnectClassifierHandlesCrossPlatformResetShapes()
-    {
-        Assert.True(ClusterConnectionErrors.IsExpectedDisconnect(new EndOfStreamException()));
-        Assert.True(ClusterConnectionErrors.IsExpectedDisconnect(
-            new IOException("reset", new SocketException((int)SocketError.ConnectionReset))));
-        Assert.True(ClusterConnectionErrors.IsExpectedDisconnect(
-            new SocketException((int)SocketError.ConnectionAborted)));
-        Assert.False(ClusterConnectionErrors.IsExpectedDisconnect(new InvalidDataException("bad frame")));
-        Assert.False(ClusterConnectionErrors.IsExpectedDisconnect(new AuthenticationException("bad certificate")));
-    }
-
-    [Fact]
-    public async Task ClusterRecoveryLockOverridesAnOtherwiseValidPrimaryLease()
-    {
-        var factory = CreateFactory();
-        var now = new DateTimeOffset(2026, 7, 14, 11, 30, 0, TimeSpan.Zero);
-        await using (var db = await factory.CreateDbContextAsync())
-        {
-            db.ClusterLeases.Add(new ClusterLease
-            {
-                Name = "primary",
-                OwnerNodeId = "primary-a",
-                Term = 7,
-                ExpiresAt = now.AddMinutes(1)
-            });
-            await db.SaveChangesAsync();
-        }
-        var runtime = new ClusterRuntimeState(enabled: true, recoveryRequired: true);
-        var lease = new ClusterLeaseService(
-            factory,
-            new FixedOptionsMonitor<ClusterOptions>(new ClusterOptions { NodeId = "primary-a", Role = ClusterNodeRole.Primary }),
-            new FixedClock(now),
-            new ClusterTransportClient(Options.Create(new ClusterTransportOptions())),
-            new ReplicationSchemaFingerprintProvider(factory),
-            runtime,
-            NullLogger<ClusterLeaseService>.Instance);
-
-        Assert.False(await lease.IsWritableAsync(CancellationToken.None));
-        Assert.False(await lease.TryAcquirePrimaryAsync(CancellationToken.None));
-    }
-
-    [Fact]
-    public async Task ClusterMaintenanceSkipsWriteTasksWithoutPrimaryLease()
-    {
-        var scheduler = new CountingTaskScheduler();
-        var service = new MaintenanceBackgroundService(
-            scheduler,
-            new FixedLeaseService(acquired: false),
-            Options.Create(new MaintenanceOptions()),
-            NullLogger<MaintenanceBackgroundService>.Instance);
-
-        await service.RunIterationAsync(CancellationToken.None);
-
-        Assert.Equal(0, scheduler.RunDueCount);
-    }
-
-    [Fact]
-    public async Task ClusterRuntimeLeavesClusterModeAfterExternalConfigurationDisable()
-    {
-        var factory = CreateFactory();
-        var runtime = new ClusterRuntimeState(enabled: true, recoveryRequired: true);
-        var options = new MutableOptionsMonitor<ClusterOptions>(new ClusterOptions { Enabled = true, RecoveryRequired = true });
-        var bootstrap = new ClusterRuntimeBootstrap(
-            runtime,
-            factory,
-            options,
-            new FixedClock(DateTimeOffset.UtcNow),
-            NullLogger<ClusterRuntimeBootstrap>.Instance);
-        await bootstrap.StartAsync(CancellationToken.None);
-
-        options.Set(new ClusterOptions { Enabled = false, RecoveryRequired = false });
-        for (var attempt = 0; attempt < 20 && runtime.Enabled; attempt++)
-            await Task.Delay(25);
-
-        Assert.False(runtime.Enabled);
-        Assert.False(runtime.RecoveryRequired);
-        await bootstrap.StopAsync(CancellationToken.None);
-    }
-
-    [Fact]
-    public async Task ClusterRuntimeAcceptsExternallyCompletedFinalNodeRecovery()
-    {
-        var factory = CreateFactory();
-        var now = new DateTimeOffset(2026, 7, 14, 12, 30, 0, TimeSpan.Zero);
-        await using (var db = await factory.CreateDbContextAsync())
-        {
-            db.ClusterConfigurations.Add(new ClusterConfiguration
-            {
-                Name = "production",
-                PrimaryNodeId = "primary-a",
-                CreatedBy = "admin"
-            });
-            db.ClusterNodes.Add(new ClusterNode
-            {
-                Id = "primary-a",
-                Name = "Primary A",
-                Role = ClusterNodeRole.Primary
-            });
-            db.ClusterLeases.Add(new ClusterLease
-            {
-                Name = "primary",
-                OwnerNodeId = "primary-a",
-                Term = 2,
-                ExpiresAt = now.AddMinutes(1)
-            });
-            db.AuditRecords.Add(new AuditRecord
-            {
-                Actor = "cli",
-                Action = "cluster.primary.auto-recover",
-                Resource = "cluster:production",
-                Category = AuditCategory.Node,
-                Status = AuditStatus.Warning
-            });
-            await db.SaveChangesAsync();
-        }
-        var runtime = new ClusterRuntimeState(enabled: true, recoveryRequired: true);
-        var options = new MutableOptionsMonitor<ClusterOptions>(new ClusterOptions
-        {
-            Enabled = true,
-            RecoveryRequired = true,
-            NodeId = "primary-a"
-        });
-        var bootstrap = new ClusterRuntimeBootstrap(
-            runtime,
-            factory,
-            options,
-            new FixedClock(now),
-            NullLogger<ClusterRuntimeBootstrap>.Instance);
-        await bootstrap.StartAsync(CancellationToken.None);
-
-        options.Set(new ClusterOptions { Enabled = true, RecoveryRequired = false, NodeId = "primary-a" });
-        for (var attempt = 0; attempt < 20 && runtime.RecoveryRequired; attempt++)
-            await Task.Delay(25);
-
-        Assert.False(runtime.RecoveryRequired);
-        Assert.True(runtime.Enabled);
-        await bootstrap.StopAsync(CancellationToken.None);
-    }
-
-    [Fact]
-    public async Task WitnessLeaseRejectsStandbyBehindSafeSequence()
-    {
-        var factory = CreateFactory();
-        var now = new DateTimeOffset(2026, 7, 14, 8, 0, 0, TimeSpan.Zero);
-        var witness = new WitnessLeaseService(factory, new FixedClock(now));
-
-        var primary = await witness.AcquireAsync(new WitnessLeaseRequest("primary-a", 15, AppliedSequence: 12, SafeSequence: 12, Role: ClusterNodeRole.Primary), CancellationToken.None);
-        var lagging = await witness.AcquireAsync(new WitnessLeaseRequest("standby-a", 15, AppliedSequence: 7, SafeSequence: 7, Role: ClusterNodeRole.Standby), CancellationToken.None);
-
-        Assert.True(primary.Granted);
-        Assert.False(lagging.Granted);
-        Assert.Equal(12, lagging.RequiredSafeSequence);
-    }
-
-    [Fact]
-    public async Task ClusterSyncThrottlePausesLargeTransfersWhenQueuesAreBusy()
-    {
-        var factory = CreateFactory();
-        await using (var db = await factory.CreateDbContextAsync())
-        {
-            var message = new StoredMessage { ContentKey = new string('c', 64), EnvelopeFrom = "sender@example.test", Size = 10 };
-            db.Messages.Add(message);
-            for (var i = 1; i <= 600; i++)
-            {
-                db.ReplicationLogs.Add(new ReplicationLog
-                {
-                    Sequence = i,
-                    BatchId = Guid.NewGuid(),
-                    EntityType = typeof(StoredMessage).FullName!,
-                    EntityKey = i.ToString(),
-                    Operation = ReplicationOperation.Upsert
-                });
-            }
-            for (var i = 0; i < 250; i++)
-            {
-                db.DeliveryJobs.Add(new DeliveryJob
-                {
-                    Message = message,
-                    Sender = "sender@example.test",
-                    Recipient = $"user{i}@remote.test",
-                    Status = DeliveryStatus.Pending
-                });
-            }
-            db.ScheduledTasks.Add(new ScheduledTask
-            {
-                Type = "mailbox.folder-delete",
-                Name = "文件夹邮件迁移",
-                Status = ScheduledTaskStatus.Running
-            });
-            await db.SaveChangesAsync();
-        }
-
-        var throttle = new ClusterSyncThrottle(
-            factory,
-            Options.Create(new ClusterSyncThrottleOptions
-            {
-                BusyMetadataBatchSize = 20,
-                NormalBatchSize = 200,
-                BusyHoldSeconds = 60
-            }),
-            new FixedClock(DateTimeOffset.UtcNow));
-
-        var decision = await throttle.EvaluateAsync(0, CancellationToken.None);
-
-        Assert.True(decision.IsBusy);
-        Assert.False(decision.AllowContentTransfer);
-        Assert.Equal(20, decision.BatchSize);
-        Assert.Contains("delivery backlog", decision.Reason);
-        Assert.Contains("running tasks", decision.Reason);
-    }
-
-    [Fact]
-    public async Task ReplicationCursorStoresLastSyncDetails()
-    {
-        var factory = CreateFactory();
-        var now = new DateTimeOffset(2026, 7, 14, 9, 0, 0, TimeSpan.Zero);
-        await using (var db = await factory.CreateDbContextAsync())
-        {
-            db.ReplicationCursors.Add(new ReplicationCursor
-            {
-                NodeId = "standby-a",
-                LastAppliedSequence = 42,
-                LastAttemptAt = now.AddSeconds(-3),
-                LastSuccessAt = now,
-                LastSuccessSequence = 42,
-                LastBatchCount = 7,
-                LastContentDownloads = 2,
-                LastDurationMilliseconds = 1234,
-                SyncStatus = ClusterSyncStatus.Throttled,
-                PauseReason = "delivery backlog 60",
-                LastDetailJson = "{\"applied\":7}"
-            });
-            await db.SaveChangesAsync();
-        }
-
-        await using var verify = await factory.CreateDbContextAsync();
-        var cursor = await verify.ReplicationCursors.SingleAsync();
-        Assert.Equal(ClusterSyncStatus.Throttled, cursor.SyncStatus);
-        Assert.Equal(now, cursor.LastSuccessAt);
-        Assert.Equal(7, cursor.LastBatchCount);
-        Assert.Equal(2, cursor.LastContentDownloads);
-        Assert.Contains("delivery backlog", cursor.PauseReason);
-    }
-
-    [Fact]
-    public void ClusterHostValidatorRequiresWitnessRoleAndMtlsFiles()
-    {
-        Assert.True(ClusterHostValidator.IsNotJoinedYet(
-            new ClusterOptions(),
-            new ClusterTransportOptions()));
-        Assert.False(ClusterHostValidator.IsNotJoinedYet(
-            new ClusterOptions { Enabled = true, Role = ClusterNodeRole.Witness, NodeId = "witness-a" },
-            new ClusterTransportOptions
-            {
-                Enabled = true,
-                AdvertiseEndpoint = "tls://witness.example.test:2526",
-                CertificatePath = "missing-node.crt",
-                PrivateKeyPath = "missing-node.key",
-                TrustedCaPath = "missing-ca.crt"
-            }));
-
-        var invalid = ClusterHostValidator.ValidateWitnessHost(
-            new ClusterOptions { Enabled = true, Role = ClusterNodeRole.Primary, NodeId = "primary-a" },
-            new ClusterTransportOptions
-            {
-                Enabled = true,
-                AdvertiseEndpoint = "https://witness.example.test:2526",
-                Port = 2526,
-                CertificatePath = "node.crt",
-                PrivateKeyPath = "node.key",
-                TrustedCaPath = "ca.crt"
-            },
-            _ => false);
-
-        Assert.Contains(invalid, x => x.Contains("Cluster:Role", StringComparison.Ordinal));
-        Assert.Contains(invalid, x => x.Contains("tls://", StringComparison.Ordinal));
-        Assert.Contains(invalid, x => x.Contains("CertificatePath", StringComparison.Ordinal));
-
-        var valid = ClusterHostValidator.ValidateWitnessHost(
-            new ClusterOptions { Enabled = true, Role = ClusterNodeRole.Witness, NodeId = "witness-a" },
-            new ClusterTransportOptions
-            {
-                Enabled = true,
-                AdvertiseEndpoint = "tls://witness.example.test:2526",
-                Port = 2526,
-                CertificatePath = "node.crt",
-                PrivateKeyPath = "node.key",
-                TrustedCaPath = "ca.crt"
-            },
-            _ => true);
-
-        Assert.Empty(valid);
     }
 
     private static IDbContextFactory<MailDbContext> CreateFactory()
@@ -3492,54 +2512,113 @@ public sealed class CoreTests
             new PermissionService(factory));
     }
 
+    [Fact]
+    public async Task AuditLogSearchInfersLegacyRecordsAndRedactsSensitiveRawJson()
+    {
+        var factory = CreateFactory();
+        await using (var db = await factory.CreateDbContextAsync())
+        {
+            db.AuditRecords.AddRange(
+                new AuditRecord
+                {
+                    Actor = "admin",
+                    Action = "domain.create",
+                    Resource = "domain:example",
+                    Detail = "example.com"
+                },
+                new AuditRecord
+                {
+                    Actor = "plugin:policy",
+                    Action = "plugin.runtime.reject",
+                    Resource = "plugin:policy",
+                    Detail = "blocked",
+                    Category = AuditCategory.Plugin,
+                    Status = AuditStatus.Warning,
+                    PluginId = "policy",
+                    PluginName = "Policy",
+                    RemoteAddress = "2001:db8::1",
+                    RawJson = "{\"pluginId\":\"policy\",\"secret\":\"plain\",\"decision\":\"Reject\",\"message\":\"被拒绝\"}"
+                });
+            await db.SaveChangesAsync();
+        }
+
+        var service = new AuditLogService(factory);
+        var plugins = await service.SearchAsync(
+            new AuditSearchRequest(null, AuditCategory.Plugin, null, null, null, "policy", null, null),
+            1,
+            20,
+            CancellationToken.None);
+        var creates = await service.SearchAsync(
+            new AuditSearchRequest(null, AuditCategory.Create, null, null, null, null, null, null),
+            1,
+            20,
+            CancellationToken.None);
+        var detail = await service.GetAsync(plugins.Items.Single().Id, CancellationToken.None);
+
+        Assert.Single(plugins.Items);
+        Assert.Equal(AuditCategory.Plugin, plugins.Items.Single().Category);
+        Assert.Single(creates.Items);
+        Assert.Equal(AuditCategory.Create, creates.Items.Single().Category);
+        Assert.Contains("\"secret\": \"***\"", detail.RawJson);
+        Assert.Contains("\"operationIp\": \"2001:db8::1\"", detail.RawJson);
+        Assert.Contains("message", detail.RawJson, StringComparison.Ordinal);
+        Assert.DoesNotContain("plain", detail.RawJson);
+    }
+
+    [Fact]
+    public async Task AuditStampInterceptorRecordsRequestIpRequestIdAndNode()
+    {
+        var http = new DefaultHttpContext();
+        http.TraceIdentifier = "req-42";
+        http.Connection.RemoteIpAddress = IPAddress.Parse("::ffff:192.0.2.44");
+        var accessor = new HttpContextAccessor { HttpContext = http };
+        var interceptor = new AuditStampInterceptor(accessor);
+        var options = new DbContextOptionsBuilder<MailDbContext>()
+            .UseInMemoryDatabase($"mailserver-audit-stamp-{Guid.NewGuid():N}")
+            .AddInterceptors(interceptor)
+            .Options;
+
+        await using var db = new MailDbContext(options);
+        db.AuditRecords.Add(new AuditRecord
+        {
+            Actor = "admin",
+            Action = "domain.create",
+            Resource = "domain:example"
+        });
+        await db.SaveChangesAsync();
+
+        var record = await db.AuditRecords.SingleAsync();
+        Assert.Equal("192.0.2.44", record.RemoteAddress);
+        Assert.Equal("req-42", record.RequestId);
+        Assert.Equal(Environment.MachineName, record.NodeId);
+        Assert.Equal("2001:db8::8", AuditStampInterceptor.Normalize(IPAddress.Parse("2001:db8::8")));
+    }
+
+    [Fact]
+    public async Task PluginAuditWriterSkipsContinueAndRecordsSignificantDecision()
+    {
+        var factory = CreateFactory();
+        var service = new AuditLogService(factory);
+
+        await service.RecordPluginDecisionAsync(
+            new PluginAuditEvent("smtp", PluginDecisionKindName.Continue, null, "policy", "Policy", null, null, null, null, 1),
+            CancellationToken.None);
+        await service.RecordPluginDecisionAsync(
+            new PluginAuditEvent("smtp", PluginDecisionKindName.Reject, "blocked", "policy", "Policy", null, "req-1", null, null, 7),
+            CancellationToken.None);
+
+        await using var db = await factory.CreateDbContextAsync();
+        var record = await db.AuditRecords.SingleAsync();
+        Assert.Equal(AuditCategory.Plugin, record.Category);
+        Assert.Equal(AuditStatus.Succeeded, record.Status);
+        Assert.Equal("policy", record.PluginId);
+        Assert.Equal("req-1", record.RequestId);
+        Assert.DoesNotContain("Content", record.RawJson ?? string.Empty);
+    }
+
     private sealed class FixedClock(DateTimeOffset utcNow) : IClock
     {
         public DateTimeOffset UtcNow { get; } = utcNow;
-    }
-
-    private sealed class FixedClusterHealth(bool writable = true) : IClusterHealthService
-    {
-        public Task<ClusterHealth> GetAsync(CancellationToken cancellationToken) =>
-            Task.FromResult(new ClusterHealth(true, writable, "primary-a", ClusterNodeRole.Primary, writable, 0, 0));
-    }
-
-    private sealed class FixedOptionsMonitor<T> : IOptionsMonitor<T>
-    {
-        private readonly T _value;
-
-        public FixedOptionsMonitor(T value) => _value = value;
-
-        public T CurrentValue => _value;
-        public T Get(string? name) => _value;
-        public IDisposable? OnChange(Action<T, string?> listener) => null;
-    }
-
-    private sealed class MutableOptionsMonitor<T>(T value) : IOptionsMonitor<T>
-    {
-        private Action<T, string?>? _listener;
-        public T CurrentValue { get; private set; } = value;
-        public T Get(string? name) => CurrentValue;
-        public IDisposable OnChange(Action<T, string?> listener)
-        {
-            _listener += listener;
-            return new CallbackDisposable(() => _listener -= listener);
-        }
-        public void Set(T updated)
-        {
-            CurrentValue = updated;
-            _listener?.Invoke(updated, Options.DefaultName);
-        }
-    }
-
-    private sealed class CallbackDisposable(Action dispose) : IDisposable
-    {
-        public void Dispose() => dispose();
-    }
-
-    private sealed class FixedLeaseService(bool acquired) : IClusterLeaseService
-    {
-        public Task<bool> IsWritableAsync(CancellationToken cancellationToken) => Task.FromResult(acquired);
-        public Task<bool> TryAcquirePrimaryAsync(CancellationToken cancellationToken) => Task.FromResult(acquired);
     }
 
     private sealed class CountingTaskScheduler : ITaskScheduler

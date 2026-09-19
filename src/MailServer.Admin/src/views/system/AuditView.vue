@@ -4,7 +4,7 @@ import { ApiError, api, apiDownload, jsonBody } from '../../lib/api'
 import PageHeader from '../../components/PageHeader.vue'
 import StatusPill from '../../components/StatusPill.vue'
 
-type AuditCategory = 'Security' | 'Create' | 'Update' | 'Delete' | 'Node' | 'Plugin' | 'BackgroundTask' | 'Other'
+type AuditCategory = 'Security' | 'Create' | 'Update' | 'Delete' | 'Plugin' | 'BackgroundTask' | 'Other'
 type AuditStatus = 'Running' | 'Succeeded' | 'Failed' | 'Warning'
 
 interface AuditListItem {
@@ -84,7 +84,6 @@ const categoryItems = [
   { title: '创建', value: 'Create' },
   { title: '更新', value: 'Update' },
   { title: '删除', value: 'Delete' },
-  { title: '节点与集群', value: 'Node' },
   { title: '插件', value: 'Plugin' },
   { title: '后台任务', value: 'BackgroundTask' },
   { title: '其他', value: 'Other' },
@@ -244,7 +243,6 @@ function categoryIcon(value: AuditCategory) {
     Create: 'mdi-plus-circle-outline',
     Update: 'mdi-pencil-outline',
     Delete: 'mdi-delete-outline',
-    Node: 'mdi-server-network-outline',
     Plugin: 'mdi-puzzle-outline',
     BackgroundTask: 'mdi-calendar-clock-outline',
     Other: 'mdi-dots-horizontal-circle-outline',
@@ -283,7 +281,7 @@ onMounted(loadAudit)
     <span>审计日志</span>
   </div>
 
-  <PageHeader title="审计日志" description="追踪管理操作、安全事件、后台任务与集群变更">
+  <PageHeader title="审计日志" description="追踪管理操作、安全事件与后台任务">
     <v-btn variant="outlined" prepend-icon="mdi-refresh" :loading="loading" @click="loadAudit">刷新</v-btn>
   </PageHeader>
 

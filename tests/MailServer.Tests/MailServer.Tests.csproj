@@ -6,7 +6,6 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../../src/MailServer.Domain/MailServer.Domain.csproj" />
-    <ProjectReference Include="../../src/MailServer.Cluster/MailServer.Cluster.csproj" />
     <ProjectReference Include="../../src/MailServer.Imap/MailServer.Imap.csproj" />
     <ProjectReference Include="../../src/MailServer.Infrastructure/MailServer.Infrastructure.csproj" />
     <ProjectReference Include="../../src/MailServer.Api/MailServer.Api.csproj" />

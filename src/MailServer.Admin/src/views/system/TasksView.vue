@@ -11,7 +11,6 @@ interface ScheduledTask {
   name: string
   isSystem: boolean
   isEnabled: boolean
-  isClusterTask: boolean
   intervalMinutes: number
   timeoutSeconds: number
   batchSize: number
@@ -222,7 +221,7 @@ onMounted(loadTasks)
     <span>计划任务</span>
   </div>
 
-  <PageHeader title="计划任务" description="统一管理维护、清理、配额与集群检查任务">
+  <PageHeader title="计划任务" description="统一管理维护、清理与配额校验任务">
     <v-btn variant="outlined" prepend-icon="mdi-refresh" :loading="loading" @click="loadTasks">刷新</v-btn>
   </PageHeader>
 
@@ -246,7 +245,7 @@ onMounted(loadTasks)
         <tr v-if="loading"><td colspan="7"><v-progress-linear indeterminate color="primary" /></td></tr>
         <tr v-else-if="!tasks.length"><td colspan="7" class="text-center py-10 text-medium-emphasis">没有可用的计划任务</td></tr>
         <tr v-for="task in tasks" v-else :key="task.id">
-          <td><b>{{ task.name }}</b><small><code>{{ task.type }}</code> · {{ task.isClusterTask ? '集群主节点' : '当前节点' }}</small></td>
+          <td><b>{{ task.name }}</b><small><code>{{ task.type }}</code> · {{ task.isSystem ? '系统任务' : '自定义任务' }}</small></td>
           <td><StatusPill v-bind="taskStatus(task)" /></td>
           <td>{{ formatInterval(task.intervalMinutes) }}</td>
           <td><span class="limit-main">{{ task.batchSize }} 项/批</span><small>超时 {{ formatInterval(Math.ceil(task.timeoutSeconds / 60)) }}</small></td>
@@ -335,9 +334,9 @@ onMounted(loadTasks)
     <v-card>
       <v-card-title class="d-flex align-center gap-2"><v-icon color="warning">mdi-play-circle-outline</v-icon> 立即执行任务</v-card-title>
       <v-card-text>
-        <v-alert type="warning" variant="tonal" class="mb-4">任务会在主节点立即开始，可能占用数据库、存储或集群资源。</v-alert>
+        <v-alert type="warning" variant="tonal" class="mb-4">任务会立即开始，可能占用数据库、存储或网络资源。</v-alert>
         <p class="confirm-copy">确认立即执行 <strong>{{ runTarget?.name }}</strong>？</p>
-        <dl class="run-summary"><div><dt>运行范围</dt><dd>{{ runTarget?.isClusterTask ? '集群主节点' : '当前节点' }}</dd></div><div><dt>单次上限</dt><dd>{{ runTarget?.batchSize }} 项</dd></div><div><dt>超时</dt><dd>{{ runTarget ? formatInterval(Math.ceil(runTarget.timeoutSeconds / 60)) : '—' }}</dd></div></dl>
+        <dl class="run-summary"><div><dt>执行范围</dt><dd>{{ runTarget?.isSystem ? '系统任务' : '自定义任务' }}</dd></div><div><dt>单次上限</dt><dd>{{ runTarget?.batchSize }} 项</dd></div><div><dt>超时</dt><dd>{{ runTarget ? formatInterval(Math.ceil(runTarget.timeoutSeconds / 60)) : '—' }}</dd></div></dl>
       </v-card-text>
       <v-card-actions><v-spacer /><v-btn variant="text" :disabled="runLoading" @click="runTarget = null">取消</v-btn><v-btn color="warning" :loading="runLoading" @click="confirmRun">确认立即执行</v-btn></v-card-actions>
     </v-card>
