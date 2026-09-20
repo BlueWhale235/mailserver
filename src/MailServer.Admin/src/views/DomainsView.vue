@@ -27,7 +27,7 @@ interface PagedResult<T> {
 
 const rows = ref<Domain[]>([])
 const selected = ref<string[]>([])
-const search = ref('')
+const search = ref<string | null>('')
 const activeFilter = ref<boolean | null>(null)
 const dnsFilter = ref<string | null>(null)
 const page = ref(1)
@@ -60,7 +60,8 @@ const dnsItems = [
 
 function queryString() {
   const query = new globalThis.URLSearchParams({ page: String(page.value), pageSize: String(pageSize) })
-  if (search.value.trim()) query.set('search', search.value.trim())
+  const searchText = search.value?.trim() ?? ''
+  if (searchText) query.set('search', searchText)
   if (activeFilter.value !== null) query.set('isActive', String(activeFilter.value))
   if (dnsFilter.value) query.set('dnsStatus', dnsFilter.value)
   return query.toString()

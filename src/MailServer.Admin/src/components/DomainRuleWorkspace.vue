@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { onBeforeRouteLeave, onBeforeRouteUpdate, useRoute, useRouter } from 'vue-router'
 import StatusPill from './StatusPill.vue'
 import { api, jsonBody } from '../lib/api'
 import {
@@ -64,18 +64,23 @@ function normalizeSection(value: unknown): SectionKey {
   return sectionKeys.includes(value as SectionKey) ? value as SectionKey : 'incoming'
 }
 
+/** 规则分区在 URL 中的位置：保留其它查询参数，清理旧版 tab/section query。 */
+function rulesLocation(section: SectionKey) {
+  const query = { ...route.query }
+  delete query.tab
+  delete query.section
+  return { name: 'domain-detail' as const, params: { id: props.domainId, tab: 'rules', section }, query }
+}
+
 const activeSection = ref<SectionKey>(normalizeSection(route.params.section))
 watch(() => route.params.section, value => {
   const next = normalizeSection(value)
   if (next !== activeSection.value) activeSection.value = next
 })
 watch(activeSection, value => {
-  const query = { ...route.query }
-  delete query.tab
-  delete query.section
   const clean = !('tab' in route.query) && !('section' in route.query)
   if (route.params.tab === 'rules' && String(route.params.section ?? '') === value && clean) return
-  void router.replace({ name: 'domain-detail', params: { id: props.domainId, tab: 'rules', section: value }, query })
+  void router.replace(rulesLocation(value))
 }, { immediate: true })
 
 const direction = computed<MailRule['direction']>(() => sections.find(section => section.key === activeSection.value)!.direction)
@@ -97,25 +102,64 @@ const conditions = ref<RuleCondition[]>([])
 const actions = ref<RuleAction[]>([])
 
 let loadToken = 0
+let unmounted = false
+// 当前列表实际对应的「域 + 方向」。切换后旧列表不允许再被操作。
+const loadedKey = ref('')
+const currentKey = computed(() => `${props.domainId}:${direction.value}`)
+/** 列表已加载完成且确实对应当前域与方向，才允许对记录增删改排序。 */
+const listReady = computed(() => !loading.value && loadedKey.value === currentKey.value)
+
+/** 当前编辑器内容的稳定序列化，用于判断是否有未保存修改。 */
+function editorSnapshot() {
+  return JSON.stringify({
+    name: draft.value.name,
+    matchMode: draft.value.matchMode,
+    isEnabled: draft.value.isEnabled,
+    conditions: conditions.value.map(condition => ({ field: condition.field, operator: condition.operator, values: [...condition.values] })),
+    actions: actions.value.map(action => ({ kind: action.kind, values: [...action.values] })),
+  })
+}
+
+let savedSnapshot = ''
+const editorDirty = computed(() => editorOpen.value && editorSnapshot() !== savedSnapshot)
+
+function confirmDiscardDraft(message: string) {
+  if (!editorDirty.value) return true
+  return globalThis.confirm(message)
+}
+
+/** 记录必须来自当前已加载的列表，避免用旧方向/旧域的对象发起写请求。 */
+function isRuleInCurrentList(rule: MailRule) {
+  return loadedKey.value === currentKey.value && rules.value.some(item => item.id === rule.id)
+}
 
 async function load() {
   const token = ++loadToken
+  const domainId = props.domainId
+  const directionValue = direction.value
+  const key = `${domainId}:${directionValue}`
   loading.value = true
   error.value = ''
+  // 立即清空旧结果，避免切换分区/域后仍能对旧记录发起操作。
+  rules.value = []
+  folders.value = []
+  loadedKey.value = ''
   try {
     const [nextRules, nextFolders] = await Promise.all([
-      api<MailRule[]>(`/domains/${props.domainId}/rules?direction=${direction.value}`),
-      api<FolderCoverage[]>(`/domains/${props.domainId}/rule-folders`),
+      api<MailRule[]>(`/domains/${domainId}/rules?direction=${directionValue}`),
+      api<FolderCoverage[]>(`/domains/${domainId}/rule-folders`),
     ])
-    if (token !== loadToken) return
+    if (unmounted || token !== loadToken) return
     rules.value = nextRules
     folders.value = nextFolders
+    loadedKey.value = key
   } catch (cause) {
-    if (token !== loadToken) return
+    if (unmounted || token !== loadToken) return
     rules.value = []
+    folders.value = []
     error.value = cause instanceof Error ? cause.message : '邮件规则加载失败'
   } finally {
-    if (token === loadToken) loading.value = false
+    if (!unmounted && token === loadToken) loading.value = false
   }
 }
 
@@ -123,6 +167,29 @@ watch([activeSection, () => props.domainId], () => {
   closeEditor()
   void load()
 }, { immediate: true })
+
+/** 切换收信/发信分区：先落 URL，未保存草稿在路由守卫里确认。 */
+function requestSectionChange(key: SectionKey) {
+  if (saving.value || key === activeSection.value) return
+  void router.replace(rulesLocation(key))
+}
+
+onBeforeRouteUpdate((to, from) => {
+  const paramsChanged = to.params.id !== from.params.id || to.params.tab !== from.params.tab || to.params.section !== from.params.section
+  if (!paramsChanged) return true
+  if (saving.value) return false
+  return confirmDiscardDraft(`「${currentSection.value.title}」还有未保存的修改，离开后将丢失。确定离开吗？`)
+})
+
+onBeforeRouteLeave(() => {
+  if (saving.value) return false
+  return confirmDiscardDraft('离开当前页面将丢失未保存的规则修改。确定离开吗？')
+})
+
+onBeforeUnmount(() => {
+  unmounted = true
+  loadToken += 1
+})
 
 const folderItems = computed(() => folders.value.map(folder => folder.name))
 const fieldItems = [
@@ -183,17 +250,27 @@ function openEditor(rule?: MailRule) {
   if (!actions.value.length) actions.value = [defaultAction(isIncoming.value)]
   editorError.value = ''
   notice.value = ''
+  savedSnapshot = ''
   editorOpen.value = true
+  savedSnapshot = editorSnapshot()
 }
 
 function defaultAction(incoming: boolean): RuleAction {
   return incoming ? { kind: 'MoveToFolder', values: [] } : { kind: 'ForwardTo', values: [] }
 }
 
+/** 放弃草稿并关闭编辑器；调用方负责事先确认。 */
 function closeEditor() {
   editorOpen.value = false
   editingId.value = null
   editorError.value = ''
+  savedSnapshot = ''
+}
+
+function requestCloseEditor() {
+  if (saving.value) return
+  if (!confirmDiscardDraft('当前规则还有未保存的修改，返回列表后将丢失。确定返回吗？')) return
+  closeEditor()
 }
 
 function addCondition() {
@@ -228,24 +305,30 @@ const moveFolder = computed(() => actions.value.find(action => action.kind === '
 
 async function save() {
   if (!editorValid.value || saving.value) return
+  // 请求开始时固定目标域、规则 ID、方向与文案，避免保存期间切换页面后串写。
+  const domainId = props.domainId
+  const ruleId = editingId.value
+  const sectionTitle = currentSection.value.title
   const payload = {
     name: draft.value.name.trim(),
     direction: direction.value,
     matchMode: draft.value.matchMode,
     targetMailboxName: isIncoming.value ? (moveFolder.value || 'INBOX') : 'Sent',
     isEnabled: draft.value.isEnabled,
-    conditions: conditions.value.map(condition => ({ field: condition.field, operator: condition.operator, values: condition.values })),
-    actions: actions.value.map(action => ({ kind: action.kind, values: action.values })),
+    conditions: conditions.value.map(condition => ({ field: condition.field, operator: condition.operator, values: [...condition.values] })),
+    actions: actions.value.map(action => ({ kind: action.kind, values: [...action.values] })),
   }
   saving.value = true
   editorError.value = ''
   try {
-    if (editingId.value) await api(`/domains/${props.domainId}/rules/${editingId.value}`, { method: 'PUT', body: jsonBody(payload) })
-    else await api(`/domains/${props.domainId}/rules`, { method: 'POST', body: jsonBody(payload) })
-    notice.value = editingId.value ? `${currentSection.value.title}已保存。` : `${currentSection.value.title}已创建。`
+    if (ruleId) await api(`/domains/${domainId}/rules/${ruleId}`, { method: 'PUT', body: jsonBody(payload) })
+    else await api(`/domains/${domainId}/rules`, { method: 'POST', body: jsonBody(payload) })
+    if (unmounted) return
+    notice.value = ruleId ? `${sectionTitle}已保存。` : `${sectionTitle}已创建。`
     closeEditor()
     await load()
   } catch (cause) {
+    if (unmounted) return
     editorError.value = cause instanceof Error ? cause.message : '规则保存失败'
   } finally {
     saving.value = false
@@ -253,13 +336,16 @@ async function save() {
 }
 
 async function toggleRule(rule: MailRule) {
-  if (saving.value) return
+  if (saving.value || loading.value || !isRuleInCurrentList(rule)) return
+  const domainId = props.domainId
+  const ruleId = rule.id
   saving.value = true
   error.value = ''
   try {
-    await api(`/domains/${props.domainId}/rules/${rule.id}`, { method: 'PUT', body: jsonBody(ruleTogglePayload(rule)) })
-    rule.isEnabled = !rule.isEnabled
-    notice.value = `规则「${rule.name}」已${rule.isEnabled ? '启用' : '停用'}。`
+    await api(`/domains/${domainId}/rules/${ruleId}`, { method: 'PUT', body: jsonBody(ruleTogglePayload(rule)) })
+    const current = rules.value.find(item => item.id === ruleId)
+    if (current) current.isEnabled = !current.isEnabled
+    notice.value = `规则「${rule.name}」已${current?.isEnabled ? '启用' : '停用'}。`
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : '规则状态更新失败'
   } finally {
@@ -268,12 +354,13 @@ async function toggleRule(rule: MailRule) {
 }
 
 async function removeRule(rule: MailRule) {
-  if (saving.value) return
+  if (saving.value || loading.value || !isRuleInCurrentList(rule)) return
   if (!globalThis.confirm(`确认删除规则「${rule.name}」？该操作不可撤销。`)) return
+  const domainId = props.domainId
   saving.value = true
   error.value = ''
   try {
-    await api(`/domains/${props.domainId}/rules/${rule.id}`, { method: 'DELETE' })
+    await api(`/domains/${domainId}/rules/${rule.id}`, { method: 'DELETE' })
     notice.value = `规则「${rule.name}」已删除。`
     if (editingId.value === rule.id) closeEditor()
     await load()
@@ -285,19 +372,23 @@ async function removeRule(rule: MailRule) {
 }
 
 async function moveRule(rule: MailRule, offset: number) {
+  if (saving.value || loading.value || !isRuleInCurrentList(rule)) return
+  const domainId = props.domainId
   const ordered = [...rules.value]
   const index = ordered.findIndex(candidate => candidate.id === rule.id)
   const target = index + offset
-  if (index < 0 || target < 0 || target >= ordered.length || saving.value) return
+  if (index < 0 || target < 0 || target >= ordered.length) return
   const [moved] = ordered.splice(index, 1)
   ordered.splice(target, 0, moved!)
   saving.value = true
   error.value = ''
   try {
-    await api(`/domains/${props.domainId}/rules/order`, { method: 'PUT', body: jsonBody({ direction: direction.value, ruleIds: ordered.map(candidate => candidate.id) }) })
-    rules.value = ordered.map((candidate, position) => ({ ...candidate, priority: (position + 1) * 10 }))
+    await api(`/domains/${domainId}/rules/order`, { method: 'PUT', body: jsonBody({ direction: ordered[0]!.direction, ruleIds: ordered.map(candidate => candidate.id) }) })
+    if (unmounted) return
+    await load()
     notice.value = '规则执行顺序已更新。'
   } catch (cause) {
+    if (unmounted) return
     error.value = cause instanceof Error ? cause.message : '规则排序失败'
   } finally {
     saving.value = false
@@ -312,6 +403,11 @@ function actionSummary(rule: MailRule) {
   }).join(' · ')
 }
 
+function normalizeTagValues(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  return value.map(item => String(item ?? '').trim()).filter(Boolean)
+}
+
 function actionValuePlaceholder(kind: string) {
   return ruleActionPlaceholder(kind)
 }
@@ -320,7 +416,7 @@ function actionValuePlaceholder(kind: string) {
 <template>
   <div class="rule-page">
     <nav class="rule-nav" aria-label="收发信规则分区">
-      <button v-for="section in sections" :key="section.key" :class="{ active: activeSection === section.key }" @click="activeSection = section.key">
+      <button v-for="section in sections" :key="section.key" type="button" :class="{ active: activeSection === section.key }" :disabled="saving" @click="requestSectionChange(section.key)">
         <v-icon size="20">{{ section.icon }}</v-icon>
         <span><b>{{ section.title }}</b><small>{{ section.description }}</small></span>
         <v-icon size="16">mdi-chevron-right</v-icon>
@@ -339,9 +435,10 @@ function actionValuePlaceholder(kind: string) {
           <p>{{ isIncoming ? '匹配条件支持 * 与 ? 通配符；可移动文件夹或转发给其他地址。' : '匹配条件支持 * 与 ? 通配符；可转发或直接拒绝发信。' }}</p>
         </div>
         <div class="section-actions">
-          <StatusPill v-if="editorOpen" label="编辑中" tone="warning" />
-          <v-btn v-else icon="mdi-refresh" variant="text" aria-label="刷新规则" :loading="loading" @click="load" />
-          <v-btn v-if="canManage && !editorOpen" color="primary" prepend-icon="mdi-plus" @click="openEditor()">新建{{ isIncoming ? '收信' : '发信' }}规则</v-btn>
+          <StatusPill v-if="editorOpen && editorDirty" label="未保存" tone="warning" />
+          <StatusPill v-else-if="editorOpen" label="编辑中" tone="neutral" />
+          <v-btn v-else icon="mdi-refresh" variant="text" aria-label="刷新规则" :loading="loading" :disabled="saving" @click="load" />
+          <v-btn v-if="canManage && !editorOpen" color="primary" prepend-icon="mdi-plus" :disabled="saving || loading" @click="openEditor()">新建{{ isIncoming ? '收信' : '发信' }}规则</v-btn>
         </div>
       </div>
 
@@ -361,11 +458,11 @@ function actionValuePlaceholder(kind: string) {
             </span>
             <StatusPill :label="rule.isEnabled ? '已启用' : '已停用'" :tone="rule.isEnabled ? 'success' : 'neutral'" />
             <span v-if="canManage" class="rule-actions">
-              <v-tooltip text="上移（更早执行）"><template #activator="{ props: tip }"><v-btn v-bind="tip" icon="mdi-arrow-up" size="small" variant="text" aria-label="上移规则" :disabled="index === 0 || saving" @click="moveRule(rule, -1)" /></template></v-tooltip>
-              <v-tooltip text="下移（更晚执行）"><template #activator="{ props: tip }"><v-btn v-bind="tip" icon="mdi-arrow-down" size="small" variant="text" aria-label="下移规则" :disabled="index === rules.length - 1 || saving" @click="moveRule(rule, 1)" /></template></v-tooltip>
-              <v-tooltip :text="rule.isEnabled ? '停用规则' : '启用规则'"><template #activator="{ props: tip }"><v-btn v-bind="tip" :icon="rule.isEnabled ? 'mdi-toggle-switch' : 'mdi-toggle-switch-off-outline'" size="small" variant="text" :aria-label="rule.isEnabled ? '停用规则' : '启用规则'" :disabled="saving" @click="toggleRule(rule)" /></template></v-tooltip>
-              <v-tooltip text="编辑规则"><template #activator="{ props: tip }"><v-btn v-bind="tip" icon="mdi-pencil-outline" size="small" variant="text" aria-label="编辑规则" :disabled="saving" @click="openEditor(rule)" /></template></v-tooltip>
-              <v-tooltip text="删除规则"><template #activator="{ props: tip }"><v-btn v-bind="tip" icon="mdi-delete-outline" size="small" variant="text" color="error" aria-label="删除规则" :disabled="saving" @click="removeRule(rule)" /></template></v-tooltip>
+              <v-tooltip text="上移（更早执行）"><template #activator="{ props: tip }"><v-btn v-bind="tip" icon="mdi-arrow-up" size="small" variant="text" aria-label="上移规则" :disabled="index === 0 || saving || !listReady" @click="moveRule(rule, -1)" /></template></v-tooltip>
+              <v-tooltip text="下移（更晚执行）"><template #activator="{ props: tip }"><v-btn v-bind="tip" icon="mdi-arrow-down" size="small" variant="text" aria-label="下移规则" :disabled="index === rules.length - 1 || saving || !listReady" @click="moveRule(rule, 1)" /></template></v-tooltip>
+              <v-tooltip :text="rule.isEnabled ? '停用规则' : '启用规则'"><template #activator="{ props: tip }"><v-btn v-bind="tip" :icon="rule.isEnabled ? 'mdi-toggle-switch' : 'mdi-toggle-switch-off-outline'" size="small" variant="text" :aria-label="rule.isEnabled ? '停用规则' : '启用规则'" :disabled="saving || !listReady" @click="toggleRule(rule)" /></template></v-tooltip>
+              <v-tooltip text="编辑规则"><template #activator="{ props: tip }"><v-btn v-bind="tip" icon="mdi-pencil-outline" size="small" variant="text" aria-label="编辑规则" :disabled="saving || !listReady" @click="openEditor(rule)" /></template></v-tooltip>
+              <v-tooltip text="删除规则"><template #activator="{ props: tip }"><v-btn v-bind="tip" icon="mdi-delete-outline" size="small" variant="text" color="error" aria-label="删除规则" :disabled="saving || !listReady" @click="removeRule(rule)" /></template></v-tooltip>
             </span>
           </div>
           <div v-if="loading" class="rule-empty"><v-progress-linear indeterminate color="primary" /></div>
@@ -379,7 +476,7 @@ function actionValuePlaceholder(kind: string) {
 
       <div v-else class="rule-editor">
         <div class="editor-head">
-          <v-btn variant="text" prepend-icon="mdi-arrow-left" @click="closeEditor">返回规则列表</v-btn>
+          <v-btn variant="text" prepend-icon="mdi-arrow-left" :disabled="saving" @click="requestCloseEditor">返回规则列表</v-btn>
           <div><b>{{ editingId ? '编辑' : '新建' }}{{ currentSection.title }}</b><small>{{ isIncoming ? '邮件投递给本地账号前按顺序执行' : '已认证账号外发时按顺序执行' }}</small></div>
         </div>
         <v-alert v-if="editorError" type="error" variant="tonal" class="mb-4">{{ editorError }}</v-alert>
@@ -396,7 +493,7 @@ function actionValuePlaceholder(kind: string) {
         <div class="editor-section">
           <div class="editor-section-head">
             <div><b>匹配条件</b><small>值支持 * 与 ? 通配符，输入后按回车生成标签</small></div>
-            <v-btn size="small" variant="text" prepend-icon="mdi-plus" :disabled="conditions.length >= 20" @click="addCondition">添加条件</v-btn>
+            <v-btn size="small" variant="text" prepend-icon="mdi-plus" :disabled="conditions.length >= 20 || saving" @click="addCondition">添加条件</v-btn>
           </div>
           <div v-for="(condition, index) in conditions" :key="`condition-${index}`" class="editor-row">
             <v-select :model-value="condition.field" :items="fieldItems" label="字段" hide-details @update:model-value="value => changeConditionField(condition, value as string)" />
@@ -410,9 +507,9 @@ function actionValuePlaceholder(kind: string) {
               clearable
               hide-details
               :label="conditionValueLabel(condition)"
-              @update:model-value="value => condition.values = (value as string[]).map(item => String(item ?? '').trim()).filter(Boolean)"
+              @update:model-value="value => condition.values = normalizeTagValues(value)"
             />
-            <v-btn icon="mdi-close" size="small" variant="text" aria-label="移除条件" :disabled="conditions.length <= 1" @click="removeCondition(index)" />
+            <v-btn icon="mdi-close" size="small" variant="text" aria-label="移除条件" :disabled="conditions.length <= 1 || saving" @click="removeCondition(index)" />
           </div>
           <p v-if="conditions.some(condition => conditionError(condition))" class="editor-hint is-error">
             {{ conditions.map(condition => conditionError(condition)).filter(Boolean)[0] }}
@@ -422,7 +519,7 @@ function actionValuePlaceholder(kind: string) {
         <div class="editor-section">
           <div class="editor-section-head">
             <div><b>执行动作</b><small>{{ isIncoming ? '命中后按列出的动作执行，可同时移动与转发。' : '命中后转发副本；选择拒绝发信会在 SMTP 阶段直接退信。' }}</small></div>
-            <v-btn size="small" variant="text" prepend-icon="mdi-plus" :disabled="actions.length >= 21" @click="addAction">添加动作</v-btn>
+            <v-btn size="small" variant="text" prepend-icon="mdi-plus" :disabled="actions.length >= 21 || saving" @click="addAction">添加动作</v-btn>
           </div>
           <div v-for="(action, index) in actions" :key="`action-${index}`" class="editor-row editor-row--action">
             <v-select :model-value="action.kind" :items="actionItems" label="动作" hide-details @update:model-value="value => changeActionKind(action, value as string)" />
@@ -436,18 +533,18 @@ function actionValuePlaceholder(kind: string) {
               clearable
               hide-details
               :label="actionValuePlaceholder(action.kind)"
-              @update:model-value="value => action.values = (value as string[]).map(item => String(item ?? '').trim()).filter(Boolean)"
+              @update:model-value="value => action.values = normalizeTagValues(value)"
             />
             <v-text-field v-else v-model="action.values[0]" label="拒绝理由（可留空）" hide-details maxlength="255" />
-            <v-btn icon="mdi-close" size="small" variant="text" aria-label="移除动作" @click="removeAction(index)" />
+            <v-btn icon="mdi-close" size="small" variant="text" aria-label="移除动作" :disabled="saving" @click="removeAction(index)" />
           </div>
           <p v-if="ruleActionError(direction, actions)" class="editor-hint is-error">{{ ruleActionError(direction, actions) }}</p>
         </div>
 
         <div class="editor-actions">
           <v-spacer />
-          <v-btn variant="text" :disabled="saving" @click="closeEditor">取消</v-btn>
-          <v-btn color="primary" :disabled="!editorValid" :loading="saving" @click="save">{{ editingId ? '保存规则' : '创建规则' }}</v-btn>
+          <v-btn variant="text" :disabled="saving" @click="requestCloseEditor">取消</v-btn>
+          <v-btn color="primary" :disabled="!editorValid || !editorDirty" :loading="saving" @click="save">{{ editingId ? '保存规则' : '创建规则' }}</v-btn>
         </div>
       </div>
     </v-card>

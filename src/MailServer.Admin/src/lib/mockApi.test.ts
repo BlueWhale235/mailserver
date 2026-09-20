@@ -421,6 +421,47 @@ describe('domain-detail preview API', () => {
     expect(checked.validation.warnings).toHaveLength(1)
   })
 
+  it('paginates domain accounts and aliases with full coverage, and returns the complete account list for alias targets', async () => {
+    const pageSize = 20
+    const accountsPage1 = await mockApi<PagedResult<{ id: string; address: string }>>(`/domains/${domainId}/accounts/search?page=1&pageSize=${pageSize}`)
+    expect(accountsPage1.totalCount).toBeGreaterThanOrEqual(45)
+    expect(accountsPage1.items).toHaveLength(pageSize)
+
+    const seenAccounts = new Set<string>()
+    const totalPages = Math.ceil(accountsPage1.totalCount / pageSize)
+    for (let page = 1; page <= totalPages; page++) {
+      const result = await mockApi<PagedResult<{ id: string; address: string }>>(`/domains/${domainId}/accounts/search?page=${page}&pageSize=${pageSize}`)
+      expect(result.totalCount).toBe(accountsPage1.totalCount)
+      for (const item of result.items) {
+        expect(seenAccounts.has(item.address)).toBe(false)
+        seenAccounts.add(item.address)
+      }
+    }
+    expect(seenAccounts.size).toBe(accountsPage1.totalCount)
+
+    const aliasesPage1 = await mockApi<PagedResult<{ id: string }>>(`/domains/${domainId}/aliases/search?page=1&pageSize=${pageSize}`)
+    expect(aliasesPage1.totalCount).toBeGreaterThanOrEqual(45)
+    expect(aliasesPage1.items).toHaveLength(pageSize)
+
+    const seenAliases = new Set<string>()
+    const aliasTotalPages = Math.ceil(aliasesPage1.totalCount / pageSize)
+    for (let page = 1; page <= aliasTotalPages; page++) {
+      const result = await mockApi<PagedResult<{ id: string }>>(`/domains/${domainId}/aliases/search?page=${page}&pageSize=${pageSize}`)
+      for (const item of result.items) {
+        expect(seenAliases.has(item.id)).toBe(false)
+        seenAliases.add(item.id)
+      }
+    }
+    expect(seenAliases.size).toBe(aliasesPage1.totalCount)
+
+    // 别名目标选择器使用非分页接口，必须是整个域的全量启用账号，而不是当前页。
+    const allAccounts = await mockApi<Array<{ id: string; address: string; isEnabled: boolean }>>(`/domains/${domainId}/accounts`)
+    expect(allAccounts.length).toBe(accountsPage1.totalCount)
+    expect(allAccounts).toEqual(expect.arrayContaining(accountsPage1.items))
+    expect(allAccounts.some(account => !account.isEnabled)).toBe(true)
+    expect(allAccounts.slice(0, allAccounts.findIndex(account => !account.isEnabled)).every(account => account.isEnabled)).toBe(true)
+  })
+
   it('creates searchable accounts and aliases and enforces quota safety', async () => {
     const suffix = crypto.randomUUID().slice(0, 8)
     await expect(mockApi(`/domains/${domainId}/accounts`, {

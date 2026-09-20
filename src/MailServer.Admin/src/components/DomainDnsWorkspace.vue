@@ -137,7 +137,7 @@ const formError = computed(() => {
   if (value.daneEnabled && splitList(value.daneTlsaRecords).length === 0) return '启用 DANE 后必须填写至少一条 TLSA 记录。'
   return ''
 })
-const canSave = computed(() => props.canManage && !saving.value && !loading.value && Boolean(settings.value) && !formError.value)
+const canSave = computed(() => props.canManage && !saving.value && !loading.value && Boolean(settings.value) && !formError.value && dirty.value)
 
 async function load() {
   loading.value = true

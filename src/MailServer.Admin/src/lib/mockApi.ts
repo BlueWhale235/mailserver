@@ -621,6 +621,38 @@ const domainAliases: Record<string, MockDomainAlias[]> = {
   ],
 }
 
+// 分页验收需要足量数据：为 northwind.cn 补齐 50 个账号与 50 个别名（合计 54 / 53）。
+const previewNorthwindAccounts = domainAccounts['9e8fef40-335f-4d7a-a6c5-7379bb9aa401']!
+for (let index = 1; index <= 50; index++) {
+  const localPart = `team${String(index).padStart(2, '0')}`
+  previewNorthwindAccounts.push({
+    id: `f1cfe00a-f41b-43e2-a7a3-9f06${String(1000 + index).padStart(6, '0')}`,
+    address: `${localPart}@northwind.cn`,
+    isEnabled: index % 7 !== 0,
+    quotaBytes: 10_737_418_240,
+    usedBytes: (index * 137_000_000) % 8_000_000_000,
+    createdAt: new Date(Date.UTC(2026, 3, 1 + (index % 25), 9)).toISOString(),
+    aliasCount: 0,
+  })
+}
+
+const previewNorthwindAliases = domainAliases['9e8fef40-335f-4d7a-a6c5-7379bb9aa401']!
+for (let index = 1; index <= 50; index++) {
+  const target = previewNorthwindAccounts[index % previewNorthwindAccounts.length]!
+  previewNorthwindAliases.push({
+    id: `a11a5000-0000-4000-8000-0000000001${String(index).padStart(2, '0')}`,
+    source: `alias${String(index).padStart(2, '0')}@northwind.cn`,
+    targetAccountId: target.id,
+    targetAddress: target.address,
+    isEnabled: index % 11 !== 0,
+    legacyDestinationAddress: null,
+    mode: index % 3 === 0 ? 'ReceiveOnly' : 'SendReceive',
+    canReceive: true,
+    canSend: index % 3 !== 0,
+  })
+  target.aliasCount++
+}
+
 const domainRules: Record<string, MockDomainRule[]> = {
   '9e8fef40-335f-4d7a-a6c5-7379bb9aa401': [
     { id: '771e0000-0000-4000-8000-000000000001', domainId: '9e8fef40-335f-4d7a-a6c5-7379bb9aa401', name: '隔离高风险附件', direction: 'Incoming', matchMode: 'Any', targetMailboxName: 'Junk', isEnabled: true, priority: 10, conditions: [{ id: 'c1', field: 'AttachmentName', operator: 'ContainsAny', values: ['.exe', '.js'], position: 0 }], actions: [{ id: 'a1', kind: 'MoveToFolder', values: ['Junk'], position: 0 }] },
@@ -1428,7 +1460,7 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
     const accounts = domainAccounts[domain.id] ?? []
     const aliases = domainAliases[domain.id] ?? []
     return {
-      accountCount: domain.accountCount, enabledAccountCount: Math.max(0, domain.accountCount - accounts.filter(account => !account.isEnabled).length),
+      accountCount: Math.max(domain.accountCount, accounts.length), enabledAccountCount: accounts.length ? accounts.filter(account => account.isEnabled).length : domain.accountCount,
       aliasCount: Math.max(aliases.length, domain.id.endsWith('401') ? 47 : aliases.length), pendingDeliveries: domain.id.endsWith('401') ? 18 : 4,
       failedDeliveries: domain.id.endsWith('402') ? 5 : 1, hasCertificate: domain.hasCertificate,
       certificateNotAfter: domain.certificateNotAfter ?? null, hasDkim: true, lastAuditAt: '2026-09-18T04:20:08Z', pendingQuarantineCount: 3,
@@ -1444,6 +1476,16 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
     const rows = (domainAccounts[domain.id] ?? []).filter(account => (!query || account.address.toLowerCase().includes(query))
       && (enabled === null || account.isEnabled === (enabled === 'true')))
     return page(rows, Number(url.searchParams.get('page') || 1), Number(url.searchParams.get('pageSize') || 10)) as T
+  }
+
+  const domainAccountListMatch = url.pathname.match(/^\/domains\/([^/]+)\/accounts$/)
+  if (domainAccountListMatch && method === 'GET') {
+    const domain = domains.find(candidate => candidate.id === domainAccountListMatch[1])
+    if (!domain) throw new Error('邮件域不存在')
+    // 与真实 API 一致：按启用优先、地址升序返回全量账号，供别名目标选择器使用。
+    return structuredClone((domainAccounts[domain.id] ?? [])
+      .slice()
+      .sort((left, right) => (Number(right.isEnabled) - Number(left.isEnabled)) || left.address.localeCompare(right.address))) as T
   }
 
   const createDomainAccountMatch = url.pathname.match(/^\/domains\/([^/]+)\/accounts$/)
