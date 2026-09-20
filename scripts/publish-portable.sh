@@ -51,6 +51,16 @@ else
   esac
 fi
 for RID in $RUNTIMES; do
+  # Republish into a clean directory. Copying over an existing tree leaves
+  # stale bundles behind (for example a view that has since been deleted), and
+  # the whole package is copied to production, so stale files ship silently.
+  case "$RID" in
+    "" | */* | . | ..)
+      echo "Refusing to clean '$OUTPUT/$RID'." >&2
+      exit 1
+      ;;
+  esac
+  rm -rf "$OUTPUT/$RID"
   mkdir -p "$OUTPUT/$RID"
   TEMP_ARTIFACTS="$(mktemp -d "${TMPDIR:-/tmp}/mailserver-publish-$RID.XXXXXX")"
   PLATFORM_ARGS=""

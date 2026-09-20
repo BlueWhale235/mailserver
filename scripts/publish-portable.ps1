@@ -80,6 +80,19 @@ if ($Runtime.Count -eq 0) {
 
 foreach ($rid in $Runtime) {
     $target = Join-Path $PSScriptRoot "..\$Output\$rid"
+
+    # Republish into a clean directory. Incremental publishes leave stale
+    # bundles behind (for example a view that has since been deleted), and the
+    # whole package is copied to production, so stale files ship silently.
+    if (Test-Path -LiteralPath $target) {
+        $resolvedRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\$Output"))
+        $resolvedTarget = [System.IO.Path]::GetFullPath($target)
+        if (-not $resolvedTarget.StartsWith($resolvedRoot, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Refusing to clean '$resolvedTarget' because it is outside '$resolvedRoot'."
+        }
+        Remove-Item -LiteralPath $resolvedTarget -Recurse -Force
+    }
+
     New-Item -ItemType Directory -Path $target -Force | Out-Null
     $temporaryArtifacts = Join-Path ([System.IO.Path]::GetTempPath()) "mailserver-publish-$rid-$([guid]::NewGuid().ToString('N'))"
     $platformArgs = if ($rid.EndsWith("-x64", [StringComparison]::OrdinalIgnoreCase)) { @("-p:Platform=x64") } else { @() }

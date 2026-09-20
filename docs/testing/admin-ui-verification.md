@@ -407,3 +407,29 @@
 - 真实浏览器（mock 预览）验收：发信规则新建时动作下拉含「保存副本到文件夹」，选中后文件夹字段标签为「Sent 副本文件夹」且未选文件夹时提示「请选择 Sent 副本的目标文件夹」并禁用保存；删光动作后提示「请至少添加一个执行动作」且保存禁用；同时放 `Reject` 与 `ForwardTo` 时提示「拒绝发信与转发不能同时使用，请删除其中一个动作」且保存禁用；保存 `MoveToFolder=Junk` 的发信规则后列表摘要显示「保存副本到文件夹：Junk」，重新打开回显一致；上移规则后提示「规则执行顺序已更新。」且序号与顺序重新从服务器读取；全程控制台无 error/exception。
 
 本轮仍未验证：真实后端（非 Mock）下的规则动作写入与 Sent 副本落盘、文件夹删除后的规则重定向、真实 PostgreSQL/MySQL 行为；Linux 实机部署。总体目标仍未完成。
+
+## 2026-09-20：彻底清除节点遗留标识并修复发布包旧资源残留
+
+按「都去掉节点残留标识」的要求，把从源码到发布产物做了一次三层核查，并修掉了一个会让已删除页面继续随包上线的构建缺陷。
+
+已核查（三层扫描全部 0 命中）：
+
+- **被跟踪文件**：`git grep` 全仓库（含二进制）检索旧主备节点标识字面量、`nodeId` / `nodeName` / `NodeRole` 均为 0 命中；源码、Mock、插件与模板中不再出现「节点」「集群」「主节点」「副本节点」。
+- **渲染后页面**：用 CDP 扫描 26 个页面的 `document.documentElement.outerHTML`（含隐藏元素与弹窗模板）——15 个顶层页 + 11 个域详情子页，关键词全部 0 命中，控制台无 error。发信规则页出现的「副本」是「保存副本到文件夹」的正常业务文案，不是节点残留。
+- **发布产物**：`src/MailServer.Admin/dist`、`src/MailServer.Api/wwwroot`、`builds/` 下的静态资源与单文件可执行（按 UTF-8 与 UTF-16 双向检索）均为 0 命中。
+
+已修复（`scripts/publish-portable.ps1`、`scripts/publish-portable.sh`）：
+
+- **发布前清理目标目录**：原脚本直接 `dotnet publish -o <target>` 覆盖写入，从不删除旧文件。增量发布会把已经删掉的页面 bundle 留在目录里，而整个目录会被拷贝到生产环境，于是旧资源静默随包上线——上一轮删除的集群视图正是这样残留在 `builds/publish/*/wwwroot/admin/assets/ClusterView-*.js` 和旧版 `index-*.js` 的路由表里。
+- PowerShell 版本在删除前会用 `[System.IO.Path]::GetFullPath` 归一化路径，并断言目标仍位于 `builds/publish` 之下，否则直接抛错拒绝清理。
+- Shell 版本用 `case` 拒绝空值、含斜杠、`.` 与 `..` 的 RID，确保 `rm -rf` 只作用于 `$OUTPUT/$RID`。
+- 两种实现都为纯新增，未改动原有换行或既有逻辑。
+
+验证：
+
+- 重新离线还原并发布 linux-x64 单文件包：`mailserver` 126,121,065 字节；对发布目录再做 UTF-8/UTF-16 检索，`ClusterView`、旧节点标识字面量、「集群」均为 0 命中，也确认没有 `MailServer.*.deps.json` / `.pdb` / `appsettings.json` 等宿主残留。
+- 清掉 `builds/bin` 下最后 6 个 9/2 旧集群产物（`ClusterView-*.js` 与 `MailServer.Cluster.*`），`builds/` 整车检索已归零。
+- `powershell -File scripts/publish-portable.ps1` 的清理分支实跑生效（目标目录被整体删除后重建）；脚本内 `dotnet publish` 因沙箱无网络触发 NuGet 还原失败，故改用本地缓存离线发布完成验证。
+- 后端 `dotnet test` 228 项全部通过；前端 `vue-tsc --noEmit`、`npm run lint`（0 warning）、Vitest 96 项（10 文件）、Vite 生产构建均通过。
+
+本轮仍未验证：Shell 版本脚本无法在 Windows 上执行（仅目视核对，缺少 `sh -n`）、Linux 实机部署、真实后端写入链路。总体目标仍未完成。
