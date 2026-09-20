@@ -1,5 +1,6 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import { useAuthStore } from './stores/auth'
+import { setSessionExpiredHandler } from './lib/api'
 import AppShell from './layouts/AppShell.vue'
 import { enablePreviewMode, isPreviewMode } from './lib/mockApi'
 
@@ -31,10 +32,34 @@ const router = createRouter({
   ]
 })
 
+/**
+ * 任意 API 返回 401 时统一清理会话并回到登录页，保留安全的站内返回地址。
+ * 并发 401 由 api.ts 去重，这里只处理一次；403 不触发本逻辑。
+ */
+function installSessionExpiryHandler() {
+  setSessionExpiredHandler(() => {
+    const auth = useAuthStore()
+    const current = router.currentRoute.value
+    // 启动时的会话探测也会得到 401（此时本就没有会话），不应提示“会话已过期”。
+    if (!auth.session) return
+    const redirect = current.name === 'login' ? undefined : current.fullPath
+    auth.clearSession()
+    if (current.name === 'login') return
+    void router.replace({
+      name: 'login',
+      query: {
+        expired: '1',
+        ...(redirect && redirect.startsWith('/') && !redirect.startsWith('//') ? { redirect } : {}),
+      },
+    })
+  })
+}
+
 router.beforeEach(async to => {
   if (import.meta.env.DEV && (to.query.preview === '1' || isPreviewMode())) {
     enablePreviewMode()
   }
+  installSessionExpiryHandler()
   const auth = useAuthStore()
   await auth.initialize()
   if (!to.meta.public && !auth.session) return { name: 'login', query: { redirect: to.fullPath } }

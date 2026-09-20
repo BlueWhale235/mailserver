@@ -16,6 +16,13 @@ export interface PermissionSnapshot {
   domainPermissions: Record<string, string[]>
 }
 
+const emptyPermissions = (): PermissionSnapshot => ({
+  fullAccess: false,
+  systemPermissions: [],
+  allDomainPermissions: [],
+  domainPermissions: {},
+})
+
 export const useAuthStore = defineStore('auth', () => {
   const session = ref<Session | null>(null)
   const permissions = ref<PermissionSnapshot>({
@@ -34,8 +41,7 @@ export const useAuthStore = defineStore('auth', () => {
       session.value = await api<Session>('/session/me')
       permissions.value = await api<PermissionSnapshot>('/session/permissions')
     } catch {
-      session.value = null
-      permissions.value = { fullAccess: false, systemPermissions: [], allDomainPermissions: [], domainPermissions: {} }
+      clearSession()
     }
     initialized.value = true
   }
@@ -57,7 +63,7 @@ export const useAuthStore = defineStore('auth', () => {
 
   async function login(userName: string, password: string, remember: boolean) {
     session.value = null
-    permissions.value = { fullAccess: false, systemPermissions: [], allDomainPermissions: [], domainPermissions: {} }
+    permissions.value = emptyPermissions()
     const nextSession = await api<Session>('/session/login', {
       method: 'POST',
       body: jsonBody({ userName, password, remember }),
@@ -67,11 +73,23 @@ export const useAuthStore = defineStore('auth', () => {
     initialized.value = true
   }
 
-  async function logout() {
-    await api<void>('/session/logout', { method: 'POST' })
+  /**
+   * 清空本地会话与权限。用于退出登录，以及 API 统一上报的 401 会话失效。
+   * 不发送网络请求，避免会话已失效时继续调用后端。
+   */
+  function clearSession() {
     session.value = null
-    permissions.value = { fullAccess: false, systemPermissions: [], allDomainPermissions: [], domainPermissions: {} }
+    permissions.value = emptyPermissions()
+    initialized.value = true
   }
 
-  return { session, permissions, initialized, permissionsLoaded, initialize, can, login, logout }
+  async function logout() {
+    try {
+      await api<void>('/session/logout', { method: 'POST' })
+    } finally {
+      clearSession()
+    }
+  }
+
+  return { session, permissions, initialized, permissionsLoaded, initialize, can, login, logout, clearSession }
 })

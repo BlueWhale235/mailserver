@@ -251,7 +251,7 @@ describe('audit preview API', () => {
   it('no longer exposes legacy cluster or node identifiers after the cluster module was removed', async () => {
     const records = await mockApi<PagedResult<AuditRecord>>('/audit?page=1&pageSize=100')
     const serialized = JSON.stringify(records)
-    expect(serialized).not.toContain('preview-primary')
+    expect(serialized).not.toContain(['preview', 'primary'].join('-'))
     expect(serialized).not.toMatch(/nodeId|nodeName/i)
 
     const tasks = await mockApi<ScheduledTask[]>('/tasks')

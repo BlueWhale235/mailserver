@@ -100,6 +100,74 @@ describe('API client', () => {
     expect(fetchMock.mock.calls[1]?.[1].body).toBe(form)
   })
 
+  it('notifies the session-expired handler once and classifies the 401 error', async () => {
+    const problem = { title: 'Unauthorized', detail: '登录会话已过期', traceId: 'trace-401' }
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify(problem), { status: 401 })))
+    const { api, setSessionExpiredHandler } = await import('./api')
+    const handler = vi.fn()
+    setSessionExpiredHandler(handler)
+
+    await expect(api('/overview')).rejects.toMatchObject({ status: 401, kind: 'session-expired' })
+    expect(handler).toHaveBeenCalledTimes(1)
+    expect(handler).toHaveBeenCalledWith(expect.objectContaining({ traceId: 'trace-401' }))
+  })
+
+  it('deduplicates concurrent 401 responses into a single notification', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ title: 'Unauthorized' }), { status: 401 })))
+    const { api, setSessionExpiredHandler } = await import('./api')
+    const handler = vi.fn()
+    setSessionExpiredHandler(handler)
+
+    const results = await Promise.allSettled([api('/overview'), api('/domains'), api('/tasks')])
+
+    expect(results.every(result => result.status === 'rejected')).toBe(true)
+    expect(handler).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not treat 403 responses as an expired session', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ title: 'Forbidden', detail: '权限不足' }), { status: 403 })))
+    const { api, setSessionExpiredHandler } = await import('./api')
+    const handler = vi.fn()
+    setSessionExpiredHandler(handler)
+
+    await expect(api('/domains')).rejects.toMatchObject({ status: 403, kind: 'forbidden' })
+    expect(handler).not.toHaveBeenCalled()
+  })
+
+  it('classifies a network failure without leaking a raw TypeError', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('Failed to fetch')))
+    const { api } = await import('./api')
+
+    await expect(api('/overview')).rejects.toMatchObject({
+      status: 0,
+      kind: 'network',
+      problem: expect.objectContaining({ title: '无法连接到服务器' }),
+    })
+  })
+
+  it('allows a later 401 to notify again after the session is reset', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ title: 'Unauthorized' }), { status: 401 })))
+    const { api, resetSessionExpiryState, setSessionExpiredHandler } = await import('./api')
+    const handler = vi.fn()
+    setSessionExpiredHandler(handler)
+
+    await expect(api('/overview')).rejects.toMatchObject({ status: 401 })
+    resetSessionExpiryState()
+    await expect(api('/domains')).rejects.toMatchObject({ status: 401 })
+
+    expect(handler).toHaveBeenCalledTimes(2)
+  })
+
+  it('routes a 401 from a protected download through the session-expired handler', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ title: 'Unauthorized' }), { status: 401 })))
+    const { apiDownload, setSessionExpiredHandler } = await import('./api')
+    const handler = vi.fn()
+    setSessionExpiredHandler(handler)
+
+    await expect(apiDownload('/audit/export')).rejects.toMatchObject({ status: 401 })
+    expect(handler).toHaveBeenCalledTimes(1)
+  })
+
   it('downloads a protected export with CSRF and preserves the server filename', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(Response.json({ token: 'export-csrf' }))

@@ -15,6 +15,7 @@ const remember = ref(false)
 const showPassword = ref(false)
 const loading = ref(false)
 const error = ref('')
+const sessionExpired = ref(route.query.expired === '1')
 const previewCredentialsApplied = ref(false)
 const form = ref<{ validate: () => Promise<{ valid: boolean }> } | null>(null)
 const requiredAccount = (value: string) => !!value.trim() || '请输入管理员账号'
@@ -24,12 +25,14 @@ function applyPreviewCredentials() {
   userName.value = 'preview-admin'
   password.value = 'preview-password'
   error.value = ''
+  sessionExpired.value = false
   previewCredentialsApplied.value = true
 }
 
 async function submit() {
   if (loading.value) return
   error.value = ''
+  sessionExpired.value = false
 
   if (!(await form.value?.validate())?.valid) return
 
@@ -124,6 +127,10 @@ async function submit() {
             {{ error }}
           </v-alert>
 
+          <v-alert v-if="sessionExpired && !error" role="status" type="warning" variant="tonal" density="compact" class="login-notice">
+            登录会话已过期，请重新登录后继续。
+          </v-alert>
+
           <label for="administrator-account">管理员账号</label>
           <v-text-field
             id="administrator-account"
@@ -138,7 +145,7 @@ async function submit() {
             required
             autofocus
             prepend-inner-icon="mdi-account-outline"
-            @update:model-value="value => { userName = String(value ?? ''); error = '' }"
+            @update:model-value="value => { userName = String(value ?? ''); error = ''; sessionExpired = false }"
           />
 
           <label for="administrator-password">密码</label>
@@ -155,7 +162,7 @@ async function submit() {
             :readonly="loading"
             required
             prepend-inner-icon="mdi-lock-outline"
-            @update:model-value="value => { password = String(value ?? ''); error = '' }"
+            @update:model-value="value => { password = String(value ?? ''); error = ''; sessionExpired = false }"
           >
             <template #append-inner>
               <v-btn

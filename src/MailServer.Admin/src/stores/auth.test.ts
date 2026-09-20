@@ -11,6 +11,27 @@ describe('permission scope', () => {
     expect(auth.can('queue.manage')).toBe(false)
     expect(auth.can('dashboard.read')).toBe(false)
   })
+  it('clearSession wipes the session and every permission without a network call', () => {
+    const auth = useAuthStore()
+    auth.session = { id: 'admin', userName: 'admin' }
+    auth.permissions.fullAccess = true
+    auth.permissions.systemPermissions = ['settings.manage']
+    auth.permissions.allDomainPermissions = ['domain.read']
+    auth.permissions.domainPermissions = { 'domain.manage': ['domain-a'] }
+
+    auth.clearSession()
+
+    expect(auth.session).toBeNull()
+    expect(auth.initialized).toBe(true)
+    expect(auth.permissions).toEqual({
+      fullAccess: false,
+      systemPermissions: [],
+      allDomainPermissions: [],
+      domainPermissions: {},
+    })
+    expect(auth.permissionsLoaded).toBe(false)
+  })
+
   it('keeps domain and quarantine grants inside the authorized domain', () => {
     const auth = useAuthStore()
     auth.permissions.domainPermissions = { 'domain.manage': ['domain-a'] }
