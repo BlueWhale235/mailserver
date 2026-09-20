@@ -498,6 +498,87 @@ public sealed class MailRulesAndAliasesTests
         Assert.Single(jobs, job => job.Recipient == "outside@audit.test");
     }
 
+    [Fact]
+    public async Task RuleActionsRejectEmptyAndCombinedRejectForward()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var factory = environment.Services.GetRequiredService<IDbContextFactory<MailDbContext>>();
+        var rules = environment.Services.GetRequiredService<MailRuleService>();
+        Guid domainId;
+        await using (var db = await factory.CreateDbContextAsync())
+        {
+            var domain = new MailDomain { Name = "actions.test" };
+            db.Add(domain);
+            await db.SaveChangesAsync();
+            domainId = domain.Id;
+        }
+
+        MailRuleConditionInput[] conditions =
+            [new(MailRuleField.Subject, MailRuleOperator.ContainsAny, ["invoice"])];
+
+        // 显式提交空动作必须被拒绝，避免保存后静默多出一个动作。
+        await Assert.ThrowsAsync<FormatException>(() => rules.CreateAsync(
+            domainId,
+            new MailRuleInput(
+                "Empty actions",
+                MailRuleDirection.Incoming,
+                MailRuleMatchMode.All,
+                "INBOX",
+                true,
+                conditions,
+                []),
+            "test",
+            CancellationToken.None));
+
+        // 旧客户端省略 Actions（null）仍兼容：按 targetMailboxName 补默认移动动作。
+        var legacy = await rules.CreateAsync(
+            domainId,
+            new MailRuleInput(
+                "Legacy client",
+                MailRuleDirection.Incoming,
+                MailRuleMatchMode.All,
+                "Archive",
+                true,
+                conditions),
+            "test",
+            CancellationToken.None);
+        Assert.Equal("Archive", legacy.TargetMailboxName);
+        Assert.Equal(MailRuleActionKind.MoveToFolder, Assert.Single(legacy.Actions).Kind);
+
+        // 发信规则允许 MoveToFolder，用于决定 Sent 副本落盘目录。
+        var outgoing = await rules.CreateAsync(
+            domainId,
+            new MailRuleInput(
+                "Sent archive",
+                MailRuleDirection.Outgoing,
+                MailRuleMatchMode.All,
+                "Sent",
+                true,
+                conditions,
+                [new MailRuleActionInput(MailRuleActionKind.MoveToFolder, ["Archive"])]),
+            "test",
+            CancellationToken.None);
+        Assert.Equal("Archive", outgoing.TargetMailboxName);
+        Assert.Equal(MailRuleActionKind.MoveToFolder, Assert.Single(outgoing.Actions).Kind);
+
+        // 同一规则的拒绝与转发互斥。
+        await Assert.ThrowsAsync<FormatException>(() => rules.CreateAsync(
+            domainId,
+            new MailRuleInput(
+                "Reject and forward",
+                MailRuleDirection.Outgoing,
+                MailRuleMatchMode.All,
+                "Sent",
+                true,
+                conditions,
+                [
+                    new MailRuleActionInput(MailRuleActionKind.Reject, ["禁止外发"]),
+                    new MailRuleActionInput(MailRuleActionKind.ForwardTo, ["audit@example.test"])
+                ]),
+            "test",
+            CancellationToken.None));
+    }
+
     private static MimeMessage ParseMessage(string raw) => MimeMessage.Load(new MemoryStream(Encoding.UTF8.GetBytes(raw)));
 
     [Fact]

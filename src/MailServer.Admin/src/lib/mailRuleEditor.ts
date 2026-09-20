@@ -32,6 +32,7 @@ export function conditionError(condition: { field: string; operator: string; val
 }
 
 export function ruleActionError(direction: string, actions: Array<{ kind: string; values: string[] }>) {
+  if (!actions.length) return '请至少添加一个执行动作'
   if (actions.length > 21) return '执行动作最多 21 条'
   let moves = 0
   let forwards = 0
@@ -40,9 +41,8 @@ export function ruleActionError(direction: string, actions: Array<{ kind: string
     const values = [...new Set(action.values.map(value => value.trim()).filter(Boolean))]
     const prefix = `动作 ${index + 1}：`
     if (action.kind === 'MoveToFolder') {
-      if (direction !== 'Incoming') return prefix + '只有收信规则支持移动到文件夹'
       if (++moves > 1) return prefix + '一个规则只能包含一个移动动作'
-      if (values.length !== 1) return prefix + '请选择一个目标文件夹'
+      if (values.length !== 1) return prefix + (direction === 'Incoming' ? '请选择一个目标文件夹' : '请选择 Sent 副本的目标文件夹')
     } else if (action.kind === 'ForwardTo') {
       forwards += values.length
       if (!values.length || forwards > 20) return prefix + '转发地址总计应为 1–20 个'
@@ -53,6 +53,7 @@ export function ruleActionError(direction: string, actions: Array<{ kind: string
       if (values.length > 1 || (values[0]?.length ?? 0) > 255) return prefix + '拒绝理由最多 255 个字符'
     } else return prefix + '不支持的动作类型，请重新选择'
   }
+  if (rejects > 0 && forwards > 0) return '拒绝发信与转发不能同时使用，请删除其中一个动作'
   return ''
 }
 
@@ -63,8 +64,9 @@ export const incomingActionItems = [
   { title: '转发到地址', value: 'ForwardTo' },
 ]
 
-/** 发信规则可选动作：转发到地址、拒绝发信。 */
+/** 发信规则可选动作：保存 Sent 副本到文件夹、转发到地址、拒绝发信。 */
 export const outgoingActionItems = [
+  { title: '保存副本到文件夹', value: 'MoveToFolder' },
   { title: '转发到地址', value: 'ForwardTo' },
   { title: '拒绝发信', value: 'Reject' },
 ]
@@ -84,8 +86,12 @@ export function ruleActionPlaceholder(kind: string) {
   return '拒绝理由（可留空，默认使用系统文案）'
 }
 
-export function ruleActionLabel(kind: string) {
-  return [...incomingActionItems, ...outgoingActionItems].find(item => item.value === kind)?.title ?? kind
+/** 动作展示名；MoveToFolder 在收信/发信规则下语义不同，需要按方向取词。 */
+export function ruleActionLabel(kind: string, direction?: string) {
+  const items = direction ? ruleActionItems(direction) : [...incomingActionItems, ...outgoingActionItems]
+  return items.find(item => item.value === kind)?.title
+    ?? [...incomingActionItems, ...outgoingActionItems].find(item => item.value === kind)?.title
+    ?? kind
 }
 
 /** 匹配值里是否使用了 * 或 ? 通配符。 */

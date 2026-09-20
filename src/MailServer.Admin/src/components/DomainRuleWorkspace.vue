@@ -97,6 +97,7 @@ const notice = ref('')
 const editorOpen = ref(false)
 const editingId = ref<string | null>(null)
 const editorError = ref('')
+const editorNotice = ref('')
 const draft = ref({ name: '', matchMode: 'All' as MailRule['matchMode'], isEnabled: true })
 const conditions = ref<RuleCondition[]>([])
 const actions = ref<RuleAction[]>([])
@@ -247,8 +248,14 @@ function openEditor(rule?: MailRule) {
   }))
   if (!conditions.value.length) conditions.value = [{ field: isIncoming.value ? 'Sender' : 'Recipient', operator: 'EqualsAny', values: [] }]
   actions.value = (rule?.actions ?? []).map(action => ({ kind: action.kind, values: [...action.values] }))
-  if (!actions.value.length) actions.value = [defaultAction(isIncoming.value)]
   editorError.value = ''
+  editorNotice.value = ''
+  // 旧规则可能没有执行动作：补一个默认动作并明确提示，避免静默改变规则行为。
+  if (!actions.value.length && rule) {
+    actions.value = [defaultAction(isIncoming.value)]
+    editorNotice.value = '该规则没有执行动作（来自旧版本数据），已默认补充一个动作，请确认后再保存。'
+  }
+  if (!actions.value.length) actions.value = [defaultAction(isIncoming.value)]
   notice.value = ''
   savedSnapshot = ''
   editorOpen.value = true
@@ -264,6 +271,7 @@ function closeEditor() {
   editorOpen.value = false
   editingId.value = null
   editorError.value = ''
+  editorNotice.value = ''
   savedSnapshot = ''
 }
 
@@ -313,7 +321,7 @@ async function save() {
     name: draft.value.name.trim(),
     direction: direction.value,
     matchMode: draft.value.matchMode,
-    targetMailboxName: isIncoming.value ? (moveFolder.value || 'INBOX') : 'Sent',
+    targetMailboxName: moveFolder.value || (isIncoming.value ? 'INBOX' : 'Sent'),
     isEnabled: draft.value.isEnabled,
     conditions: conditions.value.map(condition => ({ field: condition.field, operator: condition.operator, values: [...condition.values] })),
     actions: actions.value.map(action => ({ kind: action.kind, values: [...action.values] })),
@@ -398,7 +406,7 @@ async function moveRule(rule: MailRule, offset: number) {
 function actionSummary(rule: MailRule) {
   if (!rule.actions.length) return rule.direction === 'Incoming' ? `投递到 ${rule.targetMailboxName}` : '保存 Sent 副本'
   return rule.actions.map(action => {
-    const label = ruleActionLabel(action.kind)
+    const label = ruleActionLabel(action.kind, rule.direction)
     return action.values.length ? `${label}：${action.values.join('、')}` : label
   }).join(' · ')
 }
@@ -432,7 +440,7 @@ function actionValuePlaceholder(kind: string) {
         <div>
           <span>收发信规则</span>
           <h2>{{ currentSection.title }}</h2>
-          <p>{{ isIncoming ? '匹配条件支持 * 与 ? 通配符；可移动文件夹或转发给其他地址。' : '匹配条件支持 * 与 ? 通配符；可转发或直接拒绝发信。' }}</p>
+          <p>{{ isIncoming ? '匹配条件支持 * 与 ? 通配符；可移动文件夹或转发给其他地址。' : '匹配条件支持 * 与 ? 通配符；可保存 Sent 副本、转发或直接拒绝发信。' }}</p>
         </div>
         <div class="section-actions">
           <StatusPill v-if="editorOpen && editorDirty" label="未保存" tone="warning" />
@@ -480,6 +488,7 @@ function actionValuePlaceholder(kind: string) {
           <div><b>{{ editingId ? '编辑' : '新建' }}{{ currentSection.title }}</b><small>{{ isIncoming ? '邮件投递给本地账号前按顺序执行' : '已认证账号外发时按顺序执行' }}</small></div>
         </div>
         <v-alert v-if="editorError" type="error" variant="tonal" class="mb-4">{{ editorError }}</v-alert>
+        <v-alert v-if="editorNotice" type="info" variant="tonal" class="mb-4" closable @click:close="editorNotice = ''">{{ editorNotice }}</v-alert>
 
         <div class="editor-grid">
           <v-text-field v-model="draft.name" label="规则名称" placeholder="例如：隔离高风险附件" maxlength="128" counter="128" />
@@ -518,12 +527,12 @@ function actionValuePlaceholder(kind: string) {
 
         <div class="editor-section">
           <div class="editor-section-head">
-            <div><b>执行动作</b><small>{{ isIncoming ? '命中后按列出的动作执行，可同时移动与转发。' : '命中后转发副本；选择拒绝发信会在 SMTP 阶段直接退信。' }}</small></div>
+            <div><b>执行动作</b><small>{{ isIncoming ? '命中后按列出的动作执行，可同时移动与转发。' : '命中后可保存 Sent 副本到指定文件夹、转发副本，或直接拒绝发信（SMTP 阶段退信）。' }}</small></div>
             <v-btn size="small" variant="text" prepend-icon="mdi-plus" :disabled="actions.length >= 21 || saving" @click="addAction">添加动作</v-btn>
           </div>
           <div v-for="(action, index) in actions" :key="`action-${index}`" class="editor-row editor-row--action">
             <v-select :model-value="action.kind" :items="actionItems" label="动作" hide-details @update:model-value="value => changeActionKind(action, value as string)" />
-            <v-select v-if="action.kind === 'MoveToFolder'" :model-value="action.values[0] ?? null" :items="folderItems" label="目标文件夹" hide-details @update:model-value="value => action.values = value ? [String(value)] : []" />
+            <v-select v-if="action.kind === 'MoveToFolder'" :model-value="action.values[0] ?? null" :items="folderItems" :label="isIncoming ? '目标文件夹' : 'Sent 副本文件夹'" hide-details @update:model-value="value => action.values = value ? [String(value)] : []" />
             <v-combobox
               v-else-if="actionNeedsValues(action.kind)"
               v-model="action.values"

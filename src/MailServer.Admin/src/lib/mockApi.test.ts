@@ -637,6 +637,15 @@ describe('domain-detail preview API', () => {
       }),
     })
     expect(created.priority).toBeGreaterThan(Math.max(...incoming.map(rule => rule.priority)))
+    // 显式提交空 actions 必须被拒绝；省略 actions 的旧客户端仍由后端补默认移动动作。
+    await expect(mockApi(`/domains/${domainId}/rules`, {
+      method: 'POST',
+      body: JSON.stringify({
+        name: `QA 空动作 ${suffix}`, direction: 'Incoming', matchMode: 'All', targetMailboxName: 'Junk', isEnabled: true,
+        conditions: [{ field: 'Subject', operator: 'ContainsAny', values: ['qa-preview'] }],
+        actions: [],
+      }),
+    })).rejects.toThrow('至少添加一个执行动作')
     await expect(mockApi(`/domains/${domainId}/rules`, {
       method: 'POST',
       body: JSON.stringify({ name: '', direction: 'Incoming', matchMode: 'All', targetMailboxName: 'INBOX', isEnabled: true, conditions: [] }),
@@ -649,7 +658,8 @@ describe('domain-detail preview API', () => {
     const afterUpdate = await mockApi<Array<{ id: string; isEnabled: boolean; priority: number }>>(`/domains/${domainId}/rules?direction=Incoming`)
     const updated = afterUpdate.find(rule => rule.id === created.id)
     expect(updated?.isEnabled).toBe(false)
-    expect(updated?.priority).toBe(10)
+    // 排序用 0 起始的序号，与后端 ReorderAsync 一致。
+    expect(updated?.priority).toBe(0)
 
     const folders = await mockApi<Array<{ name: string; availableAccounts: number; totalAccounts: number }>>(`/domains/${domainId}/rule-folders`)
     expect(folders.some(folder => folder.name === 'INBOX')).toBe(true)

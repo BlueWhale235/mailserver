@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { conditionError, ruleOperators, ruleActionError, ruleTogglePayload } from './mailRuleEditor'
+import { conditionError, ruleOperators, ruleActionError, ruleActionLabel, ruleTogglePayload } from './mailRuleEditor'
 import { reactive } from 'vue'
 
 describe('mail rule editor contract', () => {
@@ -18,17 +18,35 @@ describe('mail rule editor contract', () => {
     expect(conditionError({ field: 'MessageTime', operator: 'Between', values: ['2026-09-20T08:00:00Z', '2026-09-19T08:00:00Z'] })).not.toBe('')
     expect(conditionError({ field: 'HasAttachment', operator: 'Is', values: ['yes'] })).not.toBe('')
   })
-  it('rejects duplicate moves, invalid forwarding and cross-direction actions', () => {
+  it('validates duplicate moves, invalid forwarding and cross-direction actions', () => {
     const move = { kind: 'MoveToFolder', values: ['Junk'] }
     expect(ruleActionError('Incoming', [move, move])).toContain('只能包含一个')
     expect(ruleActionError('Incoming', [{ kind: 'ForwardTo', values: ['not-an-email'] }])).toContain('完整邮箱地址')
     expect(ruleActionError('Outgoing', [{ kind: 'ForwardTo', values: ['user@example.com'] }])).toBe('')
-    expect(ruleActionError('Outgoing', [move])).toContain('只有收信规则')
+    // 发信规则允许把 Sent 副本保存到指定文件夹（与后端 MailRuleService 一致）。
+    expect(ruleActionError('Outgoing', [move])).toBe('')
+    expect(ruleActionError('Outgoing', [{ kind: 'MoveToFolder', values: [] }])).toContain('Sent 副本的目标文件夹')
     expect(ruleActionError('Incoming', [{ kind: 'Reject', values: [] }])).toContain('只有发信规则')
     expect(ruleActionError('Outgoing', [{ kind: 'Reject', values: [] }])).toBe('')
     expect(ruleActionError('Outgoing', [{ kind: 'Reject', values: ['a', 'b'] }])).toContain('255')
     expect(ruleActionError('Incoming', [move, { kind: 'ForwardTo', values: ['user@example.com'] }])).toBe('')
     expect(ruleActionError('Incoming', [{ kind: 'ForwardTo', values: Array.from({ length: 21 }, (_, i) => `user${i}@example.com`) }])).toContain('1–20')
+  })
+
+  it('requires at least one action and forbids combining reject with forward', () => {
+    expect(ruleActionError('Incoming', [])).toContain('至少添加一个执行动作')
+    expect(ruleActionError('Outgoing', [])).toContain('至少添加一个执行动作')
+    expect(ruleActionError('Outgoing', [
+      { kind: 'Reject', values: ['禁止外发'] },
+      { kind: 'ForwardTo', values: ['audit@example.com'] },
+    ])).toContain('不能同时使用')
+    // 收信规则本来就不允许 Reject，因此不会走到互斥分支。
+    expect(ruleActionError('Incoming', [{ kind: 'MoveToFolder', values: ['Junk'] }])).toBe('')
+  })
+  it('labels move actions by rule direction', () => {
+    expect(ruleActionLabel('MoveToFolder', 'Incoming')).toBe('移动到文件夹')
+    expect(ruleActionLabel('MoveToFolder', 'Outgoing')).toBe('保存副本到文件夹')
+    expect(ruleActionLabel('Reject', 'Outgoing')).toBe('拒绝发信')
   })
   it('does not offer unsupported regex or text comparisons for sizes', () => {
     expect(ruleOperators('Subject').some(item => item.value === 'Regex')).toBe(false)

@@ -655,11 +655,11 @@ for (let index = 1; index <= 50; index++) {
 
 const domainRules: Record<string, MockDomainRule[]> = {
   '9e8fef40-335f-4d7a-a6c5-7379bb9aa401': [
-    { id: '771e0000-0000-4000-8000-000000000001', domainId: '9e8fef40-335f-4d7a-a6c5-7379bb9aa401', name: '隔离高风险附件', direction: 'Incoming', matchMode: 'Any', targetMailboxName: 'Junk', isEnabled: true, priority: 10, conditions: [{ id: 'c1', field: 'AttachmentName', operator: 'ContainsAny', values: ['.exe', '.js'], position: 0 }], actions: [{ id: 'a1', kind: 'MoveToFolder', values: ['Junk'], position: 0 }] },
-    { id: '771e0000-0000-4000-8000-000000000002', domainId: '9e8fef40-335f-4d7a-a6c5-7379bb9aa401', name: '财务通知归档', direction: 'Incoming', matchMode: 'All', targetMailboxName: 'INBOX', isEnabled: true, priority: 20, conditions: [{ id: 'c2', field: 'Recipient', operator: 'EqualsAny', values: ['billing@northwind.cn'], position: 0 }], actions: [{ id: 'a2', kind: 'ForwardTo', values: ['finance@northwind.cn'], position: 0 }] },
-    { id: '771e0000-0000-4000-8000-000000000003', domainId: '9e8fef40-335f-4d7a-a6c5-7379bb9aa401', name: '营销邮件归档', direction: 'Incoming', matchMode: 'Any', targetMailboxName: 'Archives', isEnabled: false, priority: 30, conditions: [{ id: 'c3', field: 'Subject', operator: 'ContainsAny', values: ['*newsletter*', '*促销*'], position: 0 }], actions: [{ id: 'a3', kind: 'MoveToFolder', values: ['Archives'], position: 0 }] },
-    { id: '771e0000-0000-4000-8000-000000000101', domainId: '9e8fef40-335f-4d7a-a6c5-7379bb9aa401', name: '禁止外发含附件的敏感主题', direction: 'Outgoing', matchMode: 'Any', targetMailboxName: 'Sent', isEnabled: true, priority: 10, conditions: [{ id: 'c4', field: 'Subject', operator: 'ContainsAny', values: ['*机密*', '*confidential*'], position: 0 }], actions: [{ id: 'a4', kind: 'Reject', values: ['该主题禁止外发'], position: 0 }] },
-    { id: '771e0000-0000-4000-8000-000000000102', domainId: '9e8fef40-335f-4d7a-a6c5-7379bb9aa401', name: '外发副本抄送合规邮箱', direction: 'Outgoing', matchMode: 'All', targetMailboxName: 'Sent', isEnabled: true, priority: 20, conditions: [{ id: 'c5', field: 'Recipient', operator: 'ContainsAny', values: ['*@partner.test'], position: 0 }], actions: [{ id: 'a5', kind: 'ForwardTo', values: ['compliance@northwind.cn'], position: 0 }] },
+    { id: '771e0000-0000-4000-8000-000000000001', domainId: '9e8fef40-335f-4d7a-a6c5-7379bb9aa401', name: '隔离高风险附件', direction: 'Incoming', matchMode: 'Any', targetMailboxName: 'Junk', isEnabled: true, priority: 0, conditions: [{ id: 'c1', field: 'AttachmentName', operator: 'ContainsAny', values: ['.exe', '.js'], position: 0 }], actions: [{ id: 'a1', kind: 'MoveToFolder', values: ['Junk'], position: 0 }] },
+    { id: '771e0000-0000-4000-8000-000000000002', domainId: '9e8fef40-335f-4d7a-a6c5-7379bb9aa401', name: '财务通知归档', direction: 'Incoming', matchMode: 'All', targetMailboxName: 'INBOX', isEnabled: true, priority: 1, conditions: [{ id: 'c2', field: 'Recipient', operator: 'EqualsAny', values: ['billing@northwind.cn'], position: 0 }], actions: [{ id: 'a2', kind: 'ForwardTo', values: ['finance@northwind.cn'], position: 0 }] },
+    { id: '771e0000-0000-4000-8000-000000000003', domainId: '9e8fef40-335f-4d7a-a6c5-7379bb9aa401', name: '营销邮件归档', direction: 'Incoming', matchMode: 'Any', targetMailboxName: 'Archives', isEnabled: false, priority: 2, conditions: [{ id: 'c3', field: 'Subject', operator: 'ContainsAny', values: ['*newsletter*', '*促销*'], position: 0 }], actions: [{ id: 'a3', kind: 'MoveToFolder', values: ['Archives'], position: 0 }] },
+    { id: '771e0000-0000-4000-8000-000000000101', domainId: '9e8fef40-335f-4d7a-a6c5-7379bb9aa401', name: '禁止外发含附件的敏感主题', direction: 'Outgoing', matchMode: 'Any', targetMailboxName: 'Sent', isEnabled: true, priority: 0, conditions: [{ id: 'c4', field: 'Subject', operator: 'ContainsAny', values: ['*机密*', '*confidential*'], position: 0 }], actions: [{ id: 'a4', kind: 'Reject', values: ['该主题禁止外发'], position: 0 }] },
+    { id: '771e0000-0000-4000-8000-000000000102', domainId: '9e8fef40-335f-4d7a-a6c5-7379bb9aa401', name: '外发副本抄送合规邮箱', direction: 'Outgoing', matchMode: 'All', targetMailboxName: 'Sent', isEnabled: true, priority: 1, conditions: [{ id: 'c5', field: 'Recipient', operator: 'ContainsAny', values: ['*@partner.test'], position: 0 }], actions: [{ id: 'a5', kind: 'ForwardTo', values: ['compliance@northwind.cn'], position: 0 }] },
   ],
 }
 
@@ -1522,7 +1522,9 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
   if (domainRulesMatch && method === 'GET') {
     if (!domains.some(candidate => candidate.id === domainRulesMatch[1])) throw new Error('邮件域不存在')
     const direction = url.searchParams.get('direction') ?? 'Incoming'
-    return structuredClone((domainRules[domainRulesMatch[1]!] ?? []).filter(rule => rule.direction === direction)) as T
+    return structuredClone((domainRules[domainRulesMatch[1]!] ?? [])
+      .filter(rule => rule.direction === direction)
+      .sort((a, b) => a.priority - b.priority)) as T
   }
 
   const createDomainAliasMatch = url.pathname.match(/^\/domains\/([^/]+)\/aliases$/)
@@ -1926,15 +1928,20 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
     if (!(request.conditions ?? []).length) throw new Error('至少需要一个匹配条件')
     if (!request.targetMailboxName) throw new Error('缺少目标文件夹或 Sent 落盘位置')
     if (request.direction !== 'Incoming' && request.direction !== 'Outgoing') throw new Error('规则方向无效')
+    // null（旧客户端未提交 actions）补默认移动动作；显式空数组视为错误，避免静默增加动作。
+    const submittedActions = request.actions == null
+      ? [{ kind: 'MoveToFolder', values: [request.targetMailboxName] }]
+      : request.actions
+    if (!submittedActions.length) throw new Error('请至少添加一个执行动作')
     const rows = domainRules[domain.id] ??= []
     const sameDirection = rows.filter(rule => rule.direction === request.direction)
     const id = globalThis.crypto.randomUUID()
     const rule: MockDomainRule = {
       id, domainId: domain.id, name, direction: request.direction, matchMode: request.matchMode ?? 'All',
       targetMailboxName: request.targetMailboxName, isEnabled: request.isEnabled !== false,
-      priority: sameDirection.reduce((max, candidate) => Math.max(max, candidate.priority), 0) + 10,
+      priority: sameDirection.reduce((max, candidate) => Math.max(max, candidate.priority), -1) + 1,
       conditions: request.conditions.map((condition, index) => ({ id: globalThis.crypto.randomUUID(), field: condition.field, operator: condition.operator, values: condition.values ?? [], position: index })),
-      actions: (request.actions ?? []).map((action, index) => ({ id: globalThis.crypto.randomUUID(), kind: action.kind, values: action.values ?? [], position: index })),
+      actions: submittedActions.map((action, index) => ({ id: globalThis.crypto.randomUUID(), kind: action.kind, values: action.values ?? [], position: index })),
     }
     rows.push(rule)
     noteDomainAudit('rule.create', 'Create', '创建收发信规则', 'rule:' + id, name, domain.id)
@@ -1947,7 +1954,7 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
     const request = JSON.parse(String(init.body)) as { direction: MockDomainRule['direction']; ruleIds: string[] }
     const rows = (domainRules[domain.id] ?? []).filter(rule => rule.direction === request.direction)
     if (rows.length !== request.ruleIds.length || rows.some(rule => !request.ruleIds.includes(rule.id))) throw new Error('排序列表必须包含该方向的全部规则')
-    request.ruleIds.forEach((ruleId, index) => { const rule = rows.find(candidate => candidate.id === ruleId); if (rule) rule.priority = (index + 1) * 10 })
+    request.ruleIds.forEach((ruleId, index) => { const rule = rows.find(candidate => candidate.id === ruleId); if (rule) rule.priority = index })
     noteDomainAudit('rule.reorder', 'Update', '调整收发信规则顺序', 'domain:' + domain.id, 'direction=' + request.direction + ';count=' + rows.length, domain.id)
     return undefined as T
   }
@@ -1968,6 +1975,7 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
     if (!request.name?.trim() || !request.direction || !request.matchMode || !request.targetMailboxName || !request.conditions?.length || typeof request.isEnabled !== 'boolean') {
       throw new Error('更新规则必须提交完整规则，不能只提交启用状态')
     }
+    if (request.actions != null && !request.actions.length) throw new Error('请至少添加一个执行动作')
     rule.direction = request.direction
     if (request.name !== undefined) rule.name = request.name.trim()
     if (request.matchMode) rule.matchMode = request.matchMode

@@ -481,7 +481,8 @@ public sealed partial class MailRuleService(
         if (name.Length is < 1 or > 128) throw new FormatException("Rule name must contain 1 to 128 characters.");
         if (input.Conditions.Count is < 1 or > 20) throw new FormatException("A rule must contain 1 to 20 conditions.");
         var actions = ValidateActions(input.Direction, input.Actions, input.TargetMailboxName);
-        // 目标文件夹不再是独立表单字段：收信规则取移动动作，发信规则的 Sent 副本固定写回 Sent。
+        // 目标文件夹不再是独立表单字段：取移动动作的值（收信=投递文件夹，发信=Sent 副本落盘文件夹），
+        // 没有移动动作时回落到默认值。
         var target = actions.FirstOrDefault(x => x.Kind == MailRuleActionKind.MoveToFolder)?.Values[0]
                      ?? (input.Direction == MailRuleDirection.Incoming ? "INBOX" : "Sent");
         var conditions = input.Conditions.Select(ValidateCondition).ToArray();
@@ -493,9 +494,12 @@ public sealed partial class MailRuleService(
         IReadOnlyList<MailRuleActionInput>? inputActions,
         string legacyTargetMailboxName)
     {
-        var supplied = inputActions is { Count: > 0 }
-            ? inputActions
-            : [new MailRuleActionInput(MailRuleActionKind.MoveToFolder, [legacyTargetMailboxName])];
+        // 旧客户端只提交 targetMailboxName 而不带 actions：仅这种情况补默认移动动作，保持兼容。
+        // 显式提交空 actions 视为错误，避免“保存后静默多出一个动作”。
+        IReadOnlyList<MailRuleActionInput> supplied = inputActions is null
+            ? [new MailRuleActionInput(MailRuleActionKind.MoveToFolder, [legacyTargetMailboxName])]
+            : inputActions;
+        if (supplied.Count == 0) throw new FormatException("A rule must contain at least one action.");
         if (supplied.Count > 21) throw new FormatException("A rule may contain at most 21 actions.");
         var result = new List<MailRuleActionInput>();
         var moveCount = 0;
@@ -535,7 +539,8 @@ public sealed partial class MailRuleService(
             result.Add(new MailRuleActionInput(action.Kind, values));
         }
 
-        if (result.Count == 0) throw new FormatException("A rule must contain at least one action.");
+        if (rejectCount > 0 && forwardCount > 0)
+            throw new FormatException("A rule cannot combine reject and forward actions.");
         return result;
     }
 
