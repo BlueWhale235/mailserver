@@ -5,7 +5,7 @@ import StatusPill from '../../components/StatusPill.vue'
 import { usePermission } from '../../composables/usePermission'
 import DeliveryJobDetailDialog from './DeliveryJobDetailDialog.vue'
 import { deliveryStatusPresentation, formatDate, shortId } from './deliveryPresentation'
-import type { DeliveryJob, DeliveryStatus, DeliveryWorkspace, PagedResult } from './types'
+import type { DeliveryBatchResult, DeliveryJob, DeliveryStatus, DeliveryWorkspace, PagedResult } from './types'
 
 const props = defineProps<{
   mode: DeliveryWorkspace
@@ -137,13 +137,14 @@ async function retrySelected() {
   notice.value = ''
   const jobs = [...retryableSelected.value]
   try {
-    const results = await Promise.allSettled(jobs.map(job => api(queuePath('/' + job.id + '/retry'), { method: 'POST' })))
-    const failed = jobs.filter((_, index) => results[index]?.status === 'rejected')
-    const succeeded = jobs.length - failed.length
-    notice.value = succeeded ? `已安排 ${succeeded} 个任务立即重试` : ''
-    selected.value = failed.map(job => job.id)
+    const result = await api<DeliveryBatchResult>(queuePath('/batch/retry'), {
+      method: 'POST', body: JSON.stringify({ ids: jobs.map(job => job.id) }),
+    })
+    const failed = result.items.filter(item => item.status !== 'Succeeded')
+    notice.value = result.succeeded ? `已安排 ${result.succeeded} 个任务立即重试` : ''
+    selected.value = failed.map(item => item.id)
     await load()
-    if (failed.length) error.value = `${failed.length} 个任务重试失败，已保留选中，请检查后重试。`
+    if (failed.length) error.value = failed.map(item => `${shortId(item.id)}：${item.detail || item.status}`).join('；')
     emit('changed')
   } catch (cause) { error.value = cause instanceof Error ? cause.message : '批量重试失败' }
   finally { actionBusy.value = false }
@@ -162,14 +163,15 @@ async function confirmDelete() {
   notice.value = ''
   const jobs = [...deleteTargets.value]
   try {
-    const results = await Promise.allSettled(jobs.map(job => api(queuePath('/' + job.id), { method: 'DELETE' })))
-    const failed = jobs.filter((_, index) => results[index]?.status === 'rejected')
-    const succeeded = jobs.length - failed.length
-    notice.value = succeeded ? `已永久删除 ${succeeded} 个投递任务` : ''
+    const result = await api<DeliveryBatchResult>(queuePath('/batch/delete'), {
+      method: 'POST', body: JSON.stringify({ ids: jobs.map(job => job.id) }),
+    })
+    const failed = result.items.filter(item => item.status !== 'Succeeded')
+    notice.value = result.succeeded ? `已永久删除 ${result.succeeded} 个投递任务` : ''
     deleteTargets.value = []
-    selected.value = failed.filter(job => job.status !== 'Processing').map(job => job.id)
+    selected.value = failed.map(item => item.id)
     await load()
-    if (failed.length) error.value = `${failed.length} 个任务删除失败，已保留选中，请检查后重试。`
+    if (failed.length) error.value = failed.map(item => `${shortId(item.id)}：${item.detail || item.status}`).join('；')
     emit('changed')
   } catch (cause) { error.value = cause instanceof Error ? cause.message : '删除投递任务失败' }
   finally { actionBusy.value = false }

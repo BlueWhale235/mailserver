@@ -1695,9 +1695,28 @@ api.MapPost("/queues/{id:guid}/retry", async (
     AdminApplicationService administration,
     CancellationToken cancellationToken) =>
 {
-    await administration.RetryDeliveryAsync(id, Actor(http), cancellationToken);
-    return Results.Accepted();
+    try
+    {
+        await administration.RetryDeliveryAsync(id, Actor(http), cancellationToken);
+        return Results.Accepted();
+    }
+    catch (KeyNotFoundException) { return Results.NotFound(); }
+    catch (DeliveryStateConflictException) { return DeliveryConflict(http); }
 }).RequirePermission(PermissionCodes.QueueRetry);
+
+api.MapPost("/queues/batch/retry", async (
+    IdBatchRequest request, HttpContext http, AdminApplicationService administration, CancellationToken cancellationToken) =>
+{
+    try { return Results.Ok(await administration.BatchRetryDeliveriesAsync(request.Ids, Actor(http), cancellationToken)); }
+    catch (ArgumentException exception) { return Results.Problem(statusCode: 400, title: "批量投递请求无效", detail: exception.Message, type: "https://mailserver.local/problems/invalid-delivery-batch", extensions: new Dictionary<string, object?> { ["traceId"] = http.TraceIdentifier }); }
+}).RequirePermission(PermissionCodes.QueueRetry);
+
+api.MapPost("/queues/batch/delete", async (
+    IdBatchRequest request, HttpContext http, AdminApplicationService administration, CancellationToken cancellationToken) =>
+{
+    try { return Results.Ok(await administration.BatchDeleteDeliveriesAsync(request.Ids, Actor(http), cancellationToken)); }
+    catch (ArgumentException exception) { return Results.Problem(statusCode: 400, title: "批量投递请求无效", detail: exception.Message, type: "https://mailserver.local/problems/invalid-delivery-batch", extensions: new Dictionary<string, object?> { ["traceId"] = http.TraceIdentifier }); }
+}).RequirePermission(PermissionCodes.QueueDelete);
 
 api.MapDelete("/queues/{id:guid}", async (
     Guid id,
@@ -1711,6 +1730,7 @@ api.MapDelete("/queues/{id:guid}", async (
         return Results.NoContent();
     }
     catch (KeyNotFoundException) { return Results.NotFound(); }
+    catch (DeliveryStateConflictException) { return DeliveryConflict(http); }
 }).RequirePermission(PermissionCodes.QueueDelete);
 
 api.MapGet("/delivery/tls-reports", async (
@@ -1804,6 +1824,21 @@ api.MapPost("/domains/{domainId:guid}/queue/{id:guid}/retry", async (
         return Results.Accepted();
     }
     catch (KeyNotFoundException) { return Results.NotFound(); }
+    catch (DeliveryStateConflictException) { return DeliveryConflict(http); }
+}).RequireDomainPermission(PermissionCodes.DomainManage, "domainId");
+
+api.MapPost("/domains/{domainId:guid}/queue/batch/retry", async (
+    Guid domainId, IdBatchRequest request, HttpContext http, AdminApplicationService administration, CancellationToken cancellationToken) =>
+{
+    try { return Results.Ok(await administration.BatchRetryDeliveriesAsync(request.Ids, Actor(http), cancellationToken, domainId)); }
+    catch (ArgumentException exception) { return Results.Problem(statusCode: 400, title: "批量投递请求无效", detail: exception.Message, type: "https://mailserver.local/problems/invalid-delivery-batch", extensions: new Dictionary<string, object?> { ["traceId"] = http.TraceIdentifier }); }
+}).RequireDomainPermission(PermissionCodes.DomainManage, "domainId");
+
+api.MapPost("/domains/{domainId:guid}/queue/batch/delete", async (
+    Guid domainId, IdBatchRequest request, HttpContext http, AdminApplicationService administration, CancellationToken cancellationToken) =>
+{
+    try { return Results.Ok(await administration.BatchDeleteDeliveriesAsync(request.Ids, Actor(http), cancellationToken, domainId)); }
+    catch (ArgumentException exception) { return Results.Problem(statusCode: 400, title: "批量投递请求无效", detail: exception.Message, type: "https://mailserver.local/problems/invalid-delivery-batch", extensions: new Dictionary<string, object?> { ["traceId"] = http.TraceIdentifier }); }
 }).RequireDomainPermission(PermissionCodes.DomainManage, "domainId");
 
 api.MapDelete("/domains/{domainId:guid}/queue/{id:guid}", async (
@@ -1819,6 +1854,7 @@ api.MapDelete("/domains/{domainId:guid}/queue/{id:guid}", async (
         return Results.NoContent();
     }
     catch (KeyNotFoundException) { return Results.NotFound(); }
+    catch (DeliveryStateConflictException) { return DeliveryConflict(http); }
 }).RequireDomainPermission(PermissionCodes.DomainManage, "domainId");
 
 api.MapGet("/settings/delivery", async (
@@ -2046,6 +2082,13 @@ static async Task BootstrapAdminAsync(
 }
 
 static string Actor(HttpContext http) => http.User.Identity?.Name ?? "unknown";
+
+static IResult DeliveryConflict(HttpContext http) => Results.Problem(
+    statusCode: StatusCodes.Status409Conflict,
+    title: "投递任务状态冲突",
+    detail: "任务正在投递、已被处理或已由其他管理员更改，请刷新队列后重试。",
+    type: "https://mailserver.local/problems/delivery-conflict",
+    extensions: new Dictionary<string, object?> { ["traceId"] = http.TraceIdentifier });
 
 static bool IsStrongPassword(string password) => !string.IsNullOrWhiteSpace(password) && password.Length >= 12;
 

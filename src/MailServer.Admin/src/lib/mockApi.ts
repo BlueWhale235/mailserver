@@ -2221,14 +2221,38 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
     } as T
   }
 
+  const batchQueueMatch = url.pathname.match(/^(?:\/domains\/([^/]+))?\/queues?\/batch\/(retry|delete)$/)
+  if (batchQueueMatch && method === 'POST') {
+    const request = JSON.parse(String(init.body)) as { ids: string[] }
+    if (!Array.isArray(request.ids) || request.ids.length < 1 || request.ids.length > 100 || new Set(request.ids).size !== request.ids.length) throw new Error('请输入 1 至 100 个不重复的任务 ID')
+    const domain = batchQueueMatch[1] ? domains.find(item => item.id === batchQueueMatch[1]) : undefined
+    if (batchQueueMatch[1] && !domain) throw new Error('邮件域不存在')
+    const operation = batchQueueMatch[2]
+    const items = request.ids.map(id => {
+      const job = deliveryJobs.find(item => item.id === id && (!domain || item.sender.endsWith('@' + domain.name) || item.recipient.endsWith('@' + domain.name)))
+      if (!job) return { id, status: 'NotFound', detail: '投递任务不存在或无权访问。' }
+      if (job.status === 'Processing' || (operation === 'retry' && job.status !== 'Failed' && job.status !== 'Deferred')) return { id, status: 'Conflict', detail: '任务状态已变化，请刷新列表后重试。' }
+      if (operation === 'retry') {
+        job.status = 'Pending'; job.nextAttemptAt = new Date().toISOString(); job.updatedAt = new Date().toISOString(); job.lastError = undefined
+      } else deliveryJobs = deliveryJobs.filter(item => item.id !== id)
+      return { id, status: 'Succeeded', detail: null }
+    })
+    const succeeded = items.filter(item => item.status === 'Succeeded').length
+    return { items, succeeded, failed: items.length - succeeded } as T
+  }
+
   const domainQueueActionMatch = url.pathname.match(/^\/domains\/([^/]+)\/queue\/([^/]+)(\/retry)?$/)
   if (domainQueueActionMatch && (method === 'POST' || method === 'DELETE')) {
-    const job = deliveryJobs.find(item => item.id === domainQueueActionMatch[2])
+    const domain = domains.find(item => item.id === domainQueueActionMatch[1])
+    const job = deliveryJobs.find(item => item.id === domainQueueActionMatch[2]
+      && domain && (item.sender.endsWith('@' + domain.name) || item.recipient.endsWith('@' + domain.name)))
     if (!job) throw new Error('投递任务不存在')
     if (method === 'POST') {
+      if (job.status !== 'Failed' && job.status !== 'Deferred') throw new Error('任务状态已变化，请刷新列表后重试')
       job.status = 'Pending'; job.nextAttemptAt = new Date().toISOString(); job.updatedAt = new Date().toISOString(); job.lastError = undefined
       return undefined as T
     }
+    if (job.status === 'Processing') throw new Error('投递中的任务不可删除')
     deliveryJobs = deliveryJobs.filter(item => item.id !== job.id)
     return undefined as T
   }
@@ -2302,6 +2326,7 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
   if (retryMatch && method === 'POST') {
     const job = deliveryJobs.find(item => item.id === retryMatch[1])
     if (!job) throw new Error('投递任务不存在')
+    if (job.status !== 'Failed' && job.status !== 'Deferred') throw new Error('任务状态已变化，请刷新列表后重试')
     job.status = 'Pending'; job.nextAttemptAt = new Date().toISOString(); job.updatedAt = new Date().toISOString(); job.lastError = undefined
     addPreviewAudit({ content: '立即重试投递任务', category: 'BackgroundTask', status: 'Succeeded', actor: 'preview-admin', action: 'queue.retry', resource: `delivery:${job.id}`, detail: `${job.sender} -> ${job.recipient}`, remoteAddress: '127.0.0.1', requestId: `req-queue-${Date.now()}`, relatedId: job.id, createdAt: new Date().toISOString(), changes: [] })
     return undefined as T
@@ -2311,6 +2336,7 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
   if (deleteMatch && method === 'DELETE') {
     const job = deliveryJobs.find(item => item.id === deleteMatch[1])
     if (!job) throw new Error('投递任务不存在')
+    if (job.status === 'Processing') throw new Error('投递中的任务不可删除')
     deliveryJobs = deliveryJobs.filter(job => job.id !== deleteMatch[1])
     addPreviewAudit({ content: '删除投递任务', category: 'Delete', status: 'Succeeded', actor: 'preview-admin', action: 'queue.delete', resource: `delivery:${job.id}`, detail: `${job.sender} -> ${job.recipient}`, remoteAddress: '127.0.0.1', requestId: `req-queue-${Date.now()}`, relatedId: job.id, createdAt: new Date().toISOString(), changes: [] })
     return undefined as T

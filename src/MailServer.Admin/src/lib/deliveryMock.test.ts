@@ -1,9 +1,29 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { DeliveryAttempt, DeliveryJob, DeliverySummary, PagedResult, TlsReportDeliveryDetail } from '../views/delivery/types'
+import type { DeliveryAttempt, DeliveryBatchResult, DeliveryJob, DeliverySummary, PagedResult, TlsReportDeliveryDetail } from '../views/delivery/types'
 
 beforeEach(() => vi.resetModules())
 
 describe('delivery preview contract', () => {
+  it('returns per-item outcomes and blocks duplicate retry and processing deletion', async () => {
+    const { mockApi } = await import('./mockApi')
+    const jobs = (await mockApi<PagedResult<DeliveryJob>>('/queues')).items
+    const failed = jobs.find(job => job.status === 'Failed')!
+    const processing = jobs.find(job => job.status === 'Processing')!
+    const first = await mockApi<DeliveryBatchResult>('/queues/batch/retry', {
+      method: 'POST', body: JSON.stringify({ ids: [failed.id, processing.id] }),
+    })
+    expect(first.items.map(item => item.status)).toEqual(['Succeeded', 'Conflict'])
+    const repeated = await mockApi<DeliveryBatchResult>('/queues/batch/retry', {
+      method: 'POST', body: JSON.stringify({ ids: [failed.id] }),
+    })
+    expect(repeated.items[0]?.status).toBe('Conflict')
+    const deletion = await mockApi<DeliveryBatchResult>('/queues/batch/delete', {
+      method: 'POST', body: JSON.stringify({ ids: [failed.id, processing.id] }),
+    })
+    expect(deletion.items.map(item => item.status)).toEqual(['Succeeded', 'Conflict'])
+    expect((await mockApi<PagedResult<DeliveryJob>>('/queues')).items.some(job => job.id === processing.id)).toBe(true)
+  })
+
   it('keeps active, delivered and failed scopes separate and summary consistent', async () => {
     const { mockApi } = await import('./mockApi')
     const active = await mockApi<PagedResult<DeliveryJob>>('/queues?scope=Active')

@@ -957,7 +957,19 @@ public sealed class CoreTests
             await Assert.ThrowsAsync<KeyNotFoundException>(() =>
                 administration.DeleteDeliveryAsync(firstJobId, "test", CancellationToken.None, secondDomainId));
 
-            await administration.RetryDeliveryAsync(firstJobId, "test", CancellationToken.None, firstDomainId);
+            var wrongDomainBatch = await administration.BatchRetryDeliveriesAsync(
+                [firstJobId], "test", CancellationToken.None, secondDomainId);
+            Assert.Equal("NotFound", wrongDomainBatch.Items[0].Status);
+            var rightDomainBatch = await administration.BatchRetryDeliveriesAsync(
+                [firstJobId], "test", CancellationToken.None, firstDomainId);
+            Assert.Equal("Succeeded", rightDomainBatch.Items[0].Status);
+            var duplicateBatch = await administration.BatchRetryDeliveriesAsync(
+                [firstJobId], "test", CancellationToken.None, firstDomainId);
+            Assert.Equal("Conflict", duplicateBatch.Items[0].Status);
+            await Assert.ThrowsAsync<ArgumentException>(() =>
+                administration.BatchRetryDeliveriesAsync(
+                    [firstJobId, firstJobId], "test", CancellationToken.None, firstDomainId));
+
             await using (var verification = await factory.CreateDbContextAsync())
             {
                 Assert.Equal(

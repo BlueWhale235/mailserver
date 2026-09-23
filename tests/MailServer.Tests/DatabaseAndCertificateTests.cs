@@ -33,6 +33,7 @@ public sealed class DatabaseAndCertificateTests
                 .Build();
             var collection = new ServiceCollection();
             collection.AddLogging();
+            collection.AddSingleton<IConfiguration>(configuration);
             collection.AddMailServerInfrastructure(configuration);
             await using var services = collection.BuildServiceProvider();
             var factory = services.GetRequiredService<IDbContextFactory<MailDbContext>>();
@@ -60,6 +61,70 @@ public sealed class DatabaseAndCertificateTests
 
             Assert.Single(leased);
             Assert.Equal(DeliveryStatus.Processing, leased[0].Status);
+            await Assert.ThrowsAsync<DeliveryStateConflictException>(() =>
+                queue.RetryNowAsync(leased[0].Id, CancellationToken.None));
+            await Assert.ThrowsAsync<DeliveryStateConflictException>(() =>
+                queue.DeleteAsync(leased[0].Id, CancellationToken.None));
+
+            Guid failedId;
+            await using (var db = await factory.CreateDbContextAsync())
+            {
+                var failed = new DeliveryJob
+                {
+                    MessageId = leased[0].MessageId,
+                    Sender = "sender@example.com",
+                    Recipient = "other@example.net",
+                    Status = DeliveryStatus.Failed
+                };
+                db.DeliveryJobs.Add(failed);
+                await db.SaveChangesAsync();
+                failedId = failed.Id;
+            }
+            var administration = services.GetRequiredService<AdminApplicationService>();
+            var retry = await administration.BatchRetryDeliveriesAsync(
+                [failedId, leased[0].Id], "test", CancellationToken.None);
+            Assert.Equal(1, retry.Succeeded);
+            Assert.Equal("Conflict", retry.Items[1].Status);
+            var repeated = await administration.BatchRetryDeliveriesAsync(
+                [failedId], "test", CancellationToken.None);
+            Assert.Equal("Conflict", repeated.Items[0].Status);
+            var deletion = await administration.BatchDeleteDeliveriesAsync(
+                [failedId, leased[0].Id], "test", CancellationToken.None);
+            Assert.Equal("Succeeded", deletion.Items[0].Status);
+            Assert.Equal("Conflict", deletion.Items[1].Status);
+            await using (var db = await factory.CreateDbContextAsync())
+            {
+                Assert.True(await db.DeliveryJobs.AnyAsync(x => x.Id == leased[0].Id));
+                Assert.False(await db.DeliveryJobs.AnyAsync(x => x.Id == failedId));
+                Assert.Contains(await db.AuditRecords.ToListAsync(), x => x.Action == "queue.batch-delete");
+            }
+            Guid unreferencedJobId;
+            Guid unreferencedMessageId;
+            await using (var db = await factory.CreateDbContextAsync())
+            {
+                var message = new StoredMessage
+                {
+                    ContentKey = new string('b', 64),
+                    EnvelopeFrom = "sender@example.com",
+                    Size = 42
+                };
+                var job = new DeliveryJob
+                {
+                    Message = message,
+                    Sender = "sender@example.com",
+                    Recipient = "target@example.net"
+                };
+                db.AddRange(message, job);
+                await db.SaveChangesAsync();
+                unreferencedJobId = job.Id;
+                unreferencedMessageId = message.Id;
+            }
+            await administration.DeleteDeliveryAsync(unreferencedJobId, "test", CancellationToken.None);
+            await using (var db = await factory.CreateDbContextAsync())
+            {
+                Assert.False(await db.DeliveryJobs.AnyAsync(x => x.Id == unreferencedJobId));
+                Assert.False(await db.Messages.AnyAsync(x => x.Id == unreferencedMessageId));
+            }
             await services.VerifyMailDatabaseAsync();
         }
         finally

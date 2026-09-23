@@ -12,6 +12,12 @@ export interface DeliveryJob {
   updatedAt: string
 }
 
+export interface DeliveryBatchResult {
+  items: { id: string; status: 'Succeeded' | 'NotFound' | 'Conflict'; detail?: string }[]
+  succeeded: number
+  failed: number
+}
+
 export interface DeliverySummary {
   pending: number
   processing: number
@@ -97,4 +103,3 @@ export interface DnsDiagnosticResult {
   mxConnectivity: MxConnectivityDiagnostic[]
   warnings: string[]
 }
-

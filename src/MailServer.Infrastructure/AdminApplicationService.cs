@@ -116,6 +116,11 @@ public sealed record DeliveryQueueSummary(
     int DeliveredLast24Hours,
     int FailedLast24Hours,
     double AverageAttemptMillisecondsLast24Hours);
+public sealed record DeliveryBatchItemResult(Guid Id, string Status, string? Detail);
+public sealed record DeliveryBatchResult(
+    IReadOnlyList<DeliveryBatchItemResult> Items,
+    int Succeeded,
+    int Failed);
 public enum DeliveryJobScope
 {
     Any = 0,
@@ -1935,7 +1940,21 @@ public sealed class AdminApplicationService(
                 ?? throw new KeyNotFoundException("Delivery job not found.");
             contentKey = job.Message.ContentKey;
             messageId = job.MessageId;
-            db.DeliveryJobs.Remove(job);
+            if (!db.Database.IsRelational())
+            {
+                if (job.Status == DeliveryStatus.Processing || job.LeaseOwner is not null)
+                    throw new DeliveryStateConflictException("A job held by a delivery worker cannot be deleted.");
+                db.DeliveryJobs.Remove(job);
+            }
+            else
+            {
+                var deleted = await db.DeliveryJobs
+                    .Where(x => x.Id == id && x.Status != DeliveryStatus.Processing && x.LeaseOwner == null)
+                    .ExecuteDeleteAsync(cancellationToken);
+                if (deleted == 0)
+                    throw new DeliveryStateConflictException("A job held by a delivery worker cannot be deleted.");
+                db.Entry(job).State = EntityState.Detached;
+            }
             AddAudit(db, actor, "queue.delete", $"delivery:{id}", job.Recipient);
             await db.SaveChangesAsync(cancellationToken);
 
@@ -1956,6 +1975,52 @@ public sealed class AdminApplicationService(
         }
 
         await contentStore.DeleteIfUnreferencedAsync(contentKey, cancellationToken);
+    }
+
+    public async Task<DeliveryBatchResult> BatchRetryDeliveriesAsync(
+        IReadOnlyList<Guid> ids, string actor, CancellationToken cancellationToken, Guid? routeDomainId = null) =>
+        await BatchDeliveriesAsync(ids, actor, "retry", routeDomainId, cancellationToken);
+
+    public async Task<DeliveryBatchResult> BatchDeleteDeliveriesAsync(
+        IReadOnlyList<Guid> ids, string actor, CancellationToken cancellationToken, Guid? routeDomainId = null) =>
+        await BatchDeliveriesAsync(ids, actor, "delete", routeDomainId, cancellationToken);
+
+    private async Task<DeliveryBatchResult> BatchDeliveriesAsync(
+        IReadOnlyList<Guid> ids, string actor, string operation, Guid? routeDomainId, CancellationToken cancellationToken)
+    {
+        if (ids is null || ids.Count is < 1 or > 100 || ids.Any(x => x == Guid.Empty) || ids.Distinct().Count() != ids.Count)
+            throw new ArgumentException("Provide 1 to 100 distinct, nonempty delivery IDs.", nameof(ids));
+
+        var items = new List<DeliveryBatchItemResult>(ids.Count);
+        foreach (var id in ids)
+        {
+            try
+            {
+                if (operation == "retry")
+                    await RetryDeliveryAsync(id, actor, cancellationToken, routeDomainId);
+                else
+                    await DeleteDeliveryAsync(id, actor, cancellationToken, routeDomainId);
+                items.Add(new DeliveryBatchItemResult(id, "Succeeded", null));
+            }
+            catch (KeyNotFoundException)
+            {
+                items.Add(new DeliveryBatchItemResult(id, "NotFound", "投递任务不存在或无权访问。"));
+            }
+            catch (DeliveryStateConflictException)
+            {
+                items.Add(new DeliveryBatchItemResult(id, "Conflict", "任务状态已变化，请刷新列表后重试。"));
+            }
+        }
+
+        var succeeded = items.Count(x => x.Status == "Succeeded");
+        // 审计仅保存目标 ID 的摘要，避免将收件地址或邮件内容写入批量审计。
+        var digest = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
+            string.Join(',', ids.Order()))))[..16];
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+        AddAudit(db, actor, $"queue.batch-{operation}", $"delivery-batch:{digest}",
+            $"total={ids.Count};succeeded={succeeded};failed={items.Count - succeeded};domain={routeDomainId}");
+        await db.SaveChangesAsync(cancellationToken);
+        return new DeliveryBatchResult(items, succeeded, items.Count - succeeded);
     }
 
     private async Task EnsureDeliveryBelongsToDomainAsync(
