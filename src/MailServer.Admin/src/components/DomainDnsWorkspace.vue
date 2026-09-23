@@ -37,6 +37,8 @@ const emit = defineEmits<{
   dkimGenerated: [payload: { selector: string; publicKey: string }]
   check: []
   validate: []
+  dirtyChanged: [dirty: boolean]
+  savingChanged: [saving: boolean]
 }>()
 
 type SectionKey = 'check' | 'spf' | 'dmarc' | 'mta' | 'dane' | 'dkim' | 'records'
@@ -230,7 +232,11 @@ async function copyAll() {
 }
 
 watch(() => props.domainId, () => void load())
-onMounted(load)
+watch(dirty, value => emit('dirtyChanged', value), { immediate: true })
+watch(saving, value => emit('savingChanged', value), { immediate: true })
+onMounted(() => {
+  void load()
+})
 </script>
 
 <template>

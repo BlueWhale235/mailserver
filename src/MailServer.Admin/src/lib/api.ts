@@ -40,9 +40,12 @@ async function request(input: string, init?: RequestInit): Promise<Response> {
   try {
     return await fetch(input, init)
   } catch {
+    const isWrite = !['GET', 'HEAD', 'OPTIONS'].includes((init?.method || 'GET').toUpperCase())
     throw new ApiError(0, {
       title: '无法连接到服务器',
-      detail: '网络连接失败，请检查网络后重试；本次操作未提交。',
+      detail: isWrite
+        ? '网络连接中断，无法确认操作结果。请恢复连接后先核对数据或审计记录，避免重复提交。'
+        : '网络连接失败，请检查网络后重试。',
     }, 'network')
   }
 }
@@ -70,7 +73,7 @@ function notifySessionExpired(problem: ApiProblem) {
 async function ensureCsrf(): Promise<string> {
   if (csrfToken) return csrfToken
   const response = await request('/api/v1/session/csrf', { credentials: 'same-origin' })
-  if (!response.ok) throw new ApiError(response.status, await readProblem(response))
+  if (!response.ok) await rejectResponse(response)
   const payload = await response.json() as { token: string }
   csrfToken = payload.token
   return csrfToken
@@ -82,6 +85,14 @@ async function readProblem(response: Response): Promise<ApiProblem> {
     return { ...problem, detail: problem.detail || problem.error }
   }
   catch { return { status: response.status, title: response.statusText } }
+}
+
+/** 普通请求、令牌请求和下载共用失效处理，且不自动重放写请求。 */
+async function rejectResponse(response: Response): Promise<never> {
+  if ([400, 401, 403].includes(response.status)) csrfToken = null
+  const problem = await readProblem(response)
+  if (response.status === 401) notifySessionExpired(problem)
+  throw new ApiError(response.status, problem)
 }
 
 // Browsers must set the multipart boundary themselves: forcing application/json
@@ -97,16 +108,7 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   if (init.body && !isMultipartBody(init.body) && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json')
   if (!['GET', 'HEAD', 'OPTIONS'].includes(method)) headers.set('X-CSRF-TOKEN', await ensureCsrf())
   const response = await request(`/api/v1${path}`, { ...init, headers, credentials: 'same-origin' })
-  if (!response.ok) {
-    if (response.status === 400 || response.status === 403) csrfToken = null
-    const problem = await readProblem(response)
-    // 401 仅代表会话失效；403/CSRF 失败保留登录态，由调用方提示无权限。
-    if (response.status === 401) {
-      csrfToken = null
-      notifySessionExpired(problem)
-    }
-    throw new ApiError(response.status, problem)
-  }
+  if (!response.ok) await rejectResponse(response)
   // Antiforgery tokens are bound to the identity that requested them.
   if (method === 'POST' && (path === '/session/login' || path === '/session/logout')) {
     csrfToken = null
@@ -132,14 +134,7 @@ export async function apiDownload(path: string, init: RequestInit = {}): Promise
   if (init.body && !isMultipartBody(init.body) && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json')
   if (!['GET', 'HEAD', 'OPTIONS'].includes(method)) headers.set('X-CSRF-TOKEN', await ensureCsrf())
   const response = await request(`/api/v1${path}`, { ...init, headers, credentials: 'same-origin' })
-  if (!response.ok) {
-    const problem = await readProblem(response)
-    if (response.status === 401) {
-      csrfToken = null
-      notifySessionExpired(problem)
-    }
-    throw new ApiError(response.status, problem)
-  }
+  if (!response.ok) await rejectResponse(response)
   const disposition = response.headers.get('Content-Disposition') ?? ''
   const encodedName = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1]
   const plainName = disposition.match(/filename="?([^";]+)"?/i)?.[1]

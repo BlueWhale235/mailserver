@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onBeforeUnmount, ref } from 'vue'
+import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue'
 import { onBeforeRouteLeave } from 'vue-router'
 import { inspectFirewallLines } from '../lib/firewallInput'
 import PageHeader from '../components/PageHeader.vue'
@@ -13,6 +13,10 @@ const canReadQuarantine = computed(() => auth.permissions.fullAccess
 const rules = ref<Rule[]>([])
 const search = ref<string | null>('')
 const statusFilter = ref('all')
+const page = ref(1)
+const pageSize = ref(20)
+const totalCount = ref(0)
+const pageCount = computed(() => Math.max(1, Math.ceil(totalCount.value / pageSize.value)))
 const busy = ref(false)
 const saving = ref(false)
 const error = ref('')
@@ -21,7 +25,6 @@ const notice = ref('')
 const editor = ref(false)
 const target = ref<Rule | null>(null)
 const removing = ref<Rule | null>(null)
-const confirmation = ref('')
 const form = ref({ cidr: '', note: '', isEnabled: true })
 const initialForm = ref('')
 const riskAccepted = ref(false)
@@ -29,17 +32,45 @@ const discardOpen = ref(false)
 const dirty = computed(() => editor.value && JSON.stringify(form.value) !== initialForm.value)
 const inputCheck = computed(() => inspectFirewallLines(form.value.cidr))
 const requiresRiskConfirmation = computed(() => form.value.isEnabled && inputCheck.value.blocksAll && (!target.value || !target.value.isEnabled))
-const shown = computed(() => rules.value.filter(rule =>
-  (rule.cidr + ' ' + (rule.note || '')).toLowerCase().includes((search.value ?? '').trim().toLowerCase())
-  && (statusFilter.value === 'all' || rule.isEnabled === (statusFilter.value === 'enabled')))
-  .sort((a, b) => Number(b.isEnabled) - Number(a.isEnabled) || a.cidr.localeCompare(b.cidr)))
-async function load() {
-  if (busy.value || saving.value || !auth.can('firewall.read')) return
+interface RulePage { items: Rule[]; page: number; pageSize: number; totalCount: number }
+let loadToken = 0
+let searchTimer: ReturnType<typeof globalThis.setTimeout> | undefined
+let skipNextPageLoad = false
+async function load(allowWhileSaving = false) {
+  if ((saving.value && !allowWhileSaving) || !auth.can('firewall.read')) return
+  const token = ++loadToken
+  const requestedPage = page.value
+  const parameters = new globalThis.URLSearchParams({ page: String(requestedPage), pageSize: String(pageSize.value) })
+  const query = (search.value ?? '').trim()
+  if (query) parameters.set('query', query)
+  if (statusFilter.value !== 'all') parameters.set('isEnabled', String(statusFilter.value === 'enabled'))
   busy.value = true; error.value = ''
-  try { rules.value = await api<Rule[]>('/firewall/rules') }
-  catch (e) { error.value = e instanceof Error ? e.message : '防火墙规则加载失败' }
-  finally { busy.value = false }
+  try {
+    const result = await api<RulePage>(`/firewall/rules/search?${parameters}`)
+    if (token !== loadToken) return
+    rules.value = result.items
+    totalCount.value = result.totalCount
+    const validPage = Math.max(1, Math.ceil(result.totalCount / pageSize.value))
+    if (requestedPage > validPage) page.value = validPage
+  }
+  catch (e) { if (token === loadToken) error.value = e instanceof Error ? e.message : '防火墙规则加载失败' }
+  finally { if (token === loadToken) busy.value = false }
 }
+watch([search, statusFilter], () => {
+  if (searchTimer) globalThis.clearTimeout(searchTimer)
+  if (page.value !== 1) { skipNextPageLoad = true; page.value = 1 }
+  searchTimer = globalThis.setTimeout(() => void load(), 300)
+})
+watch(page, () => {
+  if (skipNextPageLoad) { skipNextPageLoad = false; return }
+  if (searchTimer) globalThis.clearTimeout(searchTimer)
+  void load()
+})
+watch(pageSize, () => {
+  if (searchTimer) globalThis.clearTimeout(searchTimer)
+  if (page.value !== 1) { skipNextPageLoad = true; page.value = 1 }
+  void load()
+})
 function edit(rule: Rule | null) {
   if (!auth.can('firewall.manage') || saving.value) return
   target.value = rule; form.value = rule ? { cidr: rule.cidr, note: rule.note || '', isEnabled: rule.isEnabled } : { cidr: '', note: '', isEnabled: true }
@@ -54,11 +85,11 @@ async function save() {
   saving.value = true; formError.value = ''
   try {
     if (target.value) {
-      const updated = await api<Rule>(`/firewall/rules/${target.value.id}`, {
+      await api<Rule>(`/firewall/rules/${target.value.id}`, {
         method: 'PUT', body: jsonBody({ isEnabled: form.value.isEnabled, note: form.value.note.trim() }),
       })
-      rules.value = [...rules.value.filter(rule => rule.id !== updated.id), updated]
       notice.value = '防火墙规则已保存'; editor.value = false
+      await load(true)
     } else {
       const entries = [...inputCheck.value.entries]
       const failed: string[] = []
@@ -78,24 +109,24 @@ async function save() {
       if (failed.length) {
         form.value.cidr = failed.join('\n')
         formError.value = `成功 ${succeeded} 条，失败 ${failed.length} 条。输入框仅保留未成功项：${failures.join('；')}`
-      } else editor.value = false
+      } else { editor.value = false; await load(true) }
     }
   } catch (e) { formError.value = e instanceof Error ? e.message : '保存失败' }
   finally { saving.value = false }
 }
-function requestDelete(rule: Rule) { if (!auth.can('firewall.manage') || saving.value) return; removing.value = rule; confirmation.value = ''; formError.value = '' }
+function requestDelete(rule: Rule) { if (!auth.can('firewall.manage') || saving.value) return; removing.value = rule; formError.value = '' }
 function cancelEdit() { if (saving.value) return; if (dirty.value) discardOpen.value = true; else editor.value = false }
 function beforeUnload(event: globalThis.BeforeUnloadEvent) { if (dirty.value || saving.value) { event.preventDefault(); event.returnValue = '' } }
 onBeforeRouteLeave(() => !saving.value && (!dirty.value || globalThis.confirm('防火墙规则尚未保存，确定离开？')))
 onMounted(() => globalThis.addEventListener('beforeunload', beforeUnload))
-onBeforeUnmount(() => globalThis.removeEventListener('beforeunload', beforeUnload))
+onBeforeUnmount(() => { loadToken += 1; if (searchTimer) globalThis.clearTimeout(searchTimer); globalThis.removeEventListener('beforeunload', beforeUnload) })
 async function remove() {
-  if (!removing.value || saving.value || confirmation.value !== removing.value.cidr || !auth.can('firewall.manage')) return
+  if (!removing.value || saving.value || !auth.can('firewall.manage')) return
   saving.value = true; formError.value = ''
   try {
     await api(`/firewall/rules/${removing.value.id}`, { method: 'DELETE' })
-    rules.value = rules.value.filter(rule => rule.id !== removing.value?.id)
     removing.value = null; notice.value = '规则已删除'
+    await load(true)
   } catch (e) { formError.value = e instanceof Error ? e.message : '删除失败' }
   finally { saving.value = false }
 }
@@ -111,13 +142,14 @@ onMounted(() => { if (auth.can('firewall.read')) void load() })
   <v-alert v-if="error" type="error" variant="tonal" class="mb-4">{{ error }}</v-alert>
   <v-alert v-if="notice" type="success" variant="tonal" closable class="mb-4" @click:close="notice = ''">{{ notice }}</v-alert>
   <section v-if="auth.can('firewall.read')" class="panel">
-    <div class="panel-head"><div><h2>IP 防火墙</h2><p>启用的规则将拦截匹配来源的连接，请核对网段范围。</p></div><span>{{ rules.length }} 条规则</span></div>
-    <div class="table-toolbar"><v-text-field v-model="search" label="筛选 IP 或备注" clearable hide-details/><v-select v-model="statusFilter" label="规则状态" :items="[{ title: '全部状态', value: 'all' }, { title: '已启用', value: 'enabled' }, { title: '已禁用', value: 'disabled' }]" hide-details/><span class="text-caption">匹配 {{ shown.length }} 条</span></div>
+    <div class="panel-head"><div><h2>IP 防火墙</h2><p>启用的规则将拦截匹配来源的连接，请核对网段范围。</p></div><span>{{ totalCount }} 条规则</span></div>
+    <div class="table-toolbar"><v-text-field v-model="search" label="筛选 IP 或备注" clearable hide-details/><v-select v-model="statusFilter" label="规则状态" :items="[{ title: '全部状态', value: 'all' }, { title: '已启用', value: 'enabled' }, { title: '已禁用', value: 'disabled' }]" hide-details/><v-select v-model="pageSize" label="每页" :items="[20, 50, 100]" hide-details/><span class="text-caption">共 {{ totalCount }} 条</span></div>
     <v-progress-linear v-if="busy" indeterminate/>
     <v-table><thead><tr><th>IP / CIDR</th><th>备注</th><th>状态</th><th>操作</th></tr></thead><tbody>
-      <tr v-for="rule in shown" :key="rule.id"><td>{{ rule.cidr }}</td><td>{{ rule.note || '—' }}</td><td>{{ rule.isEnabled ? '已启用' : '已禁用' }}</td><td><template v-if="auth.can('firewall.manage')"><v-btn variant="text" @click="edit(rule)">编辑</v-btn><v-btn variant="text" color="error" @click="requestDelete(rule)">删除</v-btn></template></td></tr>
-      <tr v-if="!shown.length && !busy"><td colspan="4">{{ error ? '规则加载失败，请刷新重试' : search ? '没有匹配的规则' : '尚未配置防火墙规则' }}</td></tr>
+      <tr v-for="rule in rules" :key="rule.id"><td>{{ rule.cidr }}</td><td>{{ rule.note || '—' }}</td><td>{{ rule.isEnabled ? '已启用' : '已禁用' }}</td><td><template v-if="auth.can('firewall.manage')"><v-btn variant="text" @click="edit(rule)">编辑</v-btn><v-btn variant="text" color="error" @click="requestDelete(rule)">删除</v-btn></template></td></tr>
+      <tr v-if="!rules.length && !busy"><td colspan="4">{{ error ? '规则加载失败，请刷新重试' : search ? '没有匹配的规则' : '尚未配置防火墙规则' }}</td></tr>
     </tbody></v-table>
+    <div class="table-footer"><span>第 {{ page }} / {{ pageCount }} 页</span><v-pagination v-model="page" :length="pageCount" density="compact"/></div>
   </section>
   <v-alert v-else type="info" variant="tonal">当前账号没有查看防火墙的权限。</v-alert>
   <div class="d-flex ga-3 mt-5">
@@ -138,6 +170,6 @@ onMounted(() => { if (auth.can('firewall.read')) void load() })
   <v-dialog v-model="discardOpen" max-width="440" persistent><v-card title="放弃未保存的修改？"><v-card-text>当前规则尚未保存，放弃后无法恢复本次输入。</v-card-text><v-card-actions><v-btn @click="discardOpen = false">继续编辑</v-btn><v-btn color="error" @click="discardOpen = false; editor = false">放弃修改</v-btn></v-card-actions></v-card></v-dialog>
   <v-dialog :model-value="!!removing" max-width="520" persistent><v-card v-if="removing" title="删除防火墙规则"><v-card-text>
     <v-alert v-if="formError" type="error" variant="tonal" class="mb-4">{{ formError }}</v-alert>
-    <p class="mb-4">删除后不再通过此规则拦截来源。请输入 {{ removing.cidr }} 确认。</p><v-text-field v-model="confirmation" label="确认 IP / CIDR" :disabled="saving"/>
-  </v-card-text><v-card-actions><v-btn :disabled="saving" @click="removing = null">取消</v-btn><v-btn color="error" :loading="saving" :disabled="confirmation !== removing.cidr" @click="remove">确认删除</v-btn></v-card-actions></v-card></v-dialog>
+    <p>确定删除规则 <b>{{ removing.cidr }}</b>？删除后将不再拦截匹配该规则的来源。</p>
+  </v-card-text><v-card-actions><v-btn :disabled="saving" @click="removing = null">取消</v-btn><v-btn color="error" :loading="saving" @click="remove">确认删除</v-btn></v-card-actions></v-card></v-dialog>
 </template>

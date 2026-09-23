@@ -2420,6 +2420,68 @@ public sealed class CoreTests
     }
 
     [Fact]
+    public async Task QuarantinePreviewIsBoundedSearchIsCaseInsensitiveAndFullRawCanBeDownloaded()
+    {
+        var factory = CreateFactory();
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-quarantine-preview-{Guid.NewGuid():N}");
+        try
+        {
+            var store = new FileMessageContentStore(
+                Options.Create(new StorageOptions { RootPath = root, MaximumMessageBytes = 1024 * 1024 }),
+                factory);
+            Guid domainId;
+            await using (var db = await factory.CreateDbContextAsync())
+            {
+                var domain = new MailDomain { Name = "example.test", QuotaBytes = 1024 * 1024 };
+                db.Accounts.Add(new MailAccount
+                {
+                    Domain = domain,
+                    LocalPart = "alice",
+                    PasswordHash = "unused",
+                    QuotaBytes = 1024 * 1024
+                });
+                await db.SaveChangesAsync();
+                domainId = domain.Id;
+            }
+
+            var service = new QuarantineService(
+                factory,
+                store,
+                new FixedClock(new DateTimeOffset(2026, 9, 21, 8, 0, 0, TimeSpan.Zero)),
+                NullLogger<QuarantineService>.Instance);
+            var message = $"From: Alerts@Example.NET\r\nTo: alice@example.test\r\nSubject: Large sample\r\n\r\n{new string('x', 300 * 1024)}";
+            await using var content = new MemoryStream(Encoding.UTF8.GetBytes(message));
+            var records = await service.CreateAsync(
+                new QuarantineCreateRequest(
+                    "Alerts@Example.NET",
+                    ["alice@example.test"],
+                    "192.0.2.55",
+                    content,
+                    "risk-plugin",
+                    "Risk Scanner",
+                    "Suspicious payload"),
+                CancellationToken.None);
+
+            var search = await service.SearchAsync(domainId, "RISK SCANNER", null, 1, 20, CancellationToken.None);
+            Assert.Single(search.Items);
+
+            var preview = await service.GetRawAsync(domainId, records[0].Id, CancellationToken.None);
+            Assert.True(preview.Truncated);
+            Assert.Equal(256 * 1024, preview.Content.Length);
+
+            var download = await service.OpenRawAsync(domainId, records[0].Id, CancellationToken.None);
+            await using (download.Content)
+            {
+                Assert.True(download.Content.Length > preview.Content.Length);
+            }
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, true);
+        }
+    }
+
+    [Fact]
     public async Task AuditReadPermissionIsSeparateFromDashboardRead()
     {
         var factory = CreateFactory();

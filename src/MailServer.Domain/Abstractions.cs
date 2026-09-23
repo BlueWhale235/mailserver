@@ -48,7 +48,12 @@ public sealed record QuarantineListItem(
 /// <summary>
 /// 隔离邮件原文视图，管理后台用于人工审核内容。
 /// </summary>
-public sealed record QuarantineDetailView(QuarantineListItem Record, string FileName, string Content);
+public sealed record QuarantineDetailView(QuarantineListItem Record, string FileName, string Content, bool Truncated);
+
+/// <summary>
+/// 隔离邮件原始文件下载。调用方负责在响应结束后释放内容流。
+/// </summary>
+public sealed record QuarantineRawDownload(string FileName, Stream Content);
 
 /// <summary>
 /// 计划任务处理器契约。新增维护任务时实现它并在依赖注入中注册。
@@ -103,6 +108,7 @@ public interface IQuarantineService
     Task<IReadOnlyList<QuarantineRecord>> CreateAsync(QuarantineCreateRequest request, CancellationToken cancellationToken);
     Task<PagedQuarantineResult> SearchAsync(Guid domainId, string? search, QuarantineStatus? status, int page, int pageSize, CancellationToken cancellationToken);
     Task<QuarantineDetailView> GetRawAsync(Guid domainId, Guid id, CancellationToken cancellationToken);
+    Task<QuarantineRawDownload> OpenRawAsync(Guid domainId, Guid id, CancellationToken cancellationToken);
     Task ReleaseAsync(Guid domainId, Guid id, string actor, string? note, CancellationToken cancellationToken);
     Task DeleteAsync(Guid domainId, Guid id, string actor, string? note, CancellationToken cancellationToken);
 }

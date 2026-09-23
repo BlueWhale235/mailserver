@@ -1,8 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { defineComponent, reactive } from 'vue'
-import { flushPromises, shallowMount } from '@vue/test-utils'
+import { flushPromises, mount, shallowMount } from '@vue/test-utils'
+import { createVuetify } from 'vuetify'
 import DomainRuleWorkspace from './DomainRuleWorkspace.vue'
 import { api } from '../lib/api'
+import { VForm } from 'vuetify/components/VForm'
+import { VTextField } from 'vuetify/components/VTextField'
 
 vi.mock('../lib/api', () => ({ api: vi.fn(), jsonBody: (value: unknown) => JSON.stringify(value) }))
 
@@ -57,13 +60,14 @@ function deferred<T>() {
 
 const mounted: Array<{ unmount: () => void }> = []
 
-function mountWorkspace() {
-  const wrapper = shallowMount(DomainRuleWorkspace, {
+function mountWorkspace(realInputs = false) {
+  const wrapper = (realInputs ? mount : shallowMount)(DomainRuleWorkspace, {
     props: { domainId: 'domain-1', domainName: 'example.test', canManage: true },
-    global: { stubs: {
+    global: { plugins: realInputs ? [createVuetify({ components: { VForm, VTextField } })] : [], stubs: {
       StatusPill, VIcon: true, VSpacer: true, VProgressLinear: true, VAlert: SlotWrapper,
       VCard: SlotWrapper, VCardText: true, VCardActions: true, VSwitch: true,
-      VBtn: Button, VTextField: TextField, VSelect: true, VCombobox: true, VTooltip: Tooltip,
+      VBtn: Button, VTextField: realInputs ? false : TextField, VSelect: true, VCombobox: true, VTooltip: Tooltip,
+      VForm: realInputs ? false : SlotWrapper,
     } },
   })
   mounted.push(wrapper)
@@ -96,6 +100,52 @@ beforeEach(() => {
 afterEach(() => { mounted.splice(0).forEach(wrapper => wrapper.unmount()); vi.unstubAllGlobals() })
 
 describe('mail rule workspace safeguards', () => {
+  it('disables real Vuetify inputs during a pending save and restores the draft after failure', async () => {
+    vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
+    const wrapper = mountWorkspace(true)
+    await flushPromises()
+    let rejectSave!: (reason: Error) => void
+    const pending = new Promise((_resolve, reject) => { rejectSave = reject })
+    vi.mocked(api).mockImplementation(async (path, options) => {
+      if (options?.method === 'PUT') return pending as never
+      return apiHandler(() => rulesFor('Incoming'))(path, options)
+    })
+    await rowButton(wrapper, '编辑规则')!.trigger('click')
+    await wrapper.find('input').setValue('保存失败后保留的草稿')
+    await wrapper.findAll('button').find(button => button.text().trim() === '保存规则')!.trigger('click')
+    await flushPromises()
+    expect((wrapper.find('input').element as HTMLInputElement).disabled).toBe(true)
+    expect(wrapper.find('form').attributes('aria-busy')).toBe('true')
+    rejectSave(new Error('测试保存失败'))
+    await flushPromises()
+    expect((wrapper.find('input').element as HTMLInputElement).disabled).toBe(false)
+    expect((wrapper.find('input').element as HTMLInputElement).value).toBe('保存失败后保留的草稿')
+    expect(wrapper.text()).toContain('测试保存失败')
+  })
+
+  it('protects dirty drafts against page exit and removes protection after closing or unmounting', async () => {
+    vi.stubGlobal('confirm', vi.fn(() => true))
+    const wrapper = mountWorkspace()
+    await flushPromises()
+    const exitPrevented = () => {
+      const event = new Event('beforeunload', { cancelable: true })
+      window.dispatchEvent(event)
+      return event.defaultPrevented
+    }
+    expect(exitPrevented()).toBe(false)
+    await rowButton(wrapper, '编辑规则')!.trigger('click')
+    expect(exitPrevented()).toBe(false)
+    await wrapper.findComponent({ name: 'VTextField' }).setValue('未保存的新名称')
+    expect(exitPrevented()).toBe(true)
+    await wrapper.findAll('button').find(button => button.text().includes('返回规则列表'))!.trigger('click')
+    expect(exitPrevented()).toBe(false)
+    await rowButton(wrapper, '编辑规则')!.trigger('click')
+    await wrapper.findComponent({ name: 'VTextField' }).setValue('另一个草稿')
+    expect(exitPrevented()).toBe(true)
+    wrapper.unmount()
+    expect(exitPrevented()).toBe(false)
+  })
+
   it('clears the previous direction list immediately and ignores stale responses', async () => {
     const incoming = deferred<unknown>()
     const outgoing = deferred<unknown>()

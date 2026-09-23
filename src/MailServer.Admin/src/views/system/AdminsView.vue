@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { onBeforeRouteLeave } from 'vue-router'
 import { ApiError, api, jsonBody } from '../../lib/api'
 import PageHeader from '../../components/PageHeader.vue'
 import PermissionGrantEditor from '../../components/PermissionGrantEditor.vue'
@@ -64,12 +65,14 @@ const createLoading = ref(false)
 const createError = ref('')
 const createForm = ref({ userName: '', password: '', isEnabled: true })
 const createGrants = ref<GrantInput[]>([{ permissionCode: 'dashboard.read', resourceType: '', resourceKey: '' }])
+const createBaseline = ref('')
 const permissionDomains = ref<DomainOption[]>([])
 const permissionLoading = ref(false)
 
 const editOpen = ref(false)
 const editTarget = ref<AdminUser | null>(null)
 const editForm = ref({ userName: '', password: '', isEnabled: true })
+const editBaseline = ref('')
 
 const grantsOpen = ref(false)
 const grantSubject = ref<AdminUser | null>(null)
@@ -77,10 +80,13 @@ const grantCatalog = ref<PermissionCatalogGroup[]>([])
 const grantSelection = ref<GrantInput[]>([])
 const grantLoading = ref(false)
 const grantSaving = ref(false)
+const grantBaseline = ref('')
 
 const deleteTarget = ref<AdminUser | null>(null)
 const deleteConfirmation = ref('')
 const deleteLoading = ref(false)
+const discardTarget = ref<'create' | 'edit' | 'grants' | 'route' | null>(null)
+let resolvePendingLeave: ((allow: boolean) => void) | null = null
 
 const createValid = computed(() =>
   createForm.value.userName.trim().length > 0
@@ -90,6 +96,20 @@ const createValid = computed(() =>
 const editValid = computed(() =>
   editForm.value.userName.trim().length > 0
   && (!editForm.value.password || editForm.value.password.length >= 12))
+const createSnapshot = computed(() => JSON.stringify({ form: createForm.value, grants: createGrants.value }))
+const createDirty = computed(() => Boolean(createBaseline.value) && createSnapshot.value !== createBaseline.value)
+const editSnapshot = computed(() => JSON.stringify(editForm.value))
+const editDirty = computed(() => Boolean(editBaseline.value) && editSnapshot.value !== editBaseline.value)
+const grantSnapshot = computed(() => JSON.stringify(grantSelection.value))
+const grantDirty = computed(() => Boolean(grantBaseline.value) && grantSnapshot.value !== grantBaseline.value)
+const hasDirtyDialog = computed(() => createDirty.value || editDirty.value || grantDirty.value)
+const discardCopy = computed(() => {
+  if (discardTarget.value === 'create') return '新管理员的账号、密码或初始授权尚未提交。'
+  if (discardTarget.value === 'edit') return '管理员资料或新密码尚未保存。'
+  if (discardTarget.value === 'grants') return '当前管理员的授权修改尚未保存。'
+  const count = [createDirty.value, editDirty.value, grantDirty.value].filter(Boolean).length
+  return `当前有 ${count} 个管理员表单尚未保存。`
+})
 
 async function loadPermissionResources() {
   const [catalog, domains] = await Promise.all([
@@ -132,6 +152,7 @@ async function openCreate() {
   createError.value = ''
   createForm.value = { userName: '', password: '', isEnabled: true }
   createGrants.value = [{ permissionCode: 'dashboard.read', resourceType: '', resourceKey: '' }]
+  createBaseline.value = createSnapshot.value
   permissionLoading.value = true
   try {
     await loadPermissionResources()
@@ -157,6 +178,7 @@ async function createAdmin() {
       }),
     })
     createOpen.value = false
+    createBaseline.value = ''
     createForm.value = { userName: '', password: '', isEnabled: true }
     notice.value = '管理员已创建'
     await loadAdmins()
@@ -170,11 +192,12 @@ async function createAdmin() {
 function openEdit(admin: AdminUser) {
   editTarget.value = admin
   editForm.value = { userName: admin.userName, password: '', isEnabled: admin.isEnabled }
+  editBaseline.value = editSnapshot.value
   editOpen.value = true
 }
 
 async function saveEdit() {
-  if (!editTarget.value || !editValid.value) return
+  if (!editTarget.value || !editValid.value || !editDirty.value) return
   saveLoading.value = true
   error.value = ''
   try {
@@ -187,6 +210,8 @@ async function saveEdit() {
       }),
     })
     editOpen.value = false
+    editForm.value.password = ''
+    editBaseline.value = ''
     notice.value = '管理员信息已更新'
     await loadAdmins()
   } catch (cause) {
@@ -202,12 +227,14 @@ async function openGrants(admin: AdminUser) {
   grantLoading.value = true
   grantSaving.value = false
   grantSelection.value = []
+  grantBaseline.value = ''
   try {
     const [, current] = await Promise.all([
       loadPermissionResources(),
       api<GrantInput[]>(`/admins/${admin.id}/grants`),
     ])
     grantSelection.value = current.map(g => ({ permissionCode: g.permissionCode, resourceType: g.resourceType, resourceKey: g.resourceKey }))
+    grantBaseline.value = grantSnapshot.value
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : '授权信息加载失败'
   } finally {
@@ -216,7 +243,7 @@ async function openGrants(admin: AdminUser) {
 }
 
 async function saveGrants() {
-  if (!grantSubject.value) return
+  if (!grantSubject.value || !grantDirty.value) return
   grantSaving.value = true
   error.value = ''
   try {
@@ -225,6 +252,7 @@ async function saveGrants() {
       body: jsonBody({ grants: grantSelection.value }),
     })
     grantsOpen.value = false
+    grantBaseline.value = grantSnapshot.value
     notice.value = `已保存 ${grantSubject.value.userName} 的授权`
   } catch (cause) {
     error.value = cause instanceof ApiError ? cause.message : '保存授权失败'
@@ -256,7 +284,77 @@ async function confirmDelete() {
   }
 }
 
-onMounted(loadAdmins)
+function requestClose(target: 'create' | 'edit' | 'grants') {
+  const saving = target === 'create' ? createLoading.value : target === 'edit' ? saveLoading.value : grantSaving.value
+  if (saving) return
+  const dirty = target === 'create' ? createDirty.value : target === 'edit' ? editDirty.value : grantDirty.value
+  if (dirty) {
+    discardTarget.value = target
+    return
+  }
+  if (target === 'create') createOpen.value = false
+  else if (target === 'edit') editOpen.value = false
+  else grantsOpen.value = false
+}
+
+function cancelDiscard() {
+  if (discardTarget.value === 'route') resolvePendingLeave?.(false)
+  resolvePendingLeave = null
+  discardTarget.value = null
+}
+
+function confirmDiscard() {
+  const target = discardTarget.value
+  discardTarget.value = null
+  if (target === 'route') {
+    const resolve = resolvePendingLeave
+    resolvePendingLeave = null
+    resolve?.(true)
+    return
+  }
+  if (target === 'create') {
+    createOpen.value = false
+    createForm.value = { userName: '', password: '', isEnabled: true }
+    createGrants.value = [{ permissionCode: 'dashboard.read', resourceType: '', resourceKey: '' }]
+    createBaseline.value = ''
+  } else if (target === 'edit') {
+    editOpen.value = false
+    editForm.value.password = ''
+    editBaseline.value = ''
+  } else if (target === 'grants') {
+    grantsOpen.value = false
+    grantSelection.value = []
+    grantBaseline.value = ''
+  }
+}
+
+function protectPageExit(event: BeforeUnloadEvent) {
+  if (!hasDirtyDialog.value && !createLoading.value && !saveLoading.value && !grantSaving.value) return
+  event.preventDefault()
+  event.returnValue = ''
+}
+
+onBeforeRouteLeave(() => {
+  if (createLoading.value || saveLoading.value || grantSaving.value) {
+    error.value = '管理员信息正在保存，请等待操作完成后再离开。'
+    return false
+  }
+  if (!hasDirtyDialog.value) return true
+  if (resolvePendingLeave) resolvePendingLeave(false)
+  discardTarget.value = 'route'
+  return new Promise<boolean>(resolve => { resolvePendingLeave = resolve })
+})
+onMounted(() => {
+  globalThis.addEventListener('beforeunload', protectPageExit)
+  void loadAdmins()
+})
+onBeforeUnmount(() => {
+  globalThis.removeEventListener('beforeunload', protectPageExit)
+  resolvePendingLeave?.(false)
+  resolvePendingLeave = null
+  createForm.value.password = ''
+  editForm.value.password = ''
+})
 </script>
 
 <template>
@@ -307,7 +405,7 @@ onMounted(loadAdmins)
     </div>
   </v-card>
 
-  <v-dialog v-model="createOpen" max-width="880" :persistent="createLoading">
+  <v-dialog :model-value="createOpen" max-width="880" persistent>
     <v-card>
       <v-card-title class="d-flex align-center gap-2"><v-icon color="primary">mdi-account-plus-outline</v-icon> 新建管理员</v-card-title>
       <v-card-text>
@@ -321,11 +419,11 @@ onMounted(loadAdmins)
         <v-progress-linear v-if="permissionLoading" indeterminate class="mb-4" />
         <PermissionGrantEditor v-else v-model="createGrants" :catalog="grantCatalog" :domains="permissionDomains" :disabled="createLoading" />
       </v-card-text>
-      <v-card-actions><v-spacer /><v-btn variant="text" :disabled="createLoading" @click="createOpen = false">取消</v-btn><v-btn color="primary" :loading="createLoading" :disabled="!createValid || permissionLoading" @click="createAdmin">创建管理员</v-btn></v-card-actions>
+      <v-card-actions><v-spacer /><v-btn variant="text" :disabled="createLoading" @click="requestClose('create')">取消</v-btn><v-btn color="primary" :loading="createLoading" :disabled="!createValid || permissionLoading" @click="createAdmin">创建管理员</v-btn></v-card-actions>
     </v-card>
   </v-dialog>
 
-  <v-dialog v-model="editOpen" max-width="520" :persistent="saveLoading">
+  <v-dialog :model-value="editOpen" max-width="520" persistent>
     <v-card>
       <v-card-title class="d-flex align-center gap-2"><v-icon color="primary">mdi-account-edit-outline</v-icon> 编辑管理员</v-card-title>
       <v-card-text>
@@ -336,11 +434,11 @@ onMounted(loadAdmins)
           :rules="[value => !value || String(value).length >= 12 || '密码至少需要 12 个字符']" />
         <v-switch v-model="editForm.isEnabled" label="启用账号" color="primary" :disabled="editTarget?.isPrimary" />
       </v-card-text>
-      <v-card-actions><v-spacer /><v-btn variant="text" :disabled="saveLoading" @click="editOpen = false">取消</v-btn><v-btn color="primary" :loading="saveLoading" :disabled="!editValid" @click="saveEdit">保存修改</v-btn></v-card-actions>
+      <v-card-actions><v-spacer /><v-btn variant="text" :disabled="saveLoading" @click="requestClose('edit')">取消</v-btn><v-btn color="primary" :loading="saveLoading" :disabled="!editValid || !editDirty" @click="saveEdit">保存修改</v-btn></v-card-actions>
     </v-card>
   </v-dialog>
 
-  <v-dialog v-model="grantsOpen" max-width="880" :persistent="grantSaving">
+  <v-dialog :model-value="grantsOpen" max-width="880" persistent>
     <v-card>
       <v-card-title class="d-flex align-center gap-2">
         <v-icon color="primary">mdi-shield-key-outline</v-icon> 编辑授权 · {{ grantSubject?.userName }}
@@ -349,7 +447,7 @@ onMounted(loadAdmins)
         <v-progress-linear v-if="grantLoading" indeterminate />
         <PermissionGrantEditor v-else v-model="grantSelection" :catalog="grantCatalog" :domains="permissionDomains" :disabled="grantSaving" />
       </v-card-text>
-      <v-card-actions><v-spacer /><v-btn variant="text" :disabled="grantSaving" @click="grantsOpen = false">取消</v-btn><v-btn color="primary" :loading="grantSaving" :disabled="grantLoading || !grantSelection.length" @click="saveGrants">保存授权</v-btn></v-card-actions>
+      <v-card-actions><v-spacer /><v-btn variant="text" :disabled="grantSaving" @click="requestClose('grants')">取消</v-btn><v-btn color="primary" :loading="grantSaving" :disabled="grantLoading || !grantSelection.length || !grantDirty" @click="saveGrants">保存授权</v-btn></v-card-actions>
     </v-card>
   </v-dialog>
 
@@ -363,6 +461,14 @@ onMounted(loadAdmins)
         <v-text-field v-model="deleteConfirmation" label="管理员名称" :disabled="deleteLoading" autofocus />
       </v-card-text>
       <v-card-actions><v-spacer /><v-btn variant="text" :disabled="deleteLoading" @click="deleteTarget = null">取消</v-btn><v-btn color="error" :loading="deleteLoading" :disabled="deleteConfirmation !== deleteTarget.userName" @click="confirmDelete">确认删除</v-btn></v-card-actions>
+    </v-card>
+  </v-dialog>
+
+  <v-dialog :model-value="Boolean(discardTarget)" max-width="500" persistent>
+    <v-card>
+      <v-card-title class="d-flex align-center gap-2"><v-icon color="warning">mdi-alert-outline</v-icon> 放弃未保存修改？</v-card-title>
+      <v-card-text>{{ discardCopy }}关闭或离开后，这些修改将无法恢复。</v-card-text>
+      <v-card-actions><v-spacer /><v-btn variant="text" @click="cancelDiscard">继续编辑</v-btn><v-btn color="error" variant="tonal" @click="confirmDiscard">放弃修改</v-btn></v-card-actions>
     </v-card>
   </v-dialog>
 </template>

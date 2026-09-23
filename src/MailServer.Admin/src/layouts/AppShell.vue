@@ -5,6 +5,7 @@ import { useAuthStore } from '../stores/auth'
 import { isPreviewMode } from '../lib/mockApi'
 import { api, jsonBody } from '../lib/api'
 import ConsoleAlerts from '../components/ConsoleAlerts.vue'
+import { canAccessPage, getPageDefinition, primaryPages, searchablePages } from '../lib/pageAccess'
 
 const route = useRoute()
 const router = useRouter()
@@ -32,34 +33,22 @@ async function changePassword() {
   } catch (e) { passwordError.value = e instanceof Error ? e.message : '密码修改失败' }
   finally { passwordBusy.value = false }
 }
-const pageOptions = computed(() => [
-  { title: '概览', value: '/', permission: 'dashboard.read' },
-  { title: '域与邮箱', value: '/domains', permission: 'domain.read' },
-  { title: '投递', value: '/delivery', permission: 'queue.read' },
-  { title: '管理员与权限', value: '/system/admins', permission: 'admin.account.read' },
-  { title: 'API Key', value: '/system/api-keys', permission: 'api-key.read' },
-  { title: '计划任务', value: '/system/tasks', permission: 'task.read' },
-  { title: '审计日志', value: '/system/audit', permission: 'audit.read' },
-  { title: '插件', value: '/system/plugins', permission: 'settings.read' },
-  { title: '消息模板', value: '/system/message-templates', permission: 'settings.read' },
-  { title: '全局设置', value: '/system/settings', permission: 'settings.read' },
-  { title: '回收站', value: '/system/recycle-bin', permission: 'task.read' },
-].filter(page => auth.can(page.permission)))
+const pageOptions = computed(() => searchablePages
+  .filter(page => canAccessPage(page, auth))
+  .map(page => ({ title: page.title, value: page.path })))
 async function openPage(path: string | null) {
   if (path) await router.push(path)
   selectedPage.value = null
 }
 
-const items = [
-  { title: '概览', icon: 'mdi-view-dashboard-outline', to: '/' },
-  { title: '域与邮箱', icon: 'mdi-at', to: '/domains' },
-  { title: '投递', icon: 'mdi-send-outline', to: '/delivery' },
-  { title: '邮件安全', icon: 'mdi-shield-check-outline', to: '/security' },
-  { title: '系统', icon: 'mdi-cog-outline', to: '/system' },
-]
+const items = computed(() => primaryPages
+  .filter(page => canAccessPage(page, auth))
+  .map(page => ({ title: page.title, icon: page.icon, to: page.path })))
 
 const active = computed(() => (route.path === '/' ? '/' : `/${route.path.split('/')[1]}`))
-const currentTitle = computed(() => items.find(item => item.to === active.value)?.title ?? '概览')
+const currentTitle = computed(() => getPageDefinition(route.name)?.title
+  ?? items.value.find(item => item.to === active.value)?.title
+  ?? (route.name === 'forbidden' ? '访问受限' : '管理中心'))
 const drawer = ref(true)
 const now = ref(new Date())
 const timer = globalThis.setInterval(() => { now.value = new Date() }, 60_000)

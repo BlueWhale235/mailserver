@@ -40,6 +40,17 @@ describe('permission scope', () => {
     expect(auth.can('domain.quarantine.manage', 'domain-a')).toBe(true)
     expect(auth.can('domain.read', 'domain-b')).toBe(false)
     expect(auth.can('domain.read')).toBe(false)
+    expect(auth.canAnyDomain('domain.read')).toBe(true)
+    expect(auth.canAnyDomain('domain.quarantine.read')).toBe(true)
     expect(auth.can('settings.manage')).toBe(false)
+  })
+
+  it('does not treat an empty domain grant or an unrelated system grant as domain access', () => {
+    const auth = useAuthStore()
+    auth.permissions.systemPermissions = ['domain.read']
+    auth.permissions.domainPermissions = { 'domain.manage': [] }
+    expect(auth.canAnyDomain('domain.read')).toBe(false)
+    auth.permissions.allDomainPermissions = ['domain.manage']
+    expect(auth.canAnyDomain('domain.read')).toBe(true)
   })
 })

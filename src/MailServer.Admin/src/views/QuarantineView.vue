@@ -5,7 +5,7 @@ import PageHeader from '../components/PageHeader.vue'
 import StatusPill from '../components/StatusPill.vue'
 import { api, jsonBody } from '../lib/api'
 import { useAuthStore } from '../stores/auth'
-import { quarantineStatuses, type QuarantineDetail, type QuarantinePage, type QuarantineRecord, type QuarantineStatus } from '../lib/quarantine'
+import { downloadQuarantineRaw, quarantineStatuses, type QuarantineDetail, type QuarantinePage, type QuarantineRecord, type QuarantineStatus } from '../lib/quarantine'
 
 const auth = useAuthStore()
 const domains = ref<Array<{ id: string; name: string }>>([])
@@ -23,6 +23,7 @@ const detailOpen = ref(false)
 const detail = ref<QuarantineDetail | null>(null)
 const detailLoading = ref(false)
 const detailError = ref('')
+const downloadLoading = ref(false)
 const target = ref<QuarantineRecord | null>(null)
 const action = ref<'release' | 'delete' | null>(null)
 const note = ref('')
@@ -70,6 +71,15 @@ async function review(record: QuarantineRecord) {
     if (current === detailVersion) { detail.value = result; target.value = result.record }
   } catch (cause) { if (current === detailVersion) detailError.value = cause instanceof Error ? cause.message : '邮件原文读取失败' }
   finally { if (current === detailVersion) detailLoading.value = false }
+}
+async function downloadRaw() {
+  if (!target.value || downloadLoading.value) return
+  downloadLoading.value = true; detailError.value = ''
+  try {
+    const fileName = await downloadQuarantineRaw(target.value.domainId, target.value.id)
+    notice.value = `完整邮件原文已下载：${fileName}`
+  } catch (cause) { detailError.value = cause instanceof Error ? cause.message : '邮件原文下载失败' }
+  finally { downloadLoading.value = false }
 }
 function requestAction(kind: 'release' | 'delete') {
   if (!target.value || target.value.status !== 'PendingReview' || !canManage.value || saving.value) return
@@ -132,9 +142,11 @@ onMounted(loadDomains)
         <dl class="review-facts"><div><dt>发件人</dt><dd>{{ target.sender }}</dd></div><div><dt>收件人</dt><dd>{{ target.recipients.join('、') }}</dd></div><div><dt>隔离原因</dt><dd>{{ target.reason }}</dd></div><div><dt>来源 IP</dt><dd>{{ target.remoteAddress }}</dd></div><div><dt>审核状态</dt><dd>{{ label(target.status) }}</dd></div><div><dt>审核人 / 时间</dt><dd>{{ target.reviewedBy || '—' }} / {{ date(target.reviewedAt) }}</dd></div><div><dt>审核备注</dt><dd>{{ target.reviewNote || '—' }}</dd></div></dl>
         <v-progress-linear v-if="detailLoading" indeterminate />
         <v-alert v-if="detailError" type="error" variant="tonal">{{ detailError }}<v-btn variant="text" @click="review(target)">重新读取</v-btn></v-alert>
-        <h3 class="my-4">原始 MIME 内容</h3><pre v-if="detail" class="quarantine-raw">{{ detail.content }}</pre>
+        <h3 class="my-4">原始 MIME 内容</h3>
+        <v-alert v-if="detail?.truncated" type="info" variant="tonal" class="mb-3">邮件较大，页面仅显示前 256K 字符。请下载完整 .eml 文件继续审阅。</v-alert>
+        <pre v-if="detail" class="quarantine-raw">{{ detail.content }}</pre>
       </v-card-text>
-      <v-card-actions><v-btn :disabled="saving" @click="detailOpen = false">关闭</v-btn><template v-if="canManage && target.status === 'PendingReview'"><v-btn color="error" :disabled="detailLoading || saving" @click="requestAction('delete')">删除</v-btn><v-btn color="primary" :disabled="!detail || detailLoading || saving" @click="requestAction('release')">放行邮件</v-btn></template></v-card-actions>
+      <v-card-actions><v-btn :disabled="saving || downloadLoading" @click="detailOpen = false">关闭</v-btn><v-btn prepend-icon="mdi-download" :loading="downloadLoading" :disabled="detailLoading || saving" @click="downloadRaw">下载完整 .eml</v-btn><template v-if="canManage && target.status === 'PendingReview'"><v-btn color="error" :disabled="detailLoading || saving || downloadLoading" @click="requestAction('delete')">删除</v-btn><v-btn color="primary" :disabled="!detail || detailLoading || saving || downloadLoading" @click="requestAction('release')">放行邮件</v-btn></template></v-card-actions>
     </v-card>
   </v-dialog>
   <v-dialog :model-value="!!action" max-width="560" persistent>

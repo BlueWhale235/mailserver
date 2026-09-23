@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { api, jsonBody } from '../lib/api'
 import PageHeader from '../components/PageHeader.vue'
 import StatusPill from '../components/StatusPill.vue'
@@ -35,16 +35,21 @@ const pageSize = 20
 const totalCount = ref(0)
 const loading = ref(false)
 const error = ref('')
+const notice = ref('')
 const batchLoading = ref(false)
 const deleteOpen = ref(false)
 const deleteConfirm = ref('')
 const deleteBusy = ref(false)
+const deleteTargets = ref<Domain[]>([])
 const dialogError = ref('')
 const { can } = usePermission()
 let searchTimer: ReturnType<typeof globalThis.setTimeout> | undefined
+let requestVersion = 0
+let unmounted = false
 
 const pageCount = computed(() => Math.max(1, Math.ceil(totalCount.value / pageSize)))
 const allSelected = computed(() => rows.value.length > 0 && rows.value.every(item => selected.value.includes(item.id)))
+const activeDeleteTargets = computed(() => deleteTargets.value.filter(item => item.isActive))
 const activeItems = [
   { title: '全部状态', value: null },
   { title: '运行中', value: true },
@@ -68,20 +73,36 @@ function queryString() {
 }
 
 async function loadDomains() {
+  const current = ++requestVersion
+  const query = queryString()
   loading.value = true
   error.value = ''
   try {
-    const result = await api<PagedResult<Domain>>(`/domains/search?${queryString()}`)
+    const result = await api<PagedResult<Domain>>(`/domains/search?${query}`)
+    if (unmounted || current !== requestVersion) return
+    const lastPage = Math.max(1, Math.ceil(result.totalCount / pageSize))
+    if (page.value > lastPage) {
+      page.value = lastPage
+      return
+    }
     rows.value = result.items
     totalCount.value = result.totalCount
     selected.value = selected.value.filter(id => result.items.some(item => item.id === id))
   } catch (cause) {
+    if (unmounted || current !== requestVersion) return
     rows.value = []
     totalCount.value = 0
     error.value = cause instanceof Error ? cause.message : '域列表加载失败'
   } finally {
-    loading.value = false
+    if (!unmounted && current === requestVersion) loading.value = false
   }
+}
+
+function resetAndLoad() {
+  selected.value = []
+  ++requestVersion
+  if (page.value !== 1) page.value = 1
+  else void loadDomains()
 }
 
 function toggleAll(value: boolean | null) {
@@ -95,41 +116,54 @@ function toggleOne(id: string, value: boolean | null) {
 }
 
 async function runDnsChecks() {
-  if (!selected.value.length) return
+  if (!selected.value.length || loading.value || batchLoading.value || deleteBusy.value) return
+  const domainIds = [...selected.value]
   batchLoading.value = true
   error.value = ''
+  notice.value = ''
   try {
     await api('/domains/batch/dns-check', {
       method: 'POST',
-      body: jsonBody({ domainIds: selected.value }),
+      body: jsonBody({ domainIds }),
     })
+    if (unmounted) return
+    notice.value = `已完成 ${domainIds.length} 个域的 Direct MX 检查。`
     await loadDomains()
   } catch (cause) {
+    if (unmounted) return
     error.value = cause instanceof Error ? cause.message : '批量 DNS 检查失败'
   } finally {
-    batchLoading.value = false
+    if (!unmounted) batchLoading.value = false
   }
 }
 
 function openDelete() {
+  deleteTargets.value = rows.value.filter(item => selected.value.includes(item.id))
+  if (!deleteTargets.value.length) return
   deleteConfirm.value = ''
   dialogError.value = ''
   deleteOpen.value = true
 }
 
 async function confirmDelete() {
-  if (!selected.value.length || deleteConfirm.value !== '删除所选域' || deleteBusy.value) return
+  const domainIds = deleteTargets.value.map(item => item.id)
+  if (!domainIds.length || activeDeleteTargets.value.length || deleteConfirm.value !== '删除所选域' || deleteBusy.value) return
   deleteBusy.value = true
   dialogError.value = ''
+  notice.value = ''
   try {
-    await api('/domains/batch/delete', { method: 'POST', body: jsonBody({ domainIds: selected.value }) })
+    await api('/domains/batch/delete', { method: 'POST', body: jsonBody({ domainIds }) })
+    if (unmounted) return
     deleteOpen.value = false
     selected.value = []
+    deleteTargets.value = []
+    notice.value = `已删除 ${domainIds.length} 个邮件域，关联资源已进入清理流程。`
     await loadDomains()
   } catch (cause) {
+    if (unmounted) return
     dialogError.value = cause instanceof Error ? cause.message : '批量删除失败'
   } finally {
-    deleteBusy.value = false
+    if (!unmounted) deleteBusy.value = false
   }
 }
 
@@ -148,36 +182,40 @@ function bytes(value: number) {
 }
 
 watch(search, () => {
+  selected.value = []
+  ++requestVersion
   globalThis.clearTimeout(searchTimer)
-  searchTimer = globalThis.setTimeout(() => { page.value = 1; void loadDomains() }, 350)
+  searchTimer = globalThis.setTimeout(resetAndLoad, 350)
 })
-watch([activeFilter, dnsFilter], () => { page.value = 1; void loadDomains() })
-watch(page, () => { void loadDomains() })
+watch([activeFilter, dnsFilter], resetAndLoad)
+watch(page, () => { selected.value = []; void loadDomains() })
+onBeforeUnmount(() => { unmounted = true; ++requestVersion; globalThis.clearTimeout(searchTimer) })
 onMounted(loadDomains)
 </script>
 
 <template>
   <PageHeader title="域与邮箱" description="管理邮件域、邮箱账号、别名与 Direct MX 配置">
-    <v-btn v-if="can('domain.manage')" variant="outlined" prepend-icon="mdi-dns-outline" :disabled="!selected.length" :loading="batchLoading" @click="runDnsChecks">检查所选域</v-btn>
-    <v-btn v-if="can('domain.manage')" variant="outlined" color="error" prepend-icon="mdi-delete-outline" :disabled="!selected.length || batchLoading" @click="openDelete">删除所选</v-btn>
+    <v-btn v-if="can('domain.manage')" variant="outlined" prepend-icon="mdi-dns-outline" :disabled="!selected.length || loading || deleteBusy" :loading="batchLoading" @click="runDnsChecks">检查所选域</v-btn>
+    <v-btn v-if="can('domain.manage')" variant="outlined" color="error" prepend-icon="mdi-delete-outline" :disabled="!selected.length || loading || batchLoading || deleteBusy" @click="openDelete">删除所选</v-btn>
     <v-btn v-if="can('domain.manage')" color="primary" prepend-icon="mdi-plus" to="/domains/new">添加域</v-btn>
   </PageHeader>
   <v-alert v-if="error" type="error" variant="tonal" closable class="mb-4" @click:close="error = ''">{{ error }}</v-alert>
+  <v-alert v-if="notice" type="success" variant="tonal" closable class="mb-4" @click:close="notice = ''">{{ notice }}</v-alert>
   <v-card flat class="panel table-panel">
     <div class="table-toolbar">
-      <v-text-field v-model="search" prepend-inner-icon="mdi-magnify" placeholder="搜索域名或邮件主机" hide-details density="compact" clearable />
-      <v-select v-model="activeFilter" :items="activeItems" hide-details density="compact" />
-      <v-select v-model="dnsFilter" :items="dnsItems" hide-details density="compact" />
+      <v-text-field v-model="search" prepend-inner-icon="mdi-magnify" placeholder="搜索域名或邮件主机" hide-details density="compact" clearable :disabled="batchLoading || deleteBusy" />
+      <v-select v-model="activeFilter" :items="activeItems" hide-details density="compact" :disabled="batchLoading || deleteBusy" />
+      <v-select v-model="dnsFilter" :items="dnsItems" hide-details density="compact" :disabled="batchLoading || deleteBusy" />
       <v-spacer />
       <v-btn icon="mdi-refresh" variant="text" aria-label="刷新域列表" :loading="loading" @click="loadDomains" />
     </div>
     <v-table>
-      <thead><tr><th><v-checkbox-btn :model-value="allSelected" aria-label="选择当前页" @update:model-value="toggleAll" /></th><th>域名</th><th>服务状态</th><th>DIRECT MX</th><th>邮箱</th><th>证书有效期</th><th>存储配额</th><th></th></tr></thead>
+      <thead><tr><th><v-checkbox-btn :model-value="allSelected" :disabled="loading || batchLoading || deleteBusy" aria-label="选择当前页" @update:model-value="toggleAll" /></th><th>域名</th><th>服务状态</th><th>DIRECT MX</th><th>邮箱</th><th>证书有效期</th><th>存储配额</th><th></th></tr></thead>
       <tbody>
         <tr v-if="loading"><td colspan="8"><v-progress-linear indeterminate color="primary" /></td></tr>
         <tr v-else-if="!rows.length"><td colspan="8" class="text-center py-10 text-medium-emphasis">没有符合条件的邮件域</td></tr>
         <tr v-for="domain in rows" v-else :key="domain.id">
-          <td><v-checkbox-btn :model-value="selected.includes(domain.id)" :aria-label="`选择 ${domain.name}`" @update:model-value="value => toggleOne(domain.id, value)" /></td>
+          <td><v-checkbox-btn :model-value="selected.includes(domain.id)" :disabled="batchLoading || deleteBusy" :aria-label="`选择 ${domain.name}`" @update:model-value="value => toggleOne(domain.id, value)" /></td>
           <td><router-link :to="`/domains/${domain.id}`" class="domain-link">{{ domain.name }}</router-link><small>{{ domain.mailHostName || '未配置邮件主机' }}</small></td>
           <td><StatusPill :label="domain.isActive ? '运行中' : '已停用'" :tone="domain.isActive ? 'success' : 'neutral'" /></td>
           <td><StatusPill v-bind="dnsPresentation(domain.dnsStatus)" /><small v-if="domain.dnsCheckedAt">{{ new Date(domain.dnsCheckedAt).toLocaleString('zh-CN') }}</small></td>
@@ -194,12 +232,17 @@ onMounted(loadDomains)
   <v-dialog v-model="deleteOpen" max-width="580" :persistent="deleteBusy">
     <v-card title="批量删除邮件域">
       <v-card-text>
-        <v-alert type="error" variant="tonal" class="mb-4">即将删除 {{ selected.length }} 个邮件域。对应邮箱、别名、规则与证书会进入清理流程，客户端将立即无法收发邮件。</v-alert>
+        <v-alert type="error" variant="tonal" class="mb-4">即将删除 {{ deleteTargets.length }} 个邮件域。对应邮箱、别名、规则与证书会进入清理流程，客户端将立即无法收发邮件。</v-alert>
         <v-alert v-if="dialogError" type="error" variant="tonal" class="mb-4">{{ dialogError }}</v-alert>
-        <p class="mb-3">请输入「删除所选域」确认操作。</p>
-        <v-text-field v-model="deleteConfirm" label="确认文字" autocomplete="off" :readonly="deleteBusy" autofocus />
+        <v-alert v-if="activeDeleteTargets.length" type="warning" variant="tonal" class="mb-4">所选域中有 {{ activeDeleteTargets.length }} 个仍在运行。请取消操作，进入对应域详情停用服务后再删除。</v-alert>
+        <ul class="delete-targets mb-4"><li v-for="domain in deleteTargets.slice(0, 5)" :key="domain.id">{{ domain.name }}<span v-if="domain.isActive">（运行中，不能删除）</span></li><li v-if="deleteTargets.length > 5">以及其他 {{ deleteTargets.length - 5 }} 个域</li></ul>
+        <template v-if="!activeDeleteTargets.length"><p class="mb-3">请输入「删除所选域」确认操作。</p><v-text-field v-model="deleteConfirm" label="确认文字" autocomplete="off" :readonly="deleteBusy" autofocus /></template>
       </v-card-text>
-      <v-card-actions><v-spacer /><v-btn :disabled="deleteBusy" @click="deleteOpen = false">取消</v-btn><v-btn color="error" :loading="deleteBusy" :disabled="deleteConfirm !== '删除所选域'" @click="confirmDelete">确认删除</v-btn></v-card-actions>
+      <v-card-actions><v-spacer /><v-btn :disabled="deleteBusy" @click="deleteOpen = false">取消</v-btn><v-btn color="error" :loading="deleteBusy" :disabled="activeDeleteTargets.length > 0 || deleteConfirm !== '删除所选域'" @click="confirmDelete">确认删除</v-btn></v-card-actions>
     </v-card>
   </v-dialog>
 </template>
+
+<style scoped>
+.delete-targets { max-height: 160px; overflow: auto; padding-left: 22px; color: var(--text-secondary); }
+</style>

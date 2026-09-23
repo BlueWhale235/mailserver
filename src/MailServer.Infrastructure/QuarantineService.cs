@@ -16,6 +16,7 @@ public sealed class QuarantineService(
     ILogger<QuarantineService> logger) : IQuarantineService
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    private const int RawPreviewCharacterLimit = 256 * 1024;
 
     public async Task<IReadOnlyList<QuarantineRecord>> CreateAsync(
         QuarantineCreateRequest request,
@@ -84,7 +85,7 @@ public sealed class QuarantineService(
     {
         page = Math.Max(1, page);
         pageSize = Math.Clamp(pageSize, 5, 100);
-        var normalizedSearch = NullIfWhiteSpace(search);
+        var normalizedSearch = NullIfWhiteSpace(search)?.ToLowerInvariant();
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         var query = db.QuarantineRecords.AsNoTracking()
             .Include(x => x.Message)
@@ -93,11 +94,11 @@ public sealed class QuarantineService(
         if (normalizedSearch is not null)
         {
             query = query.Where(x =>
-                x.Sender.Contains(normalizedSearch)
-                || x.RecipientsJson.Contains(normalizedSearch)
-                || x.Reason.Contains(normalizedSearch)
-                || (x.PluginName != null && x.PluginName.Contains(normalizedSearch))
-                || (x.PluginId != null && x.PluginId.Contains(normalizedSearch)));
+                x.Sender.ToLower().Contains(normalizedSearch)
+                || x.RecipientsJson.ToLower().Contains(normalizedSearch)
+                || x.Reason.ToLower().Contains(normalizedSearch)
+                || (x.PluginName != null && x.PluginName.ToLower().Contains(normalizedSearch))
+                || (x.PluginId != null && x.PluginId.ToLower().Contains(normalizedSearch)));
         }
 
         var total = await query.CountAsync(cancellationToken);
@@ -119,7 +120,34 @@ public sealed class QuarantineService(
 
         await using var content = await contentStore.OpenReadAsync(record.Message.ContentKey, cancellationToken);
         using var reader = new StreamReader(content, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
-        return new QuarantineDetailView(ToListItem(record), $"quarantine-{record.Id:N}.eml", await reader.ReadToEndAsync(cancellationToken));
+        var buffer = new char[RawPreviewCharacterLimit + 1];
+        var read = 0;
+        while (read < buffer.Length)
+        {
+            var count = await reader.ReadAsync(buffer.AsMemory(read, buffer.Length - read), cancellationToken);
+            if (count == 0) break;
+            read += count;
+        }
+
+        var truncated = read > RawPreviewCharacterLimit;
+        var previewLength = Math.Min(read, RawPreviewCharacterLimit);
+        return new QuarantineDetailView(
+            ToListItem(record),
+            $"quarantine-{record.Id:N}.eml",
+            new string(buffer, 0, previewLength),
+            truncated);
+    }
+
+    public async Task<QuarantineRawDownload> OpenRawAsync(Guid domainId, Guid id, CancellationToken cancellationToken)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+        var record = await db.QuarantineRecords.AsNoTracking()
+            .Include(x => x.Message)
+            .SingleOrDefaultAsync(x => x.Id == id && x.DomainId == domainId, cancellationToken)
+            ?? throw new KeyNotFoundException("Quarantine record not found.");
+
+        var content = await contentStore.OpenReadAsync(record.Message.ContentKey, cancellationToken);
+        return new QuarantineRawDownload($"quarantine-{record.Id:N}.eml", content);
     }
 
     public async Task ReleaseAsync(Guid domainId, Guid id, string actor, string? note, CancellationToken cancellationToken)

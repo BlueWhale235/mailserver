@@ -668,9 +668,13 @@ describe('domain-detail preview API', () => {
     const quarantine = await mockApi<PagedResult<{ id: string; status: string }>>(`/domains/${domainId}/quarantine?status=PendingReview&page=1&pageSize=10`)
     expect(quarantine.items.length).toBeGreaterThan(0)
     const pending = quarantine.items[0]!
-    const raw = await mockApi<{ record: { id: string }; fileName: string; content: string }>(`/domains/${domainId}/quarantine/${pending.id}/raw`)
+    const raw = await mockApi<{ record: { id: string }; fileName: string; content: string; truncated: boolean }>(`/domains/${domainId}/quarantine/${pending.id}/raw`)
     expect(raw.record.id).toBe(pending.id)
     expect(raw.content).toContain('Message-ID')
+    expect(raw.truncated).toBe(false)
+    const rawDownload = await mockApiDownload(`/domains/${domainId}/quarantine/${pending.id}/raw/download`)
+    expect(rawDownload.fileName).toMatch(/^quarantine-[a-f0-9]+\.eml$/)
+    expect(await rawDownload.blob.text()).toContain('Message-ID')
     await mockApi(`/domains/${domainId}/quarantine/${pending.id}/release`, { method: 'POST', body: JSON.stringify({ note: '预览放行' }) })
     await expect(mockApi(`/domains/${domainId}/quarantine/${pending.id}/release`, { method: 'POST', body: JSON.stringify({ note: '重复' }) })).rejects.toThrow('该隔离邮件已审核')
     const released = await mockApi<PagedResult<{ id: string; status: string }>>(`/domains/${domainId}/quarantine?status=Released&page=1&pageSize=10`)
@@ -729,5 +733,79 @@ describe('domain-detail preview API', () => {
     const search = await mockApi<PagedResult<{ id: string }>>('/domains/search?search=qa-&page=1&pageSize=50')
     expect(search.items.some(item => item.id === created.id)).toBe(false)
     expect(search.items.some(item => item.id === second.id)).toBe(false)
+  })
+
+  it('creates a normalized empty domain without fabricated health data', async () => {
+    const suffix = crypto.randomUUID().slice(0, 8)
+    const name = `qa-health-${suffix}.example.test`
+    const created = await mockApi<{ id: string; name: string; mailHostName: string }>('/domains', {
+      method: 'POST',
+      body: JSON.stringify({ name: `  ${name.toUpperCase()}. `, dkimSelector: 'MAIL2026' }),
+    })
+
+    expect(created.name).toBe(name)
+    expect(created.mailHostName).toBe(`mail.${name}`)
+
+    const detail = await mockApi<{ domain: { dkimSelector?: string; dkimPublicKey?: string } }>(`/domains/${created.id}`)
+    expect(detail.domain.dkimSelector).toBe('mail2026')
+    expect(detail.domain.dkimPublicKey).toBeUndefined()
+
+    const health = await mockApi<{
+      accountCount: number
+      enabledAccountCount: number
+      aliasCount: number
+      pendingDeliveries: number
+      failedDeliveries: number
+      hasDkim: boolean
+      lastAuditAt: string | null
+      pendingQuarantineCount: number
+    }>(`/domains/${created.id}/health`)
+    expect(health).toMatchObject({
+      accountCount: 0,
+      enabledAccountCount: 0,
+      aliasCount: 0,
+      pendingDeliveries: 0,
+      failedDeliveries: 0,
+      hasDkim: false,
+      pendingQuarantineCount: 0,
+    })
+    expect(health.lastAuditAt).toBeTruthy()
+
+    const audit = await mockApi<Array<{ action: string }>>(`/domains/${created.id}/audit`)
+    expect(audit.map(entry => entry.action)).toContain('domain.create')
+    await expect(mockApi('/domains', { method: 'POST', body: JSON.stringify({ name }) })).rejects.toThrow('邮件域已存在')
+    await expect(mockApi('/domains', { method: 'POST', body: JSON.stringify({ name: `bad-${suffix}.example.test`, dkimSelector: '-invalid' }) })).rejects.toThrow('不能以连字符开头或结尾')
+
+    const dnsCheck = await mockApi<{
+      status: string
+      checkedAt: string | null
+      validation: { items: Array<{ status: string; actual: string[] }>; warnings: string[] } | null
+    }>(`/domains/${created.id}/dns/check`, { method: 'POST' })
+    expect(dnsCheck.status).toBe('Unhealthy')
+    expect(dnsCheck.checkedAt).toBeTruthy()
+    expect(dnsCheck.validation?.items.every(item => item.status === 'missing' && item.actual.length === 0)).toBe(true)
+    expect(dnsCheck.validation?.warnings.join(' ')).toContain('尚未为这个新域模拟发布 DNS 记录')
+
+    await mockApi(`/domains/${created.id}/dkim`, { method: 'POST', body: JSON.stringify({ selector: 'mail2026' }) })
+    const generatedHealth = await mockApi<{ hasDkim: boolean }>(`/domains/${created.id}/health`)
+    expect(generatedHealth.hasDkim).toBe(true)
+
+    await mockApi('/domains/batch/delete', { method: 'POST', body: JSON.stringify({ domainIds: [created.id] }) })
+  })
+
+  it('provides paged and filtered firewall results for the production-shaped UI', async () => {
+    const prefix = `qa-firewall-${Date.now()}`
+    for (let index = 0; index < 25; index++) {
+      await mockApi('/firewall/rules', {
+        method: 'POST',
+        body: JSON.stringify({ cidr: `10.77.${index}.1`, note: `${prefix}-${index}` }),
+      })
+    }
+    const first = await mockApi<PagedResult<{ note: string }>>(`/firewall/rules/search?query=${prefix}&page=1&pageSize=20`)
+    const second = await mockApi<PagedResult<{ note: string }>>(`/firewall/rules/search?query=${prefix}&page=2&pageSize=20`)
+    expect(first.totalCount).toBe(25)
+    expect(first.items).toHaveLength(20)
+    expect(second.items).toHaveLength(5)
+    expect([...first.items, ...second.items].every(rule => rule.note.startsWith(prefix))).toBe(true)
   })
 })

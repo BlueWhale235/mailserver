@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ApiError, api, jsonBody } from '../../lib/api'
 import PageHeader from '../../components/PageHeader.vue'
 import PermissionGrantEditor from '../../components/PermissionGrantEditor.vue'
@@ -61,11 +61,13 @@ const createForm = ref({ name: '', expiresAt: null as string | null })
 const grantCatalog = ref<PermissionCatalogGroup[]>([])
 const permissionDomains = ref<DomainOption[]>([])
 const grantSelection = ref<GrantInput[]>([{ permissionCode: 'dashboard.read', resourceType: '', resourceKey: '' }])
+const createBaseline = ref('')
 
 const secretOpen = ref(false)
 const secretValue = ref('')
 const secretSource = ref('新建')
 const copyState = ref<'idle' | 'success' | 'error'>('idle')
+const secretAcknowledged = ref(false)
 
 const editGrantsOpen = ref(false)
 const editTarget = ref<ApiKey | null>(null)
@@ -73,6 +75,7 @@ const editGrants = ref<GrantInput[]>([])
 const editGrantsLoading = ref(false)
 const editGrantsSaving = ref(false)
 const editGrantsError = ref('')
+const editGrantsBaseline = ref('')
 
 const rotateTarget = ref<ApiKey | null>(null)
 const rotateConfirmation = ref('')
@@ -81,10 +84,19 @@ const rotateLoading = ref(false)
 const deleteTarget = ref<ApiKey | null>(null)
 const deleteConfirmation = ref('')
 const deleteLoading = ref(false)
+const discardTarget = ref<'create' | 'editGrants' | null>(null)
 
 const createValid = computed(() => createForm.value.name.trim().length > 0 && grantSelection.value.length > 0)
 const rotateValid = computed(() => rotateConfirmation.value === rotateTarget.value?.name)
 const deleteValid = computed(() => deleteConfirmation.value === deleteTarget.value?.name)
+const secretCanClose = computed(() => copyState.value === 'success' || secretAcknowledged.value)
+const createSnapshot = computed(() => JSON.stringify({ form: createForm.value, grants: grantSelection.value }))
+const createDirty = computed(() => Boolean(createBaseline.value) && createSnapshot.value !== createBaseline.value)
+const editGrantsSnapshot = computed(() => JSON.stringify(editGrants.value))
+const editGrantsDirty = computed(() => Boolean(editGrantsBaseline.value) && editGrantsSnapshot.value !== editGrantsBaseline.value)
+const discardCopy = computed(() => discardTarget.value === 'create'
+  ? '新建 API Key 的名称、有效期或初始授权尚未提交。'
+  : '当前 API Key 的授权修改尚未保存。')
 
 async function loadKeys() {
   loading.value = true
@@ -113,6 +125,7 @@ async function openCreate() {
   createError.value = ''
   createForm.value = { name: '', expiresAt: null }
   grantSelection.value = [{ permissionCode: 'dashboard.read', resourceType: '', resourceKey: '' }]
+  createBaseline.value = createSnapshot.value
   createResourcesLoading.value = true
   try {
     await loadPermissionResources()
@@ -137,6 +150,7 @@ async function createKey() {
       }),
     })
     createOpen.value = false
+    createBaseline.value = ''
     showSecret(created.apiKey, 'API Key 已创建')
     await loadKeys()
   } catch (cause) {
@@ -176,12 +190,14 @@ async function openEditGrants(key: ApiKey) {
   editGrantsSaving.value = false
   editGrantsError.value = ''
   editGrants.value = []
+  editGrantsBaseline.value = ''
   try {
     const [, current] = await Promise.all([
       loadPermissionResources(),
       api<GrantInput[]>(`/api-keys/${key.id}/grants`),
     ])
     editGrants.value = current.map(grant => ({ ...grant }))
+    editGrantsBaseline.value = editGrantsSnapshot.value
   } catch (cause) {
     editGrantsError.value = cause instanceof Error ? cause.message : '授权信息加载失败'
   } finally {
@@ -190,7 +206,7 @@ async function openEditGrants(key: ApiKey) {
 }
 
 async function saveEditGrants() {
-  if (!editTarget.value || !editGrants.value.length) return
+  if (!editTarget.value || !editGrants.value.length || !editGrantsDirty.value) return
   editGrantsSaving.value = true
   editGrantsError.value = ''
   try {
@@ -199,6 +215,7 @@ async function saveEditGrants() {
       body: jsonBody({ grants: editGrants.value }),
     })
     editGrantsOpen.value = false
+    editGrantsBaseline.value = editGrantsSnapshot.value
     notice.value = `API Key ${editTarget.value.name} 的授权已更新`
   } catch (cause) {
     editGrantsError.value = cause instanceof Error ? cause.message : '保存授权失败'
@@ -234,7 +251,46 @@ function showSecret(secret: string, source: string) {
   secretValue.value = secret
   secretSource.value = source
   copyState.value = 'idle'
+  secretAcknowledged.value = false
   secretOpen.value = true
+}
+
+function closeSecret() {
+  if (!secretCanClose.value) return
+  secretOpen.value = false
+  secretValue.value = ''
+  secretAcknowledged.value = false
+  copyState.value = 'idle'
+}
+
+function requestCloseCreate() {
+  if (createLoading.value) return
+  if (createDirty.value) discardTarget.value = 'create'
+  else createOpen.value = false
+}
+
+function requestCloseEditGrants() {
+  if (editGrantsSaving.value) return
+  if (editGrantsDirty.value) discardTarget.value = 'editGrants'
+  else editGrantsOpen.value = false
+}
+
+function confirmDiscard() {
+  if (discardTarget.value === 'create') {
+    createOpen.value = false
+    createBaseline.value = ''
+  } else if (discardTarget.value === 'editGrants') {
+    editGrantsOpen.value = false
+    editGrantsBaseline.value = ''
+  }
+  discardTarget.value = null
+}
+
+function protectDraftsOnExit(event: BeforeUnloadEvent) {
+  const unacknowledgedSecret = secretOpen.value && !secretCanClose.value
+  if (!unacknowledgedSecret && !createDirty.value && !editGrantsDirty.value) return
+  event.preventDefault()
+  event.returnValue = ''
 }
 
 async function copySecret() {
@@ -248,7 +304,14 @@ async function copySecret() {
   }
 }
 
-onMounted(loadKeys)
+onMounted(() => {
+  globalThis.addEventListener('beforeunload', protectDraftsOnExit)
+  void loadKeys()
+})
+onBeforeUnmount(() => {
+  globalThis.removeEventListener('beforeunload', protectDraftsOnExit)
+  secretValue.value = ''
+})
 </script>
 
 <template>
@@ -315,7 +378,7 @@ onMounted(loadKeys)
     </v-table>
   </v-card>
 
-  <v-dialog v-model="createOpen" max-width="920" persistent>
+  <v-dialog :model-value="createOpen" max-width="920" persistent>
     <v-card class="grant-dialog-card">
       <v-card-title class="d-flex align-center gap-2"><v-icon color="primary">mdi-key-plus</v-icon> 新建 API Key</v-card-title>
       <v-card-text class="grant-dialog-body">
@@ -329,7 +392,7 @@ onMounted(loadKeys)
         <v-progress-linear v-if="createResourcesLoading" indeterminate color="primary" />
         <PermissionGrantEditor v-else v-model="grantSelection" :catalog="grantCatalog" :domains="permissionDomains" :disabled="createLoading" />
       </v-card-text>
-      <v-card-actions><v-spacer /><v-btn variant="text" :disabled="createLoading" @click="createOpen = false">取消</v-btn><v-btn color="primary" :loading="createLoading" :disabled="!createValid || createResourcesLoading" @click="createKey">创建 API Key</v-btn></v-card-actions>
+      <v-card-actions><v-spacer /><v-btn variant="text" :disabled="createLoading" @click="requestCloseCreate">取消</v-btn><v-btn color="primary" :loading="createLoading" :disabled="!createValid || createResourcesLoading" @click="createKey">创建 API Key</v-btn></v-card-actions>
     </v-card>
   </v-dialog>
 
@@ -344,12 +407,13 @@ onMounted(loadKeys)
           <span v-if="copyState === 'success'" class="copy-success">密钥已写入剪贴板</span>
           <span v-else-if="copyState === 'error'" class="copy-error">无法访问剪贴板，请手动复制上方密钥</span>
         </div>
+        <v-checkbox v-model="secretAcknowledged" label="我已将完整密钥保存到安全位置" hide-details class="mt-3" />
       </v-card-text>
-      <v-card-actions><v-spacer /><v-btn color="primary" @click="secretOpen = false">我已安全保存</v-btn></v-card-actions>
+      <v-card-actions><v-spacer /><v-btn color="primary" :disabled="!secretCanClose" @click="closeSecret">我已安全保存并关闭</v-btn></v-card-actions>
     </v-card>
   </v-dialog>
 
-  <v-dialog v-model="editGrantsOpen" max-width="920" persistent>
+  <v-dialog :model-value="editGrantsOpen" max-width="920" persistent>
     <v-card class="grant-dialog-card">
       <v-card-title class="d-flex align-center gap-2"><v-icon color="primary">mdi-shield-key-outline</v-icon> 编辑授权 · {{ editTarget?.name }}</v-card-title>
       <v-card-text class="grant-dialog-body">
@@ -357,7 +421,7 @@ onMounted(loadKeys)
         <v-progress-linear v-if="editGrantsLoading" indeterminate color="primary" />
         <PermissionGrantEditor v-else v-model="editGrants" :catalog="grantCatalog" :domains="permissionDomains" :disabled="editGrantsSaving" />
       </v-card-text>
-      <v-card-actions><v-spacer /><v-btn variant="text" :disabled="editGrantsSaving" @click="editGrantsOpen = false">取消</v-btn><v-btn color="primary" :loading="editGrantsSaving" :disabled="editGrantsLoading || !editGrants.length" @click="saveEditGrants">保存授权</v-btn></v-card-actions>
+      <v-card-actions><v-spacer /><v-btn variant="text" :disabled="editGrantsSaving" @click="requestCloseEditGrants">取消</v-btn><v-btn color="primary" :loading="editGrantsSaving" :disabled="editGrantsLoading || !editGrants.length || !editGrantsDirty" @click="saveEditGrants">保存授权</v-btn></v-card-actions>
     </v-card>
   </v-dialog>
 
@@ -382,6 +446,14 @@ onMounted(loadKeys)
         <v-text-field v-model="deleteConfirmation" label="API Key 名称" :disabled="deleteLoading" autofocus />
       </v-card-text>
       <v-card-actions><v-spacer /><v-btn variant="text" :disabled="deleteLoading" @click="deleteTarget = null">取消</v-btn><v-btn color="error" :loading="deleteLoading" :disabled="!deleteValid" @click="confirmDelete">确认删除</v-btn></v-card-actions>
+    </v-card>
+  </v-dialog>
+
+  <v-dialog :model-value="Boolean(discardTarget)" max-width="500" persistent>
+    <v-card>
+      <v-card-title class="d-flex align-center gap-2"><v-icon color="warning">mdi-alert-outline</v-icon> 放弃未保存修改？</v-card-title>
+      <v-card-text>{{ discardCopy }}关闭后这些修改将无法恢复。</v-card-text>
+      <v-card-actions><v-spacer /><v-btn variant="text" @click="discardTarget = null">继续编辑</v-btn><v-btn color="error" variant="tonal" @click="confirmDiscard">放弃修改</v-btn></v-card-actions>
     </v-card>
   </v-dialog>
 </template>

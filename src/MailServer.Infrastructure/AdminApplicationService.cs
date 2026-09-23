@@ -332,6 +332,36 @@ public sealed class AdminApplicationService(
             .ToListAsync(cancellationToken);
     }
 
+    public async Task<PagedResult<FirewallRuleView>> SearchFirewallRulesAsync(
+        string? search,
+        bool? isEnabled,
+        int page,
+        int pageSize,
+        CancellationToken cancellationToken)
+    {
+        page = Math.Max(1, page);
+        pageSize = Math.Clamp(pageSize, 5, 100);
+        var normalizedSearch = NullIfWhiteSpace(search)?.ToLowerInvariant();
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+        var query = db.FirewallRules.AsNoTracking();
+        if (normalizedSearch is not null)
+        {
+            query = query.Where(x =>
+                x.Cidr.ToLower().Contains(normalizedSearch)
+                || (x.Note != null && x.Note.ToLower().Contains(normalizedSearch)));
+        }
+        if (isEnabled is { } enabled) query = query.Where(x => x.IsEnabled == enabled);
+        var total = await query.CountAsync(cancellationToken);
+        var rows = await query
+            .OrderByDescending(x => x.IsEnabled)
+            .ThenBy(x => x.Cidr)
+            .Skip((page - 1) * pageSize)
+            .Take(pageSize)
+            .Select(x => new FirewallRuleView(x.Id, x.Cidr, x.Note, x.IsEnabled, x.CreatedAt, x.UpdatedAt))
+            .ToListAsync(cancellationToken);
+        return new PagedResult<FirewallRuleView>(rows, page, pageSize, total);
+    }
+
     public async Task<FirewallRuleView> CreateFirewallRuleAsync(
         string cidr,
         string? note,
@@ -883,7 +913,7 @@ public sealed class AdminApplicationService(
         if (isEnabled is not null) query = query.Where(x => x.IsEnabled == isEnabled.Value);
         var normalizedSearch = search?.Trim().ToLowerInvariant();
         if (!string.IsNullOrWhiteSpace(normalizedSearch))
-            query = query.Where(x => x.LocalPart.Contains(normalizedSearch));
+            query = query.Where(x => (x.LocalPart + "@" + domainName).Contains(normalizedSearch));
         var total = await query.CountAsync(cancellationToken);
         var rows = await query.OrderByDescending(x => x.IsEnabled).ThenBy(x => x.LocalPart)
             .Skip((page - 1) * pageSize).Take(pageSize)
@@ -1181,7 +1211,7 @@ public sealed class AdminApplicationService(
         var normalizedSearch = search?.Trim().ToLowerInvariant();
         if (!string.IsNullOrWhiteSpace(normalizedSearch))
         {
-            query = query.Where(x => x.SourceLocalPart.Contains(normalizedSearch)
+            query = query.Where(x => (x.SourceLocalPart + "@" + domainName).Contains(normalizedSearch)
                 || (x.DestinationAddress != null && x.DestinationAddress.Contains(normalizedSearch))
                 || (x.TargetAccount != null && (x.TargetAccount.LocalPart + "@" + x.TargetAccount.Domain.Name).Contains(normalizedSearch)));
         }
@@ -2492,11 +2522,22 @@ public sealed class AdminApplicationService(
 
     private static string NormalizeDomain(string name)
     {
+        if (string.IsNullOrWhiteSpace(name)) throw new FormatException("Invalid domain.");
         var value = name.Trim().TrimEnd('.').ToLowerInvariant();
-        if (string.IsNullOrWhiteSpace(value) || value.Length > 255 || value.Contains(' '))
+        var labels = value.Split('.');
+        if (string.IsNullOrWhiteSpace(value)
+            || value.Length > 253
+            || labels.Length < 2
+            || labels.Any(label => label.Length is < 1 or > 63
+                || !IsAsciiLetterOrDigit(label[0])
+                || !IsAsciiLetterOrDigit(label[^1])
+                || label.Any(character => !IsAsciiLetterOrDigit(character) && character != '-')))
             throw new FormatException("Invalid domain.");
         return value;
     }
+
+    private static bool IsAsciiLetterOrDigit(char value) =>
+        value is >= 'a' and <= 'z' or >= '0' and <= '9';
 
     private static string? NormalizeOutboundIpAddresses(string? value)
     {

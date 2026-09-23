@@ -41,7 +41,8 @@ const scope = computed(() => props.mode === 'history' ? 'History' : props.mode =
 const showStatusFilter = computed(() => props.mode === 'queue' || Boolean(props.domainId))
 const pageCount = computed(() => Math.max(1, Math.ceil(totalCount.value / pageSize)))
 const selectable = computed(() => canManage.value && props.mode !== 'history')
-const allSelected = computed(() => rows.value.length > 0 && rows.value.every(row => selected.value.includes(row.id)))
+const selectableRows = computed(() => rows.value.filter(row => row.status !== 'Processing'))
+const allSelected = computed(() => selectableRows.value.length > 0 && selectableRows.value.every(row => selected.value.includes(row.id)))
 const retryableSelected = computed(() => rows.value.filter(row => selected.value.includes(row.id) && (row.status === 'Failed' || row.status === 'Deferred')))
 const title = computed(() => props.mode === 'history' ? '投递历史' : props.mode === 'bounces' ? '退信与永久失败' : '实时投递队列')
 const description = computed(() => props.mode === 'history'
@@ -90,7 +91,7 @@ async function load() {
     if (version !== loadVersion) return
     rows.value = result.items
     totalCount.value = result.totalCount
-    selected.value = selected.value.filter(id => result.items.some(item => item.id === id))
+    selected.value = selected.value.filter(id => result.items.some(item => item.id === id && item.status !== 'Processing'))
     if (page.value > pageCount.value) page.value = pageCount.value
   } catch (cause) {
     if (version !== loadVersion) return
@@ -101,10 +102,11 @@ async function load() {
 }
 
 function toggleAll(value: boolean | null) {
-  selected.value = value ? rows.value.map(row => row.id) : []
+  selected.value = value ? selectableRows.value.map(row => row.id) : []
 }
 
 function toggleOne(id: string, value: boolean | null) {
+  if (!selectableRows.value.some(row => row.id === id)) return
   selected.value = value ? Array.from(new Set([...selected.value, id])) : selected.value.filter(item => item !== id)
 }
 
@@ -148,7 +150,7 @@ async function retrySelected() {
 }
 
 function requestDelete(jobs: DeliveryJob[]) {
-  if (!canManage.value || actionBusy.value || !jobs.length) return
+  if (!canManage.value || actionBusy.value || !jobs.length || jobs.some(job => job.status === 'Processing')) return
   deleteTargets.value = jobs
   deleteConfirmation.value = ''
 }
@@ -165,7 +167,7 @@ async function confirmDelete() {
     const succeeded = jobs.length - failed.length
     notice.value = succeeded ? `已永久删除 ${succeeded} 个投递任务` : ''
     deleteTargets.value = []
-    selected.value = failed.map(job => job.id)
+    selected.value = failed.filter(job => job.status !== 'Processing').map(job => job.id)
     await load()
     if (failed.length) error.value = `${failed.length} 个任务删除失败，已保留选中，请检查后重试。`
     emit('changed')
@@ -221,25 +223,25 @@ onBeforeUnmount(() => { ++loadVersion; globalThis.clearTimeout(searchTimer) })
     <div class="delivery-table-scroll">
       <v-table class="delivery-table">
         <thead><tr>
-          <th v-if="selectable" class="select-column"><v-checkbox-btn :model-value="allSelected" aria-label="选择当前页" @update:model-value="toggleAll" /></th>
+          <th v-if="selectable" class="select-column"><v-checkbox-btn :model-value="allSelected" :disabled="!selectableRows.length" aria-label="选择当前页可操作任务" @update:model-value="toggleAll" /></th>
           <th>邮件流向</th><th>状态</th><th>尝试</th><th>{{ mode === 'history' ? '远端结果' : '最近错误' }}</th><th>{{ mode === 'history' ? '完成时间' : '下次动作 / 更新时间' }}</th><th class="actions-column">操作</th>
         </tr></thead>
         <tbody>
           <tr v-if="loading"><td :colspan="selectable ? 7 : 6"><v-progress-linear indeterminate color="primary" /></td></tr>
           <tr v-else-if="!rows.length"><td :colspan="selectable ? 7 : 6" class="delivery-empty-cell"><v-icon size="28">mdi-inbox-arrow-down-outline</v-icon><b>{{ emptyText }}</b><span>调整筛选条件或稍后刷新。</span></td></tr>
           <tr v-for="job in rows" v-else :key="job.id">
-            <td v-if="selectable" class="select-column"><v-checkbox-btn :model-value="selected.includes(job.id)" :aria-label="`选择投递任务 ${shortId(job.id)}`" @update:model-value="value => toggleOne(job.id, value)" /></td>
+            <td v-if="selectable" class="select-column"><v-checkbox-btn :model-value="selected.includes(job.id)" :disabled="job.status === 'Processing'" :aria-label="job.status === 'Processing' ? '投递中任务暂不可删除' : `选择投递任务 ${shortId(job.id)}`" @update:model-value="value => toggleOne(job.id, value)" /></td>
             <td class="route-cell"><b>{{ job.sender }}</b><span><v-icon size="13">mdi-arrow-right</v-icon>{{ job.recipient }}</span><code>{{ shortId(job.id) }}</code></td>
             <td><StatusPill v-bind="deliveryStatusPresentation(job.status)" /></td>
             <td><b>{{ job.attempts }}</b><small>{{ job.attempts ? '次已记录' : '尚未开始' }}</small></td>
             <td class="response-cell"><span :class="{ 'text-error': job.status === 'Failed' }">{{ job.lastError || (job.status === 'Delivered' ? '投递完成 · 响应详见投递尝试' : '—') }}</span></td>
-            <td>{{ job.status === 'Pending' || job.status === 'Deferred' ? formatDate(job.nextAttemptAt) : formatDate(job.updatedAt) }}<small>{{ job.status === 'Pending' || job.status === 'Deferred' ? '计划重试' : '最近更新' }}</small></td>
+            <td>{{ job.status === 'Pending' || job.status === 'Deferred' ? formatDate(job.nextAttemptAt) : formatDate(job.updatedAt) }}<small>{{ job.status === 'Pending' ? '计划投递' : job.status === 'Deferred' ? '计划重试' : '最近更新' }}</small></td>
             <td class="actions-column">
               <v-btn size="small" variant="text" prepend-icon="mdi-timeline-text-outline" @click="openDetail(job)">详情</v-btn>
               <v-tooltip v-if="canManage && (job.status === 'Failed' || job.status === 'Deferred')" text="立即重新进入投递队列" location="top">
                 <template #activator="{ props: tooltipProps }"><v-btn v-bind="tooltipProps" icon="mdi-refresh" size="small" variant="text" aria-label="立即重试" :loading="actionId === job.id" :disabled="actionBusy" @click="retry(job)" /></template>
               </v-tooltip>
-              <v-tooltip v-if="selectable" text="永久删除任务" location="top">
+              <v-tooltip v-if="selectable && job.status !== 'Processing'" text="永久删除任务" location="top">
                 <template #activator="{ props: tooltipProps }"><v-btn v-bind="tooltipProps" icon="mdi-delete-outline" size="small" color="error" variant="text" aria-label="删除投递任务" :disabled="actionBusy" @click="requestDelete([job])" /></template>
               </v-tooltip>
             </td>

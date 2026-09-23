@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
-import { useRoute, useRouter } from "vue-router";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { onBeforeRouteLeave, onBeforeRouteUpdate, useRoute, useRouter, type RouteLocationNormalized } from "vue-router";
 import PageHeader from "../components/PageHeader.vue";
 import StatusPill from "../components/StatusPill.vue";
 import DomainRuleWorkspace from "../components/DomainRuleWorkspace.vue";
@@ -10,6 +10,7 @@ import QueueWorkspace from "./delivery/QueueWorkspace.vue";
 import { validatePublishedDns, type DomainDnsCheck } from "../lib/domainDns";
 import { usePermission } from "../composables/usePermission";
 import { api, jsonBody } from "../lib/api";
+import { downloadQuarantineRaw } from "../lib/quarantine";
 import type { DomainCertificateModel } from "../lib/domainCertificate";
 
 type AliasMode = "SendReceive" | "ReceiveOnly";
@@ -112,6 +113,7 @@ interface QuarantineDetailView {
   record: QuarantineListItem;
   fileName: string;
   content: string;
+  truncated: boolean;
 }
 
 interface DomainAuditEntry {
@@ -164,6 +166,12 @@ function normalizeTab(value: unknown): TabKey {
 }
 
 const tab = ref<TabKey>(normalizeTab(route.params.tab));
+const pendingTab = ref<TabKey | null>(null);
+const leaveDialogOpen = ref(false);
+const dnsDirty = ref(false);
+const dnsSaving = ref(false);
+const certificateDirty = ref(false);
+const certificateSaving = ref(false);
 const management = ref<DomainManagement | null>(null);
 const health = ref<DomainHealth | null>(null);
 const dnsCheck = ref<DomainDnsCheck | null>(null);
@@ -189,6 +197,7 @@ let accountTimer: ReturnType<typeof globalThis.setTimeout> | undefined;
 let aliasTimer: ReturnType<typeof globalThis.setTimeout> | undefined;
 
 const domainEditOpen = ref(false);
+const domainEditDiscardOpen = ref(false);
 const domainDraft = ref({ mailHostName: "", isActive: true });
 const accountDialogOpen = ref(false);
 const accountDraft = ref({ localPart: "", password: "", quotaGiB: 10 });
@@ -209,6 +218,10 @@ const accountEditDraft = ref({ isEnabled: true, quotaGiB: 10 });
 const accountPasswordOpen = ref(false);
 const accountPasswordTarget = ref<Account | null>(null);
 const accountPasswordDraft = ref({ password: "", confirm: "" });
+const accountDeleteTarget = ref<Account | null>(null);
+const accountBatchDeleteOpen = ref(false);
+const accountBatchDeleteTargets = ref<Account[]>([]);
+const accountDeleteError = ref("");
 
 const aliasSelected = ref<string[]>([]);
 const aliasBusy = ref(false);
@@ -231,6 +244,7 @@ const quarantineBusy = ref(false);
 const quarantineDetailOpen = ref(false);
 const quarantineDetail = ref<QuarantineDetailView | null>(null);
 const quarantineDetailLoading = ref(false);
+const quarantineDownloadLoading = ref(false);
 const quarantineActionTarget = ref<QuarantineListItem | null>(null);
 const quarantineActionKind = ref<"release" | "delete" | null>(null);
 const quarantineNote = ref("");
@@ -257,6 +271,31 @@ const quotaPercent = computed(() =>
     ? Math.min(100, (domain.value.usedBytes / domain.value.quotaBytes) * 100)
     : 0,
 );
+const quotaDirty = computed(
+  () =>
+    Boolean(domain.value) &&
+    Number(quotaGiB.value) !== Math.round(domain.value!.quotaBytes / 1024 ** 3),
+);
+const currentEditorDirty = computed(() => {
+  if (domainEditOpen.value && domainEditDirty.value) return true;
+  if (tab.value === "dns") return dnsDirty.value;
+  if (tab.value === "cert") return certificateDirty.value;
+  if (tab.value === "quota") return quotaDirty.value;
+  return false;
+});
+const currentEditorSaving = computed(() => {
+  if (domainEditOpen.value) return saving.value;
+  if (tab.value === "dns") return dnsSaving.value;
+  if (tab.value === "cert") return certificateSaving.value;
+  if (tab.value === "quota") return saving.value;
+  return false;
+});
+const currentEditorLabel = computed(() => {
+  if (domainEditOpen.value) return "域基础配置";
+  if (tab.value === "cert") return "证书配置";
+  if (tab.value === "quota") return "域存储配额";
+  return "DNS 安全策略";
+});
 const readinessAttention = computed(() => {
   const items = dnsCheck.value?.validation?.items ?? [];
   return (
@@ -413,7 +452,12 @@ async function loadPage() {
   }
 }
 
+let accountRequest = 0;
+let aliasRequest = 0;
+
 async function loadAccounts() {
+  const request = ++accountRequest;
+  const requestedDomain = domainId.value;
   accountLoading.value = true;
   try {
     const query = new globalThis.URLSearchParams({
@@ -427,20 +471,24 @@ async function loadAccounts() {
     const result = await api<PagedResult<Account>>(
       `/domains/${domainId.value}/accounts/search?${query}`,
     );
+    if (request !== accountRequest || requestedDomain !== domainId.value) return;
     accounts.value = result.items;
     accountTotal.value = result.totalCount;
     if (accountPage.value > accountPageCount.value)
       accountPage.value = accountPageCount.value;
   } catch (cause) {
+    if (request !== accountRequest || requestedDomain !== domainId.value) return;
     accounts.value = [];
     accountTotal.value = 0;
     error.value = cause instanceof Error ? cause.message : "邮箱账号加载失败";
   } finally {
-    accountLoading.value = false;
+    if (request === accountRequest) accountLoading.value = false;
   }
 }
 
 async function loadAliases() {
+  const request = ++aliasRequest;
+  const requestedDomain = domainId.value;
   aliasLoading.value = true;
   try {
     const query = new globalThis.URLSearchParams({
@@ -452,16 +500,18 @@ async function loadAliases() {
     const result = await api<PagedResult<Alias>>(
       `/domains/${domainId.value}/aliases/search?${query}`,
     );
+    if (request !== aliasRequest || requestedDomain !== domainId.value) return;
     aliases.value = result.items;
     aliasTotal.value = result.totalCount;
     if (aliasPage.value > aliasPageCount.value)
       aliasPage.value = aliasPageCount.value;
   } catch (cause) {
+    if (request !== aliasRequest || requestedDomain !== domainId.value) return;
     aliases.value = [];
     aliasTotal.value = 0;
     error.value = cause instanceof Error ? cause.message : "邮箱别名加载失败";
   } finally {
-    aliasLoading.value = false;
+    if (request === aliasRequest) aliasLoading.value = false;
   }
 }
 
@@ -503,6 +553,21 @@ function openDomainEdit() {
   };
   dialogError.value = "";
   domainEditOpen.value = true;
+}
+
+function requestCloseDomainEdit() {
+  if (saving.value) return;
+  if (!domainEditDirty.value) {
+    domainEditOpen.value = false;
+    return;
+  }
+  domainEditDiscardOpen.value = true;
+}
+
+function discardDomainEdit() {
+  if (saving.value) return;
+  domainEditDiscardOpen.value = false;
+  domainEditOpen.value = false;
 }
 
 async function saveDomain() {
@@ -547,9 +612,7 @@ function toggleAccount(id: string, value: boolean | null) {
     : accountSelected.value.filter((item) => item !== id);
 }
 
-async function batchAccounts(
-  action: "batch-enable" | "batch-disable" | "batch-delete",
-) {
+async function batchAccounts(action: "batch-enable" | "batch-disable") {
   if (!accountSelected.value.length || accountBusy.value || saving.value)
     return;
   accountBusy.value = true;
@@ -561,11 +624,9 @@ async function batchAccounts(
       body: jsonBody({ ids: accountSelected.value }),
     });
     notice.value =
-      action === "batch-delete"
-        ? `已删除 ${accountSelected.value.length} 个邮箱账号。`
-        : action === "batch-enable"
-          ? `已启用 ${accountSelected.value.length} 个邮箱账号。`
-          : `已停用 ${accountSelected.value.length} 个邮箱账号。`;
+      action === "batch-enable"
+        ? `已启用 ${accountSelected.value.length} 个邮箱账号。`
+        : `已停用 ${accountSelected.value.length} 个邮箱账号。`;
     accountSelected.value = [];
     await Promise.all([
       loadAccounts(),
@@ -671,13 +732,21 @@ async function saveAccountPassword() {
   }
 }
 
-async function deleteAccount(account: Account) {
-  if (accountBusy.value || saving.value) return;
+function requestDeleteAccount(account: Account) {
+  if (accountBusy.value || saving.value || account.isEnabled) return;
+  accountDeleteTarget.value = { ...account };
+  accountDeleteError.value = "";
+}
+
+async function confirmDeleteAccount() {
+  const account = accountDeleteTarget.value;
+  if (!account || accountBusy.value || saving.value || account.isEnabled) return;
   accountBusy.value = true;
-  error.value = "";
+  accountDeleteError.value = "";
   notice.value = "";
   try {
     await api(`/accounts/${account.id}`, { method: "DELETE" });
+    accountDeleteTarget.value = null;
     notice.value = `${account.address} 已软删除，可在回收站恢复或等待到期清理。`;
     await Promise.all([
       loadAccounts(),
@@ -685,7 +754,56 @@ async function deleteAccount(account: Account) {
       loadAliasTargetAccounts(),
     ]);
   } catch (cause) {
-    error.value = cause instanceof Error ? cause.message : "账号删除失败";
+    accountDeleteError.value =
+      cause instanceof Error ? cause.message : "账号删除失败";
+  } finally {
+    accountBusy.value = false;
+  }
+}
+
+function requestBatchAccountDelete() {
+  if (!accountSelected.value.length || accountBusy.value || saving.value) return;
+  const selected = new Set(accountSelected.value);
+  accountBatchDeleteTargets.value = accounts.value
+    .filter((account) => selected.has(account.id))
+    .map((account) => ({ ...account }));
+  if (!accountBatchDeleteTargets.value.length) return;
+  accountDeleteError.value = "";
+  accountBatchDeleteOpen.value = true;
+}
+
+async function confirmBatchAccountDelete() {
+  const targets = accountBatchDeleteTargets.value.map((account) => ({ ...account }));
+  if (
+    !targets.length ||
+    targets.some((account) => account.isEnabled) ||
+    accountBusy.value ||
+    saving.value
+  )
+    return;
+  const ids = targets.map((account) => account.id);
+  accountBusy.value = true;
+  accountDeleteError.value = "";
+  notice.value = "";
+  try {
+    await api(`/domains/${domainId.value}/accounts/batch-delete`, {
+      method: "POST",
+      body: jsonBody({ ids }),
+    });
+    accountSelected.value = accountSelected.value.filter(
+      (id) => !ids.includes(id),
+    );
+    accountBatchDeleteOpen.value = false;
+    accountBatchDeleteTargets.value = [];
+    notice.value = `已软删除 ${ids.length} 个邮箱账号，可在回收站恢复或等待到期清理。`;
+    await Promise.all([
+      loadAccounts(),
+      reloadHealth(),
+      loadAliasTargetAccounts(),
+    ]);
+  } catch (cause) {
+    accountDeleteError.value =
+      cause instanceof Error ? cause.message : "批量删除账号失败";
   } finally {
     accountBusy.value = false;
   }
@@ -860,6 +978,23 @@ async function openQuarantineDetail(item: QuarantineListItem) {
     quarantineDetailOpen.value = false;
   } finally {
     quarantineDetailLoading.value = false;
+  }
+}
+
+async function downloadQuarantineDetail() {
+  if (!quarantineDetail.value || quarantineDownloadLoading.value) return;
+  quarantineDownloadLoading.value = true;
+  error.value = "";
+  try {
+    const fileName = await downloadQuarantineRaw(
+      domainId.value,
+      quarantineDetail.value.record.id,
+    );
+    notice.value = `完整邮件原文已下载：${fileName}`;
+  } catch (cause) {
+    error.value = cause instanceof Error ? cause.message : "邮件原文下载失败";
+  } finally {
+    quarantineDownloadLoading.value = false;
   }
 }
 
@@ -1147,6 +1282,56 @@ function aliasModeLabel(mode: AliasMode) {
   );
 }
 
+function requestTab(value: unknown) {
+  const next = normalizeTab(value);
+  if (next === tab.value) return;
+  if (currentEditorDirty.value || currentEditorSaving.value) {
+    pendingTab.value = next;
+    leaveDialogOpen.value = true;
+    return;
+  }
+  tab.value = next;
+}
+
+function cancelEditorLeave() {
+  pendingTab.value = null;
+  leaveDialogOpen.value = false;
+}
+
+function confirmEditorLeave() {
+  if (currentEditorSaving.value || !pendingTab.value) return;
+  const next = pendingTab.value;
+  if (tab.value === "dns") dnsDirty.value = false;
+  if (tab.value === "cert") certificateDirty.value = false;
+  if (tab.value === "quota" && domain.value)
+    quotaGiB.value = Math.round(domain.value.quotaBytes / 1024 ** 3);
+  pendingTab.value = null;
+  leaveDialogOpen.value = false;
+  tab.value = next;
+}
+
+function guardEditorNavigation(to: RouteLocationNormalized) {
+  const remainsInCurrentWorkspace =
+    String(to.params.id ?? "") === domainId.value &&
+    String(to.params.tab ?? "") === tab.value;
+  if (remainsInCurrentWorkspace) return true;
+  if (currentEditorSaving.value) {
+    globalThis.alert(`${currentEditorLabel.value}正在保存，请等待保存完成后再离开。`);
+    return false;
+  }
+  if (!currentEditorDirty.value) return true;
+  return globalThis.confirm(`${currentEditorLabel.value}有未保存修改，确定要放弃并离开吗？`);
+}
+
+function beforeUnload(event: BeforeUnloadEvent) {
+  if (!currentEditorDirty.value && !currentEditorSaving.value) return;
+  event.preventDefault();
+  event.returnValue = "";
+}
+
+onBeforeRouteLeave(guardEditorNavigation);
+onBeforeRouteUpdate(guardEditorNavigation);
+
 watch(
   () => route.params.tab,
   (value) => {
@@ -1197,35 +1382,54 @@ watch(quarantineSearch, () => {
 });
 
 watch(accountSearch, () => {
+  ++accountRequest;
+  accountSelected.value = [];
   globalThis.clearTimeout(accountTimer);
   accountTimer = globalThis.setTimeout(() => {
     accountSelected.value = [];
-    accountPage.value = 1;
-    void loadAccounts();
+    if (accountPage.value !== 1) accountPage.value = 1;
+    else void loadAccounts();
   }, 300);
 });
 watch(accountEnabled, () => {
+  ++accountRequest;
+  globalThis.clearTimeout(accountTimer);
   accountSelected.value = [];
-  accountPage.value = 1;
-  void loadAccounts();
+  if (accountPage.value !== 1) accountPage.value = 1;
+  else void loadAccounts();
 });
 watch(accountPage, () => {
+  globalThis.clearTimeout(accountTimer);
   accountSelected.value = [];
   void loadAccounts();
 });
 watch(aliasSearch, () => {
+  ++aliasRequest;
+  aliasSelected.value = [];
   globalThis.clearTimeout(aliasTimer);
   aliasTimer = globalThis.setTimeout(() => {
     aliasSelected.value = [];
-    aliasPage.value = 1;
-    void loadAliases();
+    if (aliasPage.value !== 1) aliasPage.value = 1;
+    else void loadAliases();
   }, 300);
 });
 watch(aliasPage, () => {
+  globalThis.clearTimeout(aliasTimer);
   aliasSelected.value = [];
   void loadAliases();
 });
-onMounted(loadPage);
+onBeforeUnmount(() => {
+  ++accountRequest;
+  ++aliasRequest;
+  globalThis.clearTimeout(accountTimer);
+  globalThis.clearTimeout(aliasTimer);
+  globalThis.clearTimeout(quarantineTimer);
+  globalThis.removeEventListener("beforeunload", beforeUnload);
+});
+onMounted(() => {
+  globalThis.addEventListener("beforeunload", beforeUnload);
+  void loadPage();
+});
 </script>
 
 <template>
@@ -1349,7 +1553,7 @@ onMounted(loadPage);
       </div>
     </section>
 
-    <v-tabs v-model="tab" class="detail-tabs" color="primary" show-arrows>
+    <v-tabs :model-value="tab" class="detail-tabs" color="primary" show-arrows @update:model-value="requestTab">
       <v-tab value="overview">概览</v-tab>
       <v-tab value="accounts">邮箱账号</v-tab>
       <v-tab value="aliases">别名</v-tab>
@@ -1546,7 +1750,7 @@ onMounted(loadPage);
               color="error"
               :disabled="!accountSelected.length || accountBusy"
               :loading="accountBusy"
-              @click="batchAccounts('batch-delete')"
+              @click="requestBatchAccountDelete"
               >批量删除</v-btn
             >
             <v-btn
@@ -1695,7 +1899,7 @@ onMounted(loadPage);
                     color="error"
                     aria-label="删除账号"
                     :disabled="accountBusy || account.isEnabled"
-                    @click="deleteAccount(account)"
+                    @click="requestDeleteAccount(account)"
                 /></template>
               </v-tooltip>
             </td>
@@ -2064,6 +2268,8 @@ onMounted(loadPage);
         @dkim-generated="onDkimGenerated"
         @check="runDnsCheck"
         @validate="validateDns"
+        @dirty-changed="dnsDirty = $event"
+        @saving-changed="dnsSaving = $event"
       />
     </section>
     <DomainCertificateWorkspace
@@ -2075,6 +2281,8 @@ onMounted(loadPage);
       :outbound-addresses="management?.outboundAddressOptions ?? []"
       :can-manage="can('domain.manage', domainId)"
       @changed="onCertificateChanged"
+      @dirty-changed="certificateDirty = $event"
+      @saving-changed="certificateSaving = $event"
     />
 
     <section v-else class="quota-workspace">
@@ -2137,7 +2345,28 @@ onMounted(loadPage);
     </section>
   </template>
 
-  <v-dialog v-model="domainEditOpen" max-width="560" :persistent="saving">
+  <v-dialog v-model="leaveDialogOpen" max-width="520" persistent>
+    <v-card :title="`放弃“${currentEditorLabel}”修改？`">
+      <v-card-text>
+        <v-alert v-if="currentEditorSaving" type="info" variant="tonal" class="mb-4">
+          {{ currentEditorLabel }}正在保存，请等待保存完成后再离开。
+        </v-alert>
+        <p v-else class="mb-0">当前{{ currentEditorLabel }}尚未保存。离开后，本次修改将无法恢复。</p>
+      </v-card-text>
+      <v-card-actions>
+        <v-spacer />
+        <v-btn :disabled="currentEditorSaving" @click="cancelEditorLeave">继续编辑</v-btn>
+        <v-btn color="error" :disabled="currentEditorSaving" @click="confirmEditorLeave">放弃修改并离开</v-btn>
+      </v-card-actions>
+    </v-card>
+  </v-dialog>
+
+  <v-dialog
+    :model-value="domainEditOpen"
+    max-width="560"
+    :persistent="saving || domainEditDirty"
+    @update:model-value="(value) => { if (!value) requestCloseDomainEdit(); }"
+  >
     <v-card title="编辑域配置"
       ><v-card-text
         ><v-alert
@@ -2159,7 +2388,7 @@ onMounted(loadPage);
           停用后不再接受该域的新协议会话，但不会删除现有邮件数据。
         </p></v-card-text
       ><v-card-actions
-        ><v-spacer /><v-btn :disabled="saving" @click="domainEditOpen = false"
+        ><v-spacer /><v-btn :disabled="saving" @click="requestCloseDomainEdit"
           >取消</v-btn
         ><v-btn
           color="primary"
@@ -2170,6 +2399,19 @@ onMounted(loadPage);
         ></v-card-actions
       ></v-card
     >
+  </v-dialog>
+
+  <v-dialog v-model="domainEditDiscardOpen" max-width="500" persistent>
+    <v-card title="放弃域基础配置修改？">
+      <v-card-text>
+        邮件主机名或域运行状态尚未保存。放弃后，本次修改将无法恢复。
+      </v-card-text>
+      <v-card-actions>
+        <v-spacer />
+        <v-btn @click="domainEditDiscardOpen = false">继续编辑</v-btn>
+        <v-btn color="error" @click="discardDomainEdit">放弃修改</v-btn>
+      </v-card-actions>
+    </v-card>
   </v-dialog>
 
   <v-dialog v-model="accountDialogOpen" max-width="580" :persistent="saving">
@@ -2350,6 +2592,101 @@ onMounted(loadPage);
     </v-card>
   </v-dialog>
 
+  <v-dialog
+    :model-value="Boolean(accountDeleteTarget)"
+    max-width="540"
+    persistent
+    @update:model-value="
+      (value) => {
+        if (!value && !accountBusy) accountDeleteTarget = null;
+      }
+    "
+  >
+    <v-card v-if="accountDeleteTarget" title="确认软删除邮箱账号">
+      <v-card-text>
+        <v-alert
+          v-if="accountDeleteError"
+          type="error"
+          variant="tonal"
+          class="mb-4"
+          >{{ accountDeleteError }}</v-alert
+        >
+        <v-alert type="warning" variant="tonal" class="mb-4"
+          >该账号及其邮箱数据将进入回收站；在保留期内可以恢复，超过保留期后由维护任务永久清理。</v-alert
+        >
+        <p class="dialog-target">{{ accountDeleteTarget.address }}</p>
+        <p class="mb-0">
+          当前占用 {{ bytes(accountDeleteTarget.usedBytes) }}，关联
+          {{ accountDeleteTarget.aliasCount }} 个别名。关联别名会被停用并解除目标绑定。
+        </p>
+      </v-card-text>
+      <v-card-actions
+        ><v-spacer /><v-btn
+          :disabled="accountBusy"
+          @click="accountDeleteTarget = null"
+          >取消</v-btn
+        ><v-btn
+          color="error"
+          :loading="accountBusy"
+          @click="confirmDeleteAccount"
+          >确认软删除</v-btn
+        ></v-card-actions
+      >
+    </v-card>
+  </v-dialog>
+
+  <v-dialog v-model="accountBatchDeleteOpen" max-width="560" persistent>
+    <v-card title="确认批量软删除邮箱账号">
+      <v-card-text>
+        <v-alert
+          v-if="accountDeleteError"
+          type="error"
+          variant="tonal"
+          class="mb-4"
+          >{{ accountDeleteError }}</v-alert
+        >
+        <v-alert
+          v-if="accountBatchDeleteTargets.some((account) => account.isEnabled)"
+          type="warning"
+          variant="tonal"
+          class="mb-4"
+          >所选账号包含运行中的邮箱。请取消后先执行“批量停用”，再重新删除。</v-alert
+        >
+        <v-alert v-else type="warning" variant="tonal" class="mb-4"
+          >选中的账号及邮箱数据将进入回收站；在保留期内可以恢复，超过保留期后由维护任务永久清理。</v-alert
+        >
+        <div class="dialog-target-list">
+          <span
+            v-for="account in accountBatchDeleteTargets.slice(0, 5)"
+            :key="account.id"
+            :class="{ 'dialog-target-list__blocked': account.isEnabled }"
+            >{{ account.address
+            }}{{ account.isEnabled ? "（运行中，不能删除）" : "" }}</span
+          >
+          <span v-if="accountBatchDeleteTargets.length > 5"
+            >另有 {{ accountBatchDeleteTargets.length - 5 }} 个账号</span
+          >
+        </div>
+      </v-card-text>
+      <v-card-actions
+        ><v-spacer /><v-btn
+          :disabled="accountBusy"
+          @click="
+            accountBatchDeleteOpen = false;
+            accountBatchDeleteTargets = [];
+          "
+          >取消</v-btn
+        ><v-btn
+          color="error"
+          :loading="accountBusy"
+          :disabled="accountBatchDeleteTargets.some((account) => account.isEnabled)"
+          @click="confirmBatchAccountDelete"
+          >确认软删除 {{ accountBatchDeleteTargets.length }} 个</v-btn
+        ></v-card-actions
+      >
+    </v-card>
+  </v-dialog>
+
   <v-dialog v-model="aliasEditOpen" max-width="580" :persistent="aliasBusy">
     <v-card title="编辑邮箱别名">
       <v-card-text>
@@ -2415,11 +2752,24 @@ onMounted(loadPage);
               <span>命中原因</span><b>{{ quarantineDetail.record.reason }}</b>
             </div>
           </div>
+          <v-alert
+            v-if="quarantineDetail.truncated"
+            type="info"
+            variant="tonal"
+            class="mb-3"
+            >邮件较大，页面仅显示前 256K 字符。请下载完整 .eml 文件继续审阅。</v-alert
+          >
           <pre class="quarantine-raw">{{ quarantineDetail.content }}</pre>
         </template>
       </v-card-text>
       <v-card-actions
-        ><v-spacer /><v-btn @click="quarantineDetailOpen = false"
+        ><v-spacer /><v-btn
+          prepend-icon="mdi-download"
+          :loading="quarantineDownloadLoading"
+          :disabled="quarantineDetailLoading"
+          @click="downloadQuarantineDetail"
+          >下载完整 .eml</v-btn
+        ><v-btn :disabled="quarantineDownloadLoading" @click="quarantineDetailOpen = false"
           >关闭</v-btn
         ></v-card-actions
       >
@@ -3021,6 +3371,29 @@ onMounted(loadPage);
   color: var(--text-secondary);
   font-size: 12px;
   font-weight: 600;
+}
+.dialog-target-list {
+  display: grid;
+  gap: 6px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+.dialog-target-list > span {
+  display: block;
+  min-height: 32px;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-app);
+  overflow-wrap: anywhere;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.dialog-target-list > .dialog-target-list__blocked {
+  border-color: rgba(220, 38, 38, 0.24);
+  background: rgba(254, 242, 242, 0.84);
+  color: var(--danger);
 }
 .quarantine-facts {
   display: grid;

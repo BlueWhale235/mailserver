@@ -386,6 +386,21 @@ api.MapGet("/firewall/rules", async (
     Results.Ok(await administration.GetFirewallRulesAsync(cancellationToken)))
     .RequirePermission(PermissionCodes.FirewallList);
 
+api.MapGet("/firewall/rules/search", async (
+    string? query,
+    bool? isEnabled,
+    int? page,
+    int? pageSize,
+    AdminApplicationService administration,
+    CancellationToken cancellationToken) =>
+    Results.Ok(await administration.SearchFirewallRulesAsync(
+        query,
+        isEnabled,
+        page ?? 1,
+        pageSize ?? 20,
+        cancellationToken)))
+    .RequirePermission(PermissionCodes.FirewallList);
+
 api.MapPost("/firewall/rules", async (
     FirewallRuleRequest request,
     HttpContext http,
@@ -503,6 +518,13 @@ api.MapPost("/domains", async (
     catch (InvalidOperationException exception)
     {
         return Results.Conflict(new { error = exception.Message });
+    }
+    catch (FormatException)
+    {
+        return Results.ValidationProblem(new Dictionary<string, string[]>
+        {
+            [nameof(DomainRequest.Name)] = ["请输入有效的完整域名，例如 example.com。"]
+        });
     }
 }).RequireAllDomainsPermission(PermissionCodes.DomainManage);
 
@@ -1218,6 +1240,21 @@ api.MapGet("/domains/{domainId:guid}/quarantine/{id:guid}/raw", async (
     CancellationToken cancellationToken) =>
 {
     try { return Results.Ok(await quarantine.GetRawAsync(domainId, id, cancellationToken)); }
+    catch (KeyNotFoundException) { return Results.NotFound(); }
+    catch (FileNotFoundException exception) { return Results.NotFound(new { error = exception.Message }); }
+}).RequireDomainPermission(PermissionCodes.DomainQuarantineRead, "domainId");
+
+api.MapGet("/domains/{domainId:guid}/quarantine/{id:guid}/raw/download", async (
+    Guid domainId,
+    Guid id,
+    IQuarantineService quarantine,
+    CancellationToken cancellationToken) =>
+{
+    try
+    {
+        var download = await quarantine.OpenRawAsync(domainId, id, cancellationToken);
+        return Results.Stream(download.Content, "message/rfc822", download.FileName);
+    }
     catch (KeyNotFoundException) { return Results.NotFound(); }
     catch (FileNotFoundException exception) { return Results.NotFound(new { error = exception.Message }); }
 }).RequireDomainPermission(PermissionCodes.DomainQuarantineRead, "domainId");

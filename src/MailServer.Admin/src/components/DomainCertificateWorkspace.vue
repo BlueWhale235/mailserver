@@ -34,6 +34,8 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   changed: [certificate: DomainCertificateModel | null]
+  dirtyChanged: [dirty: boolean]
+  savingChanged: [saving: boolean]
 }>()
 
 type SourceMode = 'upload' | 'paste' | 'path'
@@ -106,6 +108,20 @@ const canInspect = computed(() => props.canManage && !busy.value && hasRequiredI
 const canApply = computed(() => props.canManage && !busy.value && usableInspection.value)
 const applyLabel = computed(() => mode.value === 'path' ? '绑定并启用' : '上传并启用')
 const deleteConfirmed = computed(() => deleteConfirmation.value.trim() === term.value)
+const dirty = computed(() => {
+  if (mode.value === 'upload') {
+    return Boolean(certificateFile.value || privateKeyFile.value || privateKeyPassword.value)
+  }
+  if (mode.value === 'paste') {
+    return Boolean(pastedCertificate.value.trim() || pastedPrivateKey.value.trim() || pastedPrivateKeyPassword.value)
+  }
+  const currentCertificatePath = props.certificate?.source === 'ExternalPath' ? props.certificate.certificatePath ?? '' : ''
+  const currentPrivateKeyPath = props.certificate?.source === 'ExternalPath' ? props.certificate.privateKeyPath ?? '' : ''
+  return certificatePath.value.trim() !== currentCertificatePath || privateKeyPath.value.trim() !== currentPrivateKeyPath
+})
+
+watch(dirty, value => emit('dirtyChanged', value), { immediate: true })
+watch(busy, value => emit('savingChanged', value), { immediate: true })
 
 watch([mode, certificateFile, privateKeyFile, privateKeyPassword, pastedCertificate, pastedPrivateKey, pastedPrivateKeyPassword, certificatePath, privateKeyPath], () => {
   if (!inspectionIsCurrent.value) inspection.value = null
@@ -244,6 +260,7 @@ async function applyCertificate() {
     // 启用成功后回到「当前证书」，让管理员立即核对生效结果，而不是停留在空的表单上。
     activeSection.value = 'current'
     resetSecrets()
+    pastedCertificate.value = ''
     emit('changed', saved)
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : '证书保存失败'

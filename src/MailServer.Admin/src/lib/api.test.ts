@@ -1,6 +1,48 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 describe('API client', () => {
+  it.each(['api', 'apiDownload'] as const)('handles CSRF-fetch 401 before %s submits a write', async clientName => {
+    const fetchMock = vi.fn().mockImplementation(async () => Response.json({ title: 'Unauthorized', traceId: 'csrf-401' }, { status: 401 }))
+    vi.stubGlobal('fetch', fetchMock)
+    const client = await import('./api')
+    const expired = vi.fn()
+    client.setSessionExpiredHandler(expired)
+    await expect(client[clientName]('/audit/export', { method: 'POST', body: '{}' })).rejects.toMatchObject({ status: 401, kind: 'session-expired' })
+    expect(expired).toHaveBeenCalledWith(expect.objectContaining({ traceId: 'csrf-401' }))
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/v1/session/csrf')
+  })
+
+  it('invalidates a rejected download CSRF token without replaying the write or logging out', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(Response.json({ token: 'old-token' }))
+      .mockResolvedValueOnce(Response.json({ title: 'CSRF validation failed' }, { status: 403 }))
+      .mockResolvedValueOnce(Response.json({ token: 'new-token' }))
+      .mockResolvedValueOnce(new Response('exported'))
+    vi.stubGlobal('fetch', fetchMock)
+    const { apiDownload, setSessionExpiredHandler } = await import('./api')
+    const expired = vi.fn()
+    setSessionExpiredHandler(expired)
+    await expect(apiDownload('/audit/export', { method: 'POST' })).rejects.toMatchObject({ kind: 'csrf' })
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(expired).not.toHaveBeenCalled()
+    await apiDownload('/audit/export', { method: 'POST' })
+    expect(fetchMock).toHaveBeenCalledTimes(4)
+    expect((fetchMock.mock.calls[3]?.[1].headers as Headers).get('X-CSRF-TOKEN')).toBe('new-token')
+  })
+
+  it('does not claim that a write was not committed when its response is lost', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(Response.json({ token: 'csrf' }))
+      .mockRejectedValueOnce(new TypeError('Connection lost'))
+    vi.stubGlobal('fetch', fetchMock)
+    const { api } = await import('./api')
+    await expect(api('/domains', { method: 'POST', body: '{}' })).rejects.toMatchObject({
+      kind: 'network', message: expect.stringContaining('核对'),
+    })
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
   it('obtains an authenticated CSRF token for the first write after login', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(Response.json({ token: 'anonymous-token' }))

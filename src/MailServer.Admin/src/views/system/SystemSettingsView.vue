@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { onBeforeRouteLeave } from 'vue-router'
 import PageHeader from '../../components/PageHeader.vue'
 import StatusPill from '../../components/StatusPill.vue'
@@ -53,6 +53,9 @@ const notice = ref('')
 const newFolder = ref('')
 const folderError = ref('')
 const reloadConfirmOpen = ref(false)
+const leaveConfirmOpen = ref(false)
+const navigationWarning = ref('')
+let resolvePendingLeave: ((allow: boolean) => void) | null = null
 
 const snapshots = computed<Record<SectionKey, string>>(() => ({
   delivery: JSON.stringify(delivery.value),
@@ -196,6 +199,7 @@ function resetCurrent() {
 async function saveCurrent() {
   const section = activeSection.value
   if (!currentDirty.value || !currentValid.value || savingSection.value) return
+  const sectionTitle = sections.find(item => item.key === section)?.title ?? '当前分区'
   savingSection.value = section
   sectionErrors.value[section] = ''
   notice.value = ''
@@ -213,9 +217,9 @@ async function saveCurrent() {
       }
       acceptCertificates(await api<CertificateSettings>('/settings/certificates', { method: 'PUT', body: jsonBody(payload) }))
     }
-    notice.value = `${currentSection.value.title}已保存`
+    notice.value = `${sectionTitle}已保存`
   } catch (cause) {
-    sectionErrors.value[section] = cause instanceof ApiError || cause instanceof Error ? cause.message : `${currentSection.value.title}保存失败`
+    sectionErrors.value[section] = cause instanceof ApiError || cause instanceof Error ? cause.message : `${sectionTitle}保存失败`
   } finally {
     savingSection.value = null
   }
@@ -242,13 +246,44 @@ function removeFolder(folder: string) {
 }
 
 function switchSection(section: SectionKey) {
+  if (savingSection.value) return
   activeSection.value = section
   notice.value = ''
   folderError.value = ''
 }
 
-onBeforeRouteLeave(() => !dirtyCount.value || globalThis.confirm(`有 ${dirtyCount.value} 个设置分区尚未保存，确定离开？`))
-onMounted(loadAll)
+function protectPageExit(event: BeforeUnloadEvent) {
+  if (!dirtyCount.value && !savingSection.value) return
+  event.preventDefault()
+  event.returnValue = ''
+}
+
+function finishLeaveConfirmation(allow: boolean) {
+  leaveConfirmOpen.value = false
+  const resolve = resolvePendingLeave
+  resolvePendingLeave = null
+  resolve?.(allow)
+}
+
+onBeforeRouteLeave(() => {
+  if (savingSection.value) {
+    navigationWarning.value = `${sections.find(item => item.key === savingSection.value)?.title ?? '当前分区'}正在保存，请等待保存完成后再离开。`
+    return false
+  }
+  if (!dirtyCount.value) return true
+  if (resolvePendingLeave) resolvePendingLeave(false)
+  leaveConfirmOpen.value = true
+  return new Promise<boolean>(resolve => { resolvePendingLeave = resolve })
+})
+onMounted(() => {
+  globalThis.addEventListener('beforeunload', protectPageExit)
+  void loadAll()
+})
+onBeforeUnmount(() => {
+  globalThis.removeEventListener('beforeunload', protectPageExit)
+  resolvePendingLeave?.(false)
+  resolvePendingLeave = null
+})
 </script>
 
 <template>
@@ -260,14 +295,15 @@ onMounted(loadAll)
 
   <PageHeader title="全局设置" description="管理直接影响投递、SMTP、邮箱初始化与证书选择的运行参数">
     <v-chip v-if="dirtyCount" color="warning" variant="tonal" size="small">{{ dirtyCount }} 个分区未保存</v-chip>
-    <v-btn variant="outlined" prepend-icon="mdi-refresh" :loading="loading" @click="requestReload">重新加载</v-btn>
+    <v-btn variant="outlined" prepend-icon="mdi-refresh" :loading="loading" :disabled="Boolean(savingSection)" @click="requestReload">重新加载</v-btn>
   </PageHeader>
 
   <v-alert v-if="notice" type="success" variant="tonal" closable class="mb-4" @click:close="notice = ''">{{ notice }}</v-alert>
+  <v-alert v-if="navigationWarning" type="warning" variant="tonal" closable class="mb-4" @click:close="navigationWarning = ''">{{ navigationWarning }}</v-alert>
 
   <div class="settings-layout">
     <nav class="settings-nav" aria-label="全局设置分区">
-      <button v-for="section in sections" :key="section.key" :class="{ active: activeSection === section.key }" @click="switchSection(section.key)">
+      <button v-for="section in sections" :key="section.key" :class="{ active: activeSection === section.key }" :disabled="Boolean(savingSection)" @click="switchSection(section.key)">
         <v-icon size="20">{{ section.icon }}</v-icon>
         <span><b>{{ section.title }}</b><small>{{ section.description }}</small></span>
         <i v-if="sectionErrors[section.key]" class="status-dot is-error" :title="`${section.title}加载失败`" />
@@ -361,6 +397,14 @@ onMounted(loadAll)
       <v-card-actions><v-spacer /><v-btn variant="text" @click="reloadConfirmOpen = false">继续编辑</v-btn><v-btn color="error" variant="tonal" @click="discardAndReload">放弃并重新加载</v-btn></v-card-actions>
     </v-card>
   </v-dialog>
+
+  <v-dialog :model-value="leaveConfirmOpen" max-width="500" persistent>
+    <v-card>
+      <v-card-title>离开并放弃修改？</v-card-title>
+      <v-card-text>还有 {{ dirtyCount }} 个设置分区尚未保存。离开此页面后，本地修改将无法恢复。</v-card-text>
+      <v-card-actions><v-spacer /><v-btn variant="text" @click="finishLeaveConfirmation(false)">继续编辑</v-btn><v-btn color="error" variant="tonal" @click="finishLeaveConfirmation(true)">放弃并离开</v-btn></v-card-actions>
+    </v-card>
+  </v-dialog>
 </template>
 
 <style scoped>
@@ -368,6 +412,7 @@ onMounted(loadAll)
 .settings-nav { position: sticky; top: 76px; overflow: hidden; border: 1px solid var(--border); border-radius: 10px; background: #fff; }
 .settings-nav button { display: grid; grid-template-columns: 25px minmax(0, 1fr) 18px; align-items: center; gap: 10px; width: 100%; padding: 14px 15px; border: 0; border-bottom: 1px solid var(--border); color: var(--text-secondary); background: transparent; text-align: left; cursor: pointer; }
 .settings-nav button:hover { background: #f8fafc; }
+.settings-nav button:disabled { cursor: wait; opacity: .62; }
 .settings-nav button.active { color: #175cb8; background: #f2f7ff; box-shadow: inset 3px 0 #2c72d6; }
 .settings-nav button span { display: flex; flex-direction: column; gap: 2px; }
 .settings-nav button b { font-size: 13px; }

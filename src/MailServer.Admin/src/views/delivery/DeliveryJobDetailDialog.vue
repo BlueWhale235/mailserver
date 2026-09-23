@@ -19,6 +19,7 @@ const raw = ref<DeliveryRawMessage | null>(null)
 const attemptsLoading = ref(false)
 const rawLoading = ref(false)
 const error = ref('')
+const attemptsError = ref(false)
 let requestVersion = 0
 
 const status = computed(() => props.job ? deliveryStatusPresentation(props.job.status) : null)
@@ -27,12 +28,13 @@ async function loadAttempts() {
   if (!props.job) return
   const version = requestVersion
   attemptsLoading.value = true
+  attemptsError.value = false
   error.value = ''
   try {
     const result = await api<DeliveryAttempt[]>(queuePath('/' + props.job.id + '/attempts'))
     if (version === requestVersion) attempts.value = result
   }
-  catch (cause) { if (version === requestVersion) error.value = cause instanceof Error ? cause.message : '投递尝试加载失败' }
+  catch (cause) { if (version === requestVersion) { attemptsError.value = true; error.value = cause instanceof Error ? cause.message : '投递尝试加载失败' } }
   finally { if (version === requestVersion) attemptsLoading.value = false }
 }
 
@@ -73,6 +75,7 @@ watch([() => props.modelValue, () => props.job?.id], ([value]) => {
   if (!value || !props.job) return
   tab.value = 'attempts'
   attempts.value = []
+  attemptsError.value = false
   raw.value = null
   error.value = ''
   void loadAttempts()
@@ -111,6 +114,11 @@ onBeforeUnmount(() => { ++requestVersion })
             </div>
 
             <v-progress-linear v-if="attemptsLoading" indeterminate color="primary" class="mt-6" />
+            <div v-else-if="attemptsError" class="delivery-empty">
+              <v-icon size="30">mdi-alert-circle-outline</v-icon>
+              <b>投递尝试加载失败</b>
+              <v-btn variant="outlined" @click="loadAttempts">重新加载</v-btn>
+            </div>
             <div v-else-if="!attempts.length" class="delivery-empty">
               <v-icon size="30">mdi-timeline-clock-outline</v-icon>
               <b>尚无投递尝试</b>

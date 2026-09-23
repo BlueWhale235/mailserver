@@ -3,6 +3,7 @@ import { useAuthStore } from './stores/auth'
 import { setSessionExpiredHandler } from './lib/api'
 import AppShell from './layouts/AppShell.vue'
 import { enablePreviewMode, isPreviewMode } from './lib/mockApi'
+import { canAccessPage, firstAccessiblePath, getPageDefinition } from './lib/pageAccess'
 
 const router = createRouter({
   history: createWebHistory('/admin/'),
@@ -26,6 +27,7 @@ const router = createRouter({
         { path: 'system/message-templates', name: 'system-templates', component: () => import('./views/system/MessageTemplatesView.vue') },
         { path: 'system/settings', name: 'system-settings', component: () => import('./views/system/SystemSettingsView.vue') },
         { path: 'system/recycle-bin', name: 'system-recycle', component: () => import('./views/system/RecycleBinView.vue') },
+        { path: 'forbidden', name: 'forbidden', component: () => import('./views/ForbiddenView.vue') },
       ]
     },
     { path: '/:pathMatch(.*)*', redirect: '/' }
@@ -63,7 +65,18 @@ router.beforeEach(async to => {
   const auth = useAuthStore()
   await auth.initialize()
   if (!to.meta.public && !auth.session) return { name: 'login', query: { redirect: to.fullPath } }
-  if (to.name === 'login' && auth.session && !isPreviewMode()) return { name: 'overview' }
+  if (to.name === 'login' && auth.session && !isPreviewMode()) return firstAccessiblePath(auth)
+  const page = getPageDefinition(to.name)
+  const routeDomainId = typeof to.params.id === 'string' ? to.params.id : undefined
+  if (page && !canAccessPage(page, auth, routeDomainId)) {
+    return {
+      name: 'forbidden',
+      query: {
+        from: to.fullPath.startsWith('/') && !to.fullPath.startsWith('//') ? to.fullPath : undefined,
+        target: page.title,
+      },
+    }
+  }
 })
 
 export default router

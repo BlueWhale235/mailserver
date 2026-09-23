@@ -1,5 +1,6 @@
 import { inspectFirewallInput } from './firewallInput'
 import type { DomainCertificateInspection } from './domainCertificate'
+import { domainNameError, normalizeDomainName } from './domainName'
 
 interface MockDomain {
   id: string
@@ -742,6 +743,29 @@ function createDnsCheck(domain: MockDomain): MockDnsCheck {
   }
 }
 
+function createUnpublishedDnsCheck(domain: MockDomain, selector = 'mail'): MockDnsCheck {
+  return {
+    domainId: domain.id,
+    status: 'Unhealthy',
+    validation: {
+      domain: domain.name,
+      items: [
+        { kind: 'MX', name: domain.name, expected: `10 ${domain.mailHostName}`, actual: [], status: 'missing' },
+        { kind: 'A/AAAA', name: domain.mailHostName, expected: '可公开解析的 IPv4 或 IPv6 地址', actual: [], status: 'missing' },
+        { kind: 'SPF', name: domain.name, expected: 'v=spf1 mx -all', actual: [], status: 'missing' },
+        { kind: 'DKIM', name: `${selector}._domainkey.${domain.name}`, expected: 'v=DKIM1; k=rsa; p=…', actual: [], status: 'missing' },
+        { kind: 'DMARC', name: `_dmarc.${domain.name}`, expected: 'v=DMARC1; p=quarantine', actual: [], status: 'missing' },
+      ],
+      warnings: [
+        '预览环境尚未为这个新域模拟发布 DNS 记录。请按“待发布 DNS 记录”中的内容完成配置后重新检查。',
+        `还需确认公网 25 端口、PTR 反向解析与 ${domain.mailHostName} 一致。`,
+      ],
+    },
+    lastError: null,
+    checkedAt: domain.dnsCheckedAt ?? new Date().toISOString(),
+  }
+}
+
 const previewDnsChecks: Record<string, MockDnsCheck> = Object.fromEntries(domains.map(domain => [domain.id, createDnsCheck(domain)]))
 
 function createPreviewDnsSettings(domain: MockDomain): Record<string, unknown> {
@@ -761,12 +785,13 @@ const previewDnsSettings: Record<string, Record<string, unknown>> = Object.fromE
   domains.map(domain => [domain.id, createPreviewDnsSettings(domain)]),
 )
 
-const previewDkim: Record<string, { selector: string; publicKey: string }> = Object.fromEntries(
+const previewDkim: Record<string, { selector: string; publicKey?: string }> = Object.fromEntries(
   domains.map(domain => [domain.id, {
     selector: domain.id.endsWith('401') ? 'mail2026' : 'mail',
     publicKey: 'MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAuG7f2kQm1sV4pLd9xY3bC6nR8aF1eT5oIw==',
   }]),
 )
+const previewUnpublishedDomains = new Set<string>()
 
 function splitPreviewList(value: unknown): string[] {
   return String(value ?? '').split(/[\s,;]+/).map(item => item.trim()).filter(Boolean)
@@ -975,6 +1000,55 @@ export function enablePreviewMode() {
 }
 export function isPreviewMode() { return import.meta.env.DEV && previewMode }
 
+/** 与后端 MailRuleService.ValidateActions / ValidateCondition 对齐：值去重、移动动作唯一、拒绝与转发互斥。 */
+function normalizePreviewRuleInput(
+  direction: MockDomainRule['direction'],
+  conditions: Array<{ field: string; operator: string; values: string[] }>,
+  actions: Array<{ kind: string; values: string[] }>,
+) {
+  const normalizeValues = (values: string[] | undefined) => {
+    const seen = new Set<string>()
+    const result: string[] = []
+    for (const rawValue of values ?? []) {
+      const value = String(rawValue).trim()
+      if (!value) continue
+      const key = value.toLowerCase()
+      if (seen.has(key)) continue
+      seen.add(key)
+      result.push(value)
+    }
+    return result
+  }
+  let moveCount = 0
+  let rejectCount = 0
+  let forwardCount = 0
+  const normalizedConditions = conditions.map(condition => ({
+    field: condition.field,
+    operator: condition.operator,
+    values: normalizeValues(condition.values),
+  }))
+  const normalizedActions = actions.map(action => {
+    const values = normalizeValues(action.values)
+    if (action.kind === 'MoveToFolder') {
+      moveCount += 1
+      if (moveCount > 1 || values.length !== 1) throw new Error('一个规则只能包含一个移动动作')
+    } else if (action.kind === 'ForwardTo') {
+      forwardCount += values.length
+      if (values.length < 1 || forwardCount > 20) throw new Error('转发动作需要填写 1-20 个邮箱地址')
+    } else if (action.kind === 'Reject') {
+      if (direction !== 'Outgoing') throw new Error('拒绝发信仅适用于发信规则')
+      rejectCount += 1
+      if (rejectCount > 1 || values.length > 1) throw new Error('一个规则只能包含一个拒绝动作与一个可选理由')
+      if (values.length === 1 && values[0]!.length > 255) throw new Error('拒绝理由最多 255 个字符')
+    } else {
+      throw new Error('未知的执行动作')
+    }
+    return { kind: action.kind, values }
+  })
+  if (rejectCount > 0 && forwardCount > 0) throw new Error('拒绝发信与转发动作不能同时使用')
+  return { conditions: normalizedConditions, actions: normalizedActions }
+}
+
 function page<T>(items: T[], pageNumber: number, pageSize: number) {
   return { items: items.slice((pageNumber - 1) * pageSize, pageNumber * pageSize), page: pageNumber, pageSize, totalCount: items.length }
 }
@@ -983,6 +1057,17 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
   if (path.split('?')[0] === '/quarantine/domains') return domains.map(domain => ({ id: domain.id, name: domain.name })) as T
   const url = new globalThis.URL(path, 'http://preview.local')
   const method = (init.method || 'GET').toUpperCase()
+  if (url.pathname === '/firewall/rules/search') {
+    const query = (url.searchParams.get('query') ?? '').trim().toLowerCase()
+    const enabled = url.searchParams.get('isEnabled')
+    const pageNumber = Number(url.searchParams.get('page') || 1)
+    const pageSize = Number(url.searchParams.get('pageSize') || 20)
+    const matches = previewFirewall
+      .filter(rule => (!query || `${rule.cidr} ${rule.note}`.toLowerCase().includes(query))
+        && (enabled === null || rule.isEnabled === (enabled === 'true')))
+      .sort((left, right) => Number(right.isEnabled) - Number(left.isEnabled) || left.cidr.localeCompare(right.cidr))
+    return page(matches, pageNumber, pageSize) as T
+  }
   if (url.pathname === '/firewall/rules') {
     if (method === 'POST') {
       const input = JSON.parse(String(init.body))
@@ -1412,10 +1497,31 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
   }
 
   if (url.pathname === '/domains' && method === 'POST') {
-    const request = JSON.parse(String(init.body)) as { name: string }
-    const domain: MockDomain = { id: globalThis.crypto.randomUUID(), name: request.name, mailHostName: `mail.${request.name}`, isActive: true, dnsStatus: 'PendingConfiguration', hasCertificate: false, accountCount: 0, quotaBytes: 107374182400, usedBytes: 0, createdAt: new Date().toISOString() }
+    const request = JSON.parse(String(init.body)) as { name?: string; dkimSelector?: string | null }
+    const name = normalizeDomainName(request.name ?? '')
+    const nameError = domainNameError(name)
+    if (nameError) throw new Error(nameError)
+    const selector = request.dkimSelector?.trim().toLowerCase() || null
+    if (selector && !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(selector)) {
+      throw new Error('DKIM Selector 只能包含字母、数字和连字符，且不能以连字符开头或结尾')
+    }
+    const mailHostName = `mail.${name}`
+    if (domains.some(candidate => candidate.name === name)) throw new Error('邮件域已存在')
+    if (domains.some(candidate => candidate.mailHostName === mailHostName)) throw new Error(`默认邮件主机名 ${mailHostName} 已被占用`)
+    const createdAt = new Date().toISOString()
+    const domain: MockDomain = { id: globalThis.crypto.randomUUID(), name, mailHostName, isActive: true, dnsStatus: 'PendingConfiguration', hasCertificate: false, accountCount: 0, quotaBytes: 107374182400, usedBytes: 0, createdAt }
     domains.unshift(domain)
-    return domain as T
+    domainAccounts[domain.id] = []
+    domainAliases[domain.id] = []
+    domainRules[domain.id] = []
+    domainQuarantine[domain.id] = []
+    domainAuditEntries[domain.id] = [{ id: globalThis.crypto.randomUUID(), actor: 'preview-admin', action: 'domain.create', resource: `domain:${domain.id}`, detail: name, createdAt }]
+    previewDnsChecks[domain.id] = createDnsCheck(domain)
+    previewDnsSettings[domain.id] = createPreviewDnsSettings(domain)
+    previewUnpublishedDomains.add(domain.id)
+    if (selector) previewDkim[domain.id] = { selector }
+    addPreviewAudit({ content: '创建邮件域', category: 'Create', status: 'Succeeded', actor: 'preview-admin', action: 'domain.create', resource: `domain:${domain.id}`, detail: name, remoteAddress: '127.0.0.1', requestId: `req-domain-${Date.now()}`, relatedId: domain.id, createdAt, changes: [] })
+    return structuredClone(domain) as T
   }
 
   if (url.pathname === '/domains/batch/dns-check' && method === 'POST') {
@@ -1423,6 +1529,7 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
     domains.filter(domain => request.domainIds.includes(domain.id)).forEach(domain => {
       domain.dnsStatus = 'Healthy'
       domain.dnsCheckedAt = new Date().toISOString()
+      previewUnpublishedDomains.delete(domain.id)
       previewDnsChecks[domain.id] = createDnsCheck(domain)
     })
     return request.domainIds.map(id => previewDnsChecks[id]).filter(Boolean) as T
@@ -1432,7 +1539,7 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
   if (domainDetailMatch && method === 'GET') {
     const domain = domains.find(candidate => candidate.id === domainDetailMatch[1])
     if (!domain) throw new Error('邮件域不存在')
-    const selector = previewDkim[domain.id]?.selector ?? 'mail'
+    const selector = previewDkim[domain.id]?.selector
     return {
       domain: {
         id: domain.id, name: domain.name, mailHostName: domain.mailHostName, smtpHostName: domain.mailHostName,
@@ -1459,11 +1566,21 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
     if (!domain) throw new Error('邮件域不存在')
     const accounts = domainAccounts[domain.id] ?? []
     const aliases = domainAliases[domain.id] ?? []
+    const suffix = `@${domain.name.toLowerCase()}`
+    const jobs = deliveryJobs.filter(job => job.sender.toLowerCase().endsWith(suffix) || job.recipient.toLowerCase().endsWith(suffix))
+    const quarantine = domainQuarantine[domain.id] ?? []
+    const audits = domainAuditEntries[domain.id] ?? []
+    const dkim = previewDkim[domain.id]
     return {
       accountCount: Math.max(domain.accountCount, accounts.length), enabledAccountCount: accounts.length ? accounts.filter(account => account.isEnabled).length : domain.accountCount,
-      aliasCount: Math.max(aliases.length, domain.id.endsWith('401') ? 47 : aliases.length), pendingDeliveries: domain.id.endsWith('401') ? 18 : 4,
-      failedDeliveries: domain.id.endsWith('402') ? 5 : 1, hasCertificate: domain.hasCertificate,
-      certificateNotAfter: domain.certificateNotAfter ?? null, hasDkim: true, lastAuditAt: '2026-09-18T04:20:08Z', pendingQuarantineCount: 3,
+      aliasCount: aliases.length,
+      pendingDeliveries: jobs.filter(job => job.status === 'Pending' || job.status === 'Deferred').length,
+      failedDeliveries: jobs.filter(job => job.status === 'Failed').length,
+      hasCertificate: domain.hasCertificate,
+      certificateNotAfter: domain.certificateNotAfter ?? null,
+      hasDkim: Boolean(dkim?.selector && dkim.publicKey),
+      lastAuditAt: audits.slice().sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0]?.createdAt ?? null,
+      pendingQuarantineCount: quarantine.filter(item => item.status === 'PendingReview').length,
     } as T
   }
 
@@ -1673,8 +1790,13 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
     if (!domain) throw new Error('邮件域不存在')
     if (method === 'POST') {
       domain.dnsCheckedAt = new Date().toISOString()
-      previewDnsChecks[domain.id] = createDnsCheck(domain)
-      previewDnsChecks[domain.id]!.checkedAt = domain.dnsCheckedAt
+      if (previewUnpublishedDomains.has(domain.id)) {
+        domain.dnsStatus = 'Unhealthy'
+        previewDnsChecks[domain.id] = createUnpublishedDnsCheck(domain, previewDkim[domain.id]?.selector)
+      } else {
+        previewDnsChecks[domain.id] = createDnsCheck(domain)
+        previewDnsChecks[domain.id]!.checkedAt = domain.dnsCheckedAt
+      }
     }
     return structuredClone(previewDnsChecks[domain.id] ?? createDnsCheck(domain)) as T
   }
@@ -1738,6 +1860,7 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
     delete previewDkim[domainId]
     delete previewDnsSettings[domainId]
     delete previewDnsChecks[domainId]
+    previewUnpublishedDomains.delete(domainId)
     deliveryJobs = deliveryJobs.filter(job => !job.sender.endsWith(suffix) && !job.recipient.endsWith(suffix))
   }
 
@@ -1750,7 +1873,7 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
     if (request.dkimSelector !== undefined && request.dkimSelector !== null) {
       const selector = request.dkimSelector.trim().toLowerCase()
       if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(selector)) throw new Error('DKIM 选择器格式无效')
-      const entry = previewDkim[domain.id] ?? { selector, publicKey: 'MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAuG7f2kQm1sV4pLd9xY3bC6nR8aF1eT5oIw==' }
+      const entry = previewDkim[domain.id] ?? { selector }
       entry.selector = selector
       previewDkim[domain.id] = entry
     }
@@ -1933,6 +2056,7 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
       ? [{ kind: 'MoveToFolder', values: [request.targetMailboxName] }]
       : request.actions
     if (!submittedActions.length) throw new Error('请至少添加一个执行动作')
+    const normalized = normalizePreviewRuleInput(request.direction, request.conditions, submittedActions)
     const rows = domainRules[domain.id] ??= []
     const sameDirection = rows.filter(rule => rule.direction === request.direction)
     const id = globalThis.crypto.randomUUID()
@@ -1940,8 +2064,8 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
       id, domainId: domain.id, name, direction: request.direction, matchMode: request.matchMode ?? 'All',
       targetMailboxName: request.targetMailboxName, isEnabled: request.isEnabled !== false,
       priority: sameDirection.reduce((max, candidate) => Math.max(max, candidate.priority), -1) + 1,
-      conditions: request.conditions.map((condition, index) => ({ id: globalThis.crypto.randomUUID(), field: condition.field, operator: condition.operator, values: condition.values ?? [], position: index })),
-      actions: submittedActions.map((action, index) => ({ id: globalThis.crypto.randomUUID(), kind: action.kind, values: action.values ?? [], position: index })),
+      conditions: normalized.conditions.map((condition, index) => ({ id: globalThis.crypto.randomUUID(), field: condition.field, operator: condition.operator, values: condition.values, position: index })),
+      actions: normalized.actions.map((action, index) => ({ id: globalThis.crypto.randomUUID(), kind: action.kind, values: action.values, position: index })),
     }
     rows.push(rule)
     noteDomainAudit('rule.create', 'Create', '创建收发信规则', 'rule:' + id, name, domain.id)
@@ -1976,13 +2100,18 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
       throw new Error('更新规则必须提交完整规则，不能只提交启用状态')
     }
     if (request.actions != null && !request.actions.length) throw new Error('请至少添加一个执行动作')
+    const normalized = normalizePreviewRuleInput(
+      request.direction,
+      request.conditions,
+      request.actions ?? rule.actions.map(action => ({ kind: action.kind, values: [...action.values] })),
+    )
     rule.direction = request.direction
     if (request.name !== undefined) rule.name = request.name.trim()
     if (request.matchMode) rule.matchMode = request.matchMode
     if (request.targetMailboxName) rule.targetMailboxName = request.targetMailboxName
     if (request.isEnabled !== undefined) rule.isEnabled = request.isEnabled
-    if (request.conditions) rule.conditions = request.conditions.map((condition, index) => ({ id: globalThis.crypto.randomUUID(), field: condition.field, operator: condition.operator, values: condition.values ?? [], position: index }))
-    if (request.actions) rule.actions = request.actions.map((action, index) => ({ id: globalThis.crypto.randomUUID(), kind: action.kind, values: action.values ?? [], position: index }))
+    if (request.conditions) rule.conditions = normalized.conditions.map((condition, index) => ({ id: globalThis.crypto.randomUUID(), field: condition.field, operator: condition.operator, values: condition.values, position: index }))
+    if (request.actions) rule.actions = normalized.actions.map((action, index) => ({ id: globalThis.crypto.randomUUID(), kind: action.kind, values: action.values, position: index }))
     noteDomainAudit('rule.update', 'Update', '更新收发信规则', 'rule:' + rule.id, rule.name, domain.id)
     return structuredClone(rule) as T
   }
@@ -2031,6 +2160,7 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
         '隔离原因：' + entry.reason,
         'This is a redacted preview message body. Production content is read from the quarantine store.',
       ].join('\r\n'),
+      truncated: false,
     } as T
   }
 
@@ -2261,6 +2391,28 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
 export async function mockApiDownload(path: string, init: RequestInit = {}) {
   const url = new globalThis.URL(path, 'http://preview.local')
   const method = (init.method || 'GET').toUpperCase()
+  const quarantineDownloadMatch = url.pathname.match(/^\/domains\/([^/]+)\/quarantine\/([^/]+)\/raw\/download$/)
+  if (quarantineDownloadMatch && method === 'GET') {
+    const entry = (domainQuarantine[quarantineDownloadMatch[1]!] ?? [])
+      .find(candidate => candidate.id === quarantineDownloadMatch[2])
+    if (!entry) throw new Error('隔离邮件不存在')
+    const content = [
+      'From: ' + entry.sender,
+      'To: ' + entry.recipients.join(', '),
+      'Date: ' + new Date(entry.quarantinedAt).toUTCString(),
+      'Message-ID: ' + (entry.internetMessageId ?? '<' + entry.messageId + '@mailserver.preview>'),
+      'Subject: MailServer preview quarantined message',
+      'MIME-Version: 1.0',
+      'Content-Type: text/plain; charset=utf-8',
+      '',
+      '隔离原因：' + entry.reason,
+      'This is a redacted preview message body. Production content is read from the quarantine store.',
+    ].join('\r\n')
+    return {
+      blob: new Blob([content], { type: 'message/rfc822' }),
+      fileName: 'quarantine-' + entry.id.replaceAll('-', '') + '.eml',
+    }
+  }
   if (url.pathname !== '/audit/export' || method !== 'POST') {
     throw new Error(`预览下载尚未覆盖接口：${method} ${url.pathname}`)
   }

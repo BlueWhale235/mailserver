@@ -9,6 +9,8 @@ const MockRoute = { params: { id: 'domain-1', tab: 'aliases' }, query: {} as Rec
 vi.mock('vue-router', () => ({
   useRoute: () => MockRoute,
   useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
+  onBeforeRouteLeave: vi.fn(),
+  onBeforeRouteUpdate: vi.fn(),
 }))
 vi.mock('../composables/usePermission', () => ({ usePermission: () => ({ can: () => true }) }))
 
@@ -16,6 +18,14 @@ const domainId = 'domain-1'
 const alias = {
   id: 'alias-1', source: 'sales@example.test', targetAccountId: 'acc-1',
   targetAddress: 'billing@example.test', isEnabled: true, mode: 'SendReceive', canReceive: true, canSend: true,
+}
+const disabledAccount = {
+  id: 'acc-disabled', address: 'archive@example.test', isEnabled: false,
+  quotaBytes: 10 * 1024 ** 3, usedBytes: 1024 ** 2, createdAt: '2026-01-02T00:00:00Z', aliasCount: 2,
+}
+const enabledAccount = {
+  id: 'acc-enabled', address: 'active@example.test', isEnabled: true,
+  quotaBytes: 10 * 1024 ** 3, usedBytes: 0, createdAt: '2026-01-03T00:00:00Z', aliasCount: 0,
 }
 
 const management = {
@@ -77,6 +87,12 @@ const Checkbox = defineComponent({
   emits: ['update:modelValue'],
   template: '<button class="qa-checkbox" @click="$emit(\'update:modelValue\', !modelValue)">select</button>',
 })
+const Tabs = defineComponent({
+  name: 'VTabs',
+  props: ['modelValue'],
+  emits: ['update:modelValue'],
+  template: '<div><button class="qa-tab-overview" @click="$emit(\'update:modelValue\', \'overview\')">overview</button><button class="qa-tab-quota" @click="$emit(\'update:modelValue\', \'quota\')">quota</button><slot /></div>',
+})
 
 function mountView(tab = 'aliases') {
   MockRoute.params = { id: 'domain-1', tab }
@@ -89,7 +105,7 @@ function mountView(tab = 'aliases') {
         VTooltip: Tooltip, VAlert: SlotWrapper, VList: true,
         VCard: SlotWrapper, VCardTitle: SlotWrapper, VCardText: SlotWrapper, VCardActions: SlotWrapper,
         VTable: SlotWrapper, VDialog: Dialog, VBtn: Button, VCheckboxBtn: Checkbox,
-        VTabs: SlotWrapper, VTab: SlotWrapper, VPagination: Pagination,
+        VTabs: Tabs, VTab: SlotWrapper, VPagination: Pagination,
         VTextField: TextField, VSelect: SlotWrapper, VSwitch: SlotWrapper, VTextarea: SlotWrapper,
       },
     },
@@ -99,6 +115,17 @@ function mountView(tab = 'aliases') {
 const deleteCalls = () => vi.mocked(api).mock.calls
   .filter(c => String(c[0]).includes('/aliases/') && (c[1] as { method?: string } | undefined)?.method === 'DELETE')
 const batchCalls = () => vi.mocked(api).mock.calls.filter(c => String(c[0]).includes('batch-delete'))
+const accountDeleteCalls = () => vi.mocked(api).mock.calls
+  .filter(c => String(c[0]).startsWith('/accounts/') && (c[1] as { method?: string } | undefined)?.method === 'DELETE')
+
+function provideAccounts(rows = [disabledAccount]) {
+  const original = vi.mocked(api).getMockImplementation()!
+  vi.mocked(api).mockImplementation((path, init) => {
+    if (String(path).startsWith(`/domains/${domainId}/accounts/search`)) return Promise.resolve(paged(rows)) as never
+    if (path === `/domains/${domainId}/accounts`) return Promise.resolve(rows) as never
+    return original(path, init)
+  })
+}
 
 const mounted: Array<{ unmount: () => void }> = []
 
@@ -117,6 +144,30 @@ beforeEach(() => {
 afterEach(() => { mounted.splice(0).forEach(w => w.unmount()) })
 
 describe('domain alias deletion safeguards', () => {
+  it.each(['resolve', 'reject'])('ignores an obsolete first-page response (%s) after page two loads', async (completion) => {
+    const original = vi.mocked(api).getMockImplementation()!
+    let resolveOld!: (value: unknown) => void
+    let rejectOld!: (reason: Error) => void
+    vi.mocked(api).mockImplementation((path, init) => {
+      if (String(path).includes('/aliases/search')) {
+        if (String(path).includes('page=2')) return Promise.resolve({ ...paged([{ ...alias, source: 'page-two@example.test' }]), totalCount: 45, page: 2 }) as never
+        return new Promise((resolve, reject) => { resolveOld = resolve; rejectOld = reject }) as never
+      }
+      return original(path, init)
+    })
+    const wrapper = mountView()
+    await flushPromises()
+    wrapper.findComponent({ name: 'VPagination' }).vm.$emit('update:modelValue', 2)
+    await flushPromises()
+    expect(wrapper.text()).toContain('page-two@example.test')
+    if (completion === 'resolve') resolveOld({ ...paged([alias]), totalCount: 45 })
+    else rejectOld(new Error('obsolete request failed'))
+    await flushPromises()
+    expect(wrapper.text()).toContain('page-two@example.test')
+    expect(wrapper.text()).not.toContain('obsolete request failed')
+    expect(wrapper.text()).not.toContain('sales@example.test')
+  })
+
   it('shows the alias row with its target before any deletion', async () => {
     const wrapper = mountView()
     await flushPromises()
@@ -183,6 +234,16 @@ describe('domain alias deletion safeguards', () => {
     await flushPromises()
     expect(saveButton().attributes('disabled')).toBeUndefined()
 
+    await wrapper.findAll('button').find(b => b.text().trim() === '取消')!.trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('放弃域基础配置修改？')
+    expect(wrapper.text()).toContain('本次修改将无法恢复')
+
+    await wrapper.findAll('button').find(b => b.text().trim() === '继续编辑')!.trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).not.toContain('放弃域基础配置修改？')
+    expect(saveButton().attributes('disabled')).toBeUndefined()
+
     await hostInput.setValue('mail.example.test')
     await flushPromises()
     expect(saveButton().attributes('disabled')).toBeDefined()
@@ -227,5 +288,166 @@ describe('domain alias deletion safeguards', () => {
 
     expect(batchCalls()).toHaveLength(0)
     expect(wrapper.text()).toContain('确认批量删除别名')
+  })
+})
+
+describe('domain account deletion safeguards', () => {
+  it('opens a recoverable soft-delete confirmation without sending a request', async () => {
+    provideAccounts()
+    const wrapper = mountView('accounts')
+    await flushPromises()
+
+    await wrapper.findAll('button').find(button => button.attributes('aria-label') === '删除账号')!.trigger('click')
+    await flushPromises()
+
+    expect(accountDeleteCalls()).toHaveLength(0)
+    expect(wrapper.text()).toContain('确认软删除邮箱账号')
+    expect(wrapper.text()).toContain('archive@example.test')
+    expect(wrapper.text()).toContain('回收站')
+    expect(wrapper.text()).toContain('关联 2 个别名')
+  })
+
+  it('cancels or confirms a single account deletion explicitly', async () => {
+    provideAccounts()
+    const wrapper = mountView('accounts')
+    await flushPromises()
+    const deleteButton = wrapper.findAll('button').find(button => button.attributes('aria-label') === '删除账号')!
+
+    await deleteButton.trigger('click')
+    await flushPromises()
+    await wrapper.findAll('button').find(button => button.text().trim() === '取消')!.trigger('click')
+    await flushPromises()
+    expect(accountDeleteCalls()).toHaveLength(0)
+
+    await deleteButton.trigger('click')
+    await flushPromises()
+    await wrapper.findAll('button').find(button => button.text().trim() === '确认软删除')!.trigger('click')
+    await flushPromises()
+    expect(accountDeleteCalls()).toHaveLength(1)
+    expect(accountDeleteCalls()[0]?.[0]).toBe('/accounts/acc-disabled')
+    expect(wrapper.text()).toContain('可在回收站恢复')
+  })
+
+  it('keeps a failed single-account deletion in the dialog for retry', async () => {
+    provideAccounts()
+    const original = vi.mocked(api).getMockImplementation()!
+    vi.mocked(api).mockImplementation((path, init) => {
+      if (path === '/accounts/acc-disabled' && init?.method === 'DELETE') return Promise.reject(new Error('账号仍被后台任务占用')) as never
+      return original(path, init)
+    })
+    const wrapper = mountView('accounts')
+    await flushPromises()
+
+    await wrapper.findAll('button').find(button => button.attributes('aria-label') === '删除账号')!.trigger('click')
+    await flushPromises()
+    await wrapper.findAll('button').find(button => button.text().trim() === '确认软删除')!.trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('.qa-dialog').exists()).toBe(true)
+    expect(wrapper.text()).toContain('账号仍被后台任务占用')
+    expect(wrapper.text()).toContain('archive@example.test')
+  })
+
+  it('blocks a batch deletion that contains an enabled account', async () => {
+    provideAccounts([disabledAccount, enabledAccount])
+    const wrapper = mountView('accounts')
+    await flushPromises()
+
+    await wrapper.findAllComponents(Checkbox)[0]!.trigger('click')
+    await flushPromises()
+    await wrapper.findAll('button').find(button => button.text().trim() === '批量删除')!.trigger('click')
+    await flushPromises()
+
+    expect(batchCalls()).toHaveLength(0)
+    expect(wrapper.text()).toContain('请取消后先执行“批量停用”')
+    expect(wrapper.text()).toContain('active@example.test（运行中，不能删除）')
+    expect(wrapper.findAll('button').find(button => button.text().includes('确认软删除'))!.attributes('disabled')).toBeDefined()
+  })
+
+  it('batch-deletes the frozen disabled account targets only after confirmation', async () => {
+    provideAccounts([disabledAccount, { ...disabledAccount, id: 'acc-second', address: 'second@example.test' }])
+    const wrapper = mountView('accounts')
+    await flushPromises()
+
+    await wrapper.findAllComponents(Checkbox)[0]!.trigger('click')
+    await flushPromises()
+    await wrapper.findAll('button').find(button => button.text().trim() === '批量删除')!.trigger('click')
+    await flushPromises()
+    await wrapper.findAll('button').find(button => button.text().trim() === '确认软删除 2 个')!.trigger('click')
+    await flushPromises()
+
+    expect(batchCalls()).toHaveLength(1)
+    expect(JSON.parse(String(batchCalls()[0]?.[1]?.body))).toEqual({ ids: ['acc-disabled', 'acc-second'] })
+    expect(wrapper.text()).toContain('已软删除 2 个邮箱账号')
+  })
+})
+
+describe('domain DNS unsaved-change protection', () => {
+  it('keeps a dirty DNS draft until the administrator confirms leaving the tab', async () => {
+    const wrapper = mountView('dns')
+    await flushPromises()
+
+    wrapper.findComponent({ name: 'DomainDnsWorkspace' }).vm.$emit('dirty-changed', true)
+    await flushPromises()
+    await wrapper.find('.qa-tab-quota').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('放弃“DNS 安全策略”修改？')
+    expect(wrapper.text()).toContain('本次修改将无法恢复')
+
+    await wrapper.findAll('button').find(button => button.text().trim() === '继续编辑')!.trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).not.toContain('放弃 DNS 策略修改？')
+
+    await wrapper.find('.qa-tab-quota').trigger('click')
+    await flushPromises()
+    await wrapper.findAll('button').find(button => button.text().trim() === '放弃修改并离开')!.trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).not.toContain('放弃 DNS 策略修改？')
+  })
+
+  it('blocks abandoning the DNS tab while a save request is running', async () => {
+    const wrapper = mountView('dns')
+    await flushPromises()
+    const dns = wrapper.findComponent({ name: 'DomainDnsWorkspace' })
+    dns.vm.$emit('dirty-changed', true)
+    dns.vm.$emit('saving-changed', true)
+    await flushPromises()
+
+    await wrapper.find('.qa-tab-quota').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('正在保存，请等待保存完成后再离开')
+    expect(wrapper.findAll('button').find(button => button.text().trim() === '放弃修改并离开')!.attributes('disabled')).toBeDefined()
+  })
+
+  it('protects certificate secrets before leaving the certificate tab', async () => {
+    const wrapper = mountView('cert')
+    await flushPromises()
+    wrapper.findComponent({ name: 'DomainCertificateWorkspace' }).vm.$emit('dirty-changed', true)
+    await flushPromises()
+
+    await wrapper.find('.qa-tab-overview').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('放弃“证书配置”修改？')
+    expect(wrapper.text()).toContain('当前证书配置尚未保存')
+  })
+
+  it('protects an edited domain quota and restores it when changes are discarded', async () => {
+    const wrapper = mountView('quota')
+    await flushPromises()
+    const quota = wrapper.findAllComponents({ name: 'VTextField' })
+      .find(field => field.props('label') === '新配额（GiB）')!
+    await quota.find('input').setValue('2048')
+    await flushPromises()
+
+    await wrapper.find('.qa-tab-overview').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('放弃“域存储配额”修改？')
+
+    await wrapper.findAll('button').find(button => button.text().trim() === '放弃修改并离开')!.trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).not.toContain('放弃“域存储配额”修改？')
   })
 })

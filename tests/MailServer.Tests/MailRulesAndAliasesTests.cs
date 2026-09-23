@@ -16,6 +16,89 @@ namespace MailServer.Tests;
 public sealed class MailRulesAndAliasesTests
 {
     [Fact]
+    public async Task FirewallSearchFiltersAndPaginatesOnTheServer()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var factory = environment.Services.GetRequiredService<IDbContextFactory<MailDbContext>>();
+        var administration = environment.Services.GetRequiredService<AdminApplicationService>();
+        await using (var db = await factory.CreateDbContextAsync())
+        {
+            for (var index = 0; index < 45; index++)
+            {
+                db.FirewallRules.Add(new FirewallRule
+                {
+                    Cidr = $"10.0.{index}.0/24",
+                    Note = index == 44 ? "Suspicious Scanner" : $"source-{index:D2}",
+                    IsEnabled = index % 2 == 0
+                });
+            }
+            await db.SaveChangesAsync();
+        }
+
+        var ids = new List<Guid>();
+        for (var page = 1; page <= 3; page++)
+        {
+            var result = await administration.SearchFirewallRulesAsync(null, null, page, 20, CancellationToken.None);
+            Assert.Equal(45, result.TotalCount);
+            Assert.Equal(page == 3 ? 5 : 20, result.Items.Count);
+            ids.AddRange(result.Items.Select(item => item.Id));
+        }
+        Assert.Equal(45, ids.Distinct().Count());
+        var noteMatch = await administration.SearchFirewallRulesAsync(" suspicious SCANNER ", null, 1, 20, CancellationToken.None);
+        Assert.Equal("10.0.44.0/24", Assert.Single(noteMatch.Items).Cidr);
+        var disabled = await administration.SearchFirewallRulesAsync("10.0.", false, 1, 100, CancellationToken.None);
+        Assert.Equal(22, disabled.TotalCount);
+        Assert.All(disabled.Items, item => Assert.False(item.IsEnabled));
+    }
+
+    [Fact]
+    public async Task DomainSearchSupportsFullAddressesAndKeepsPagesDomainScoped()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var factory = environment.Services.GetRequiredService<IDbContextFactory<MailDbContext>>();
+        var administration = environment.Services.GetRequiredService<AdminApplicationService>();
+        Guid domainId;
+        await using (var db = await factory.CreateDbContextAsync())
+        {
+            var domain = new MailDomain { Name = "search.test" };
+            var other = new MailDomain { Name = "other.test" };
+            for (var i = 0; i < 45; i++)
+            {
+                var account = Account(domain, $"user{i:D2}");
+                db.Add(account);
+                db.Add(new MailAlias { Domain = domain, SourceLocalPart = $"alias{i:D2}", TargetAccount = account });
+            }
+            db.Add(Account(other, "user44"));
+            await db.SaveChangesAsync();
+            domainId = domain.Id;
+        }
+
+        var accountResult = await administration.SearchDomainAccountsAsync(domainId, " USER44@SEARCH.TEST ", null, 1, 20, CancellationToken.None);
+        Assert.Equal("user44@search.test", Assert.Single(accountResult.Items).Address);
+        var aliasResult = await administration.SearchDomainAliasesAsync(domainId, " ALIAS44@SEARCH.TEST ", 1, 20, CancellationToken.None);
+        Assert.Equal("alias44@search.test", Assert.Single(aliasResult.Items).Source);
+        var targetResult = await administration.SearchDomainAliasesAsync(domainId, "user44@search.test", 1, 20, CancellationToken.None);
+        Assert.Equal("alias44@search.test", Assert.Single(targetResult.Items).Source);
+        Assert.Empty((await administration.SearchDomainAccountsAsync(domainId, "user44@other.test", null, 1, 20, CancellationToken.None)).Items);
+
+        var accountIds = new List<Guid>();
+        var aliasIds = new List<Guid>();
+        for (var page = 1; page <= 3; page++)
+        {
+            var accounts = await administration.SearchDomainAccountsAsync(domainId, null, null, page, 20, CancellationToken.None);
+            var aliases = await administration.SearchDomainAliasesAsync(domainId, null, page, 20, CancellationToken.None);
+            Assert.Equal(45, accounts.TotalCount);
+            Assert.Equal(45, aliases.TotalCount);
+            Assert.Equal(page == 3 ? 5 : 20, accounts.Items.Count);
+            Assert.Equal(page == 3 ? 5 : 20, aliases.Items.Count);
+            accountIds.AddRange(accounts.Items.Select(item => item.Id));
+            aliasIds.AddRange(aliases.Items.Select(item => item.Id));
+        }
+        Assert.Equal(45, accountIds.Distinct().Count());
+        Assert.Equal(45, aliasIds.Distinct().Count());
+    }
+
+    [Fact]
     public async Task DisablingRuleDoesNotTriggerMultipleCollectionQueryWarning()
     {
         SqliteNative.Initialize();
@@ -955,6 +1038,32 @@ public sealed class MailRulesAndAliasesTests
         Assert.Single(await verification.MailboxMessages.ToListAsync());
         await using var stored = await contentStore.OpenReadAsync(content.Key, CancellationToken.None);
         Assert.True(stored.Length > 0);
+    }
+
+    [Fact]
+    public async Task DomainCreationNormalizesValidNamesAndRejectsInvalidDnsNames()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var administration = environment.Services.GetRequiredService<AdminApplicationService>();
+
+        var created = await administration.CreateDomainAsync(
+            "  Example.TEST. ", null, null, "test", CancellationToken.None);
+        Assert.Equal("example.test", created.Name);
+        Assert.Equal("mail.example.test", created.MailHostName);
+
+        foreach (var invalid in new[]
+                 {
+                     "localhost",
+                     "a..test",
+                     "-mail.example",
+                     "mail-.example",
+                     "mail_example.test",
+                     $"{new string('a', 64)}.example"
+                 })
+        {
+            await Assert.ThrowsAsync<FormatException>(() => administration.CreateDomainAsync(
+                invalid, null, null, "test", CancellationToken.None));
+        }
     }
 
     private static MailAccount Account(MailDomain domain, string localPart) => new()

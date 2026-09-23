@@ -5,20 +5,35 @@ import StatusPill from './StatusPill.vue'
 import { api, jsonBody } from '../lib/api'
 import {
   actionNeedsValues,
+  bytesFromSizeInput,
   conditionError,
+  fromLocalDateTimeInput,
+  localTimezoneLabel,
+  nextActionKind,
+  normalizeActionsForSave,
+  normalizeConditionsForSave,
+  operatorWildcardHint,
   ruleActionError,
   ruleActionItems,
   ruleActionLabel,
+  ruleActionPairError,
   ruleActionPlaceholder,
+  ruleActionRowError,
   ruleConditionSummary,
   ruleOperators,
   ruleTogglePayload,
+  sizeUnitOptions,
+  splitMessageSize,
+  toLocalDateTimeInput,
 } from '../lib/mailRuleEditor'
 
 interface RuleCondition {
   field: string
   operator: string
   values: string[]
+  /** 邮件大小的编辑器草稿（仅界面使用，不提交）。 */
+  sizeAmount?: string
+  sizeUnit?: string
 }
 
 interface RuleAction {
@@ -116,13 +131,24 @@ function editorSnapshot() {
     name: draft.value.name,
     matchMode: draft.value.matchMode,
     isEnabled: draft.value.isEnabled,
-    conditions: conditions.value.map(condition => ({ field: condition.field, operator: condition.operator, values: [...condition.values] })),
-    actions: actions.value.map(action => ({ kind: action.kind, values: [...action.values] })),
+    conditions: normalizeConditionsForSave(conditions.value.map(condition => ({ field: condition.field, operator: condition.operator, values: [...condition.values] }))),
+    actions: normalizeActionsForSave(actions.value.map(action => ({ kind: action.kind, values: [...action.values] }))),
   })
 }
 
 let savedSnapshot = ''
 const editorDirty = computed(() => editorOpen.value && editorSnapshot() !== savedSnapshot)
+
+function protectPageExit(event: BeforeUnloadEvent) {
+  if (!editorDirty.value && !saving.value) return
+  event.preventDefault()
+  event.returnValue = ''
+}
+
+watch(() => editorDirty.value || saving.value, needsProtection => {
+  if (needsProtection) window.addEventListener('beforeunload', protectPageExit)
+  else window.removeEventListener('beforeunload', protectPageExit)
+})
 
 function confirmDiscardDraft(message: string) {
   if (!editorDirty.value) return true
@@ -190,6 +216,7 @@ onBeforeRouteLeave(() => {
 onBeforeUnmount(() => {
   unmounted = true
   loadToken += 1
+  window.removeEventListener('beforeunload', protectPageExit)
 })
 
 const folderItems = computed(() => folders.value.map(folder => folder.name))
@@ -212,25 +239,58 @@ const matchModeItems = [
 ]
 const actionItems = computed(() => ruleActionItems(direction.value))
 
-function conditionValueLabel(condition: RuleCondition) {
-  if (condition.field === 'MessageSize') return '字节数（1 MiB = 1048576）'
-  if (condition.field === 'HasAttachment') return 'true（有）或 false（无）'
-  if (condition.field === 'MessageTime') return '带时区时间，例如 2026-09-19T08:00:00+08:00'
+const attachmentItems = [
+  { title: '有附件', value: 'true' },
+  { title: '无附件', value: 'false' },
+]
+
+function conditionValueLabel() {
   return '匹配值，支持 * 与 ? 通配符，回车添加'
 }
 
-function conditionItems(condition: RuleCondition) {
-  if (condition.field === 'HasAttachment') return ['true', 'false']
-  if (condition.field === 'MessageSize') return []
-  if (condition.field === 'MessageTime') return []
-  if (condition.field === 'Sender') return []
-  return []
+function wildcardHint(condition: RuleCondition) {
+  return operatorWildcardHint(condition.operator)
+}
+
+/** 邮件大小：数字与单位分开输入，提交前精确换算为字节。 */
+function syncSize(condition: RuleCondition) {
+  const bytes = bytesFromSizeInput(condition.sizeAmount ?? '', condition.sizeUnit ?? 'MiB')
+  condition.values = bytes ? [bytes] : []
+}
+
+function setTimePart(condition: RuleCondition, index: number, localValue: unknown) {
+  const between = condition.operator === 'Between'
+  const next = between ? [condition.values[0] ?? '', condition.values[1] ?? ''] : [condition.values[0] ?? '']
+  next[index] = fromLocalDateTimeInput(String(localValue ?? ''))
+  condition.values = between ? [next[0] ?? '', next[1] ?? ''] : [next[0] ?? '']
+}
+
+function changeConditionOperator(condition: RuleCondition, operator: string) {
+  condition.operator = operator
+  if (condition.field === 'MessageTime') {
+    condition.values = operator === 'Between' ? [condition.values[0] ?? '', condition.values[1] ?? ''] : [condition.values[0] ?? '']
+  }
+}
+
+function attachmentValue(condition: RuleCondition) {
+  return condition.values[0] ?? null
+}
+
+function setAttachment(condition: RuleCondition, value: unknown) {
+  condition.values = value == null ? [] : [String(value)]
+}
+
+/** 新条件的默认字段：优先选当前未使用的字段，避免重复。 */
+function nextConditionField() {
+  const used = new Set(conditions.value.map(condition => condition.field))
+  return fieldItems.find(item => !used.has(item.value))?.value ?? 'Subject'
 }
 
 const editorValid = computed(() => {
   if (!draft.value.name.trim() || draft.value.name.trim().length > 128) return false
   if (!conditions.value.length || conditions.value.length > 20) return false
   if (conditions.value.some(condition => conditionError(condition))) return false
+  if (conditions.value.some(condition => condition.field === 'MessageSize' && !condition.values.length)) return false
   return !ruleActionError(direction.value, actions.value)
 })
 
@@ -241,12 +301,16 @@ function openEditor(rule?: MailRule) {
     matchMode: rule?.matchMode === 'Any' ? 'Any' : 'All',
     isEnabled: rule?.isEnabled ?? true,
   }
-  conditions.value = (rule?.conditions ?? []).map(condition => ({
-    field: condition.field,
-    operator: condition.operator,
-    values: [...condition.values],
-  }))
-  if (!conditions.value.length) conditions.value = [{ field: isIncoming.value ? 'Sender' : 'Recipient', operator: 'EqualsAny', values: [] }]
+  conditions.value = (rule?.conditions ?? []).map(condition => {
+    const next: RuleCondition = { field: condition.field, operator: condition.operator, values: [...condition.values] }
+    if (next.field === 'MessageSize') {
+      const draft = splitMessageSize(next.values[0] ?? '')
+      next.sizeAmount = draft.amount
+      next.sizeUnit = draft.unit
+    }
+    return next
+  })
+  if (!conditions.value.length) conditions.value = [newCondition()]
   actions.value = (rule?.actions ?? []).map(action => ({ kind: action.kind, values: [...action.values] }))
   editorError.value = ''
   editorNotice.value = ''
@@ -281,8 +345,14 @@ function requestCloseEditor() {
   closeEditor()
 }
 
+function newCondition(): RuleCondition {
+  const field = nextConditionField()
+  return { field, operator: ruleOperators(field)[0]!.value, values: [] }
+}
+
 function addCondition() {
-  conditions.value.push({ field: 'Subject', operator: 'ContainsAny', values: [] })
+  if (conditions.value.length >= 20) return
+  conditions.value.push(newCondition())
 }
 
 function removeCondition(index: number) {
@@ -291,8 +361,15 @@ function removeCondition(index: number) {
 }
 
 function addAction() {
-  actions.value.push(defaultAction(isIncoming.value))
+  if (actions.value.length >= 21) return
+  const kind = nextActionKind(direction.value, actions.value)
+  if (!kind) return
+  actions.value.push({ kind, values: [] })
 }
+
+/** 是否还能添加一个不与现有动作冲突的动作。 */
+const canAddAction = computed(() => actions.value.length < 21
+  && nextActionKind(direction.value, actions.value) !== null)
 
 function removeAction(index: number) {
   actions.value.splice(index, 1)
@@ -302,6 +379,13 @@ function changeConditionField(condition: RuleCondition, field: string) {
   condition.field = field
   condition.operator = ruleOperators(field)[0]!.value
   condition.values = []
+  if (field === 'MessageSize') {
+    condition.sizeAmount = ''
+    condition.sizeUnit = 'MiB'
+  } else {
+    delete condition.sizeAmount
+    delete condition.sizeUnit
+  }
 }
 
 function changeActionKind(action: RuleAction, kind: string) {
@@ -419,6 +503,18 @@ function normalizeTagValues(value: unknown): string[] {
 function actionValuePlaceholder(kind: string) {
   return ruleActionPlaceholder(kind)
 }
+
+function actionRowError(index: number) {
+  return ruleActionRowError(direction.value, actions.value, index)
+}
+
+function actionPairError() {
+  return ruleActionPairError(direction.value, actions.value)
+}
+
+function conditionRowError(condition: RuleCondition) {
+  return conditionError(condition)
+}
 </script>
 
 <template>
@@ -482,7 +578,7 @@ function actionValuePlaceholder(kind: string) {
         </div>
       </template>
 
-      <div v-else class="rule-editor">
+      <v-form v-else class="rule-editor" :disabled="saving" :aria-busy="saving" @submit.prevent="save">
         <div class="editor-head">
           <v-btn variant="text" prepend-icon="mdi-arrow-left" :disabled="saving" @click="requestCloseEditor">返回规则列表</v-btn>
           <div><b>{{ editingId ? '编辑' : '新建' }}{{ currentSection.title }}</b><small>{{ isIncoming ? '邮件投递给本地账号前按顺序执行' : '已认证账号外发时按顺序执行' }}</small></div>
@@ -501,36 +597,83 @@ function actionValuePlaceholder(kind: string) {
 
         <div class="editor-section">
           <div class="editor-section-head">
-            <div><b>匹配条件</b><small>值支持 * 与 ? 通配符，输入后按回车生成标签</small></div>
+            <div><b>匹配条件</b><small>文本值支持 * 与 ? 通配符，输入后按回车生成标签</small></div>
             <v-btn size="small" variant="text" prepend-icon="mdi-plus" :disabled="conditions.length >= 20 || saving" @click="addCondition">添加条件</v-btn>
           </div>
-          <div v-for="(condition, index) in conditions" :key="`condition-${index}`" class="editor-row">
-            <v-select :model-value="condition.field" :items="fieldItems" label="字段" hide-details @update:model-value="value => changeConditionField(condition, value as string)" />
-            <v-select v-model="condition.operator" :items="ruleOperators(condition.field)" label="运算符" hide-details />
-            <v-combobox
-              v-model="condition.values"
-              :items="conditionItems(condition)"
-              multiple
-              chips
-              closable-chips
-              clearable
-              hide-details
-              :label="conditionValueLabel(condition)"
-              @update:model-value="value => condition.values = normalizeTagValues(value)"
-            />
-            <v-btn icon="mdi-close" size="small" variant="text" aria-label="移除条件" :disabled="conditions.length <= 1 || saving" @click="removeCondition(index)" />
+          <div v-for="(condition, index) in conditions" :key="`condition-${index}`" class="condition-block">
+            <div class="editor-row editor-row--condition">
+              <v-select :model-value="condition.field" :items="fieldItems" label="字段" hide-details @update:model-value="value => changeConditionField(condition, value as string)" />
+              <v-select :model-value="condition.operator" :items="ruleOperators(condition.field)" label="运算符" hide-details @update:model-value="value => changeConditionOperator(condition, value as string)" />
+              <div class="condition-value">
+                <v-select
+                  v-if="condition.field === 'HasAttachment'"
+                  :model-value="attachmentValue(condition)"
+                  :items="attachmentItems"
+                  label="附件情况"
+                  hide-details
+                  @update:model-value="value => setAttachment(condition, value)"
+                />
+                <div v-else-if="condition.field === 'MessageSize'" class="size-input">
+                  <v-text-field
+                    v-model="condition.sizeAmount"
+                    type="number"
+                    min="0"
+                    label="邮件大小"
+                    hide-details
+                    @update:model-value="syncSize(condition)"
+                  />
+                  <v-select
+                    v-model="condition.sizeUnit"
+                    :items="sizeUnitOptions"
+                    label="单位"
+                    hide-details
+                    @update:model-value="syncSize(condition)"
+                  />
+                </div>
+                <div v-else-if="condition.field === 'MessageTime'" class="time-input">
+                  <v-text-field
+                    :model-value="toLocalDateTimeInput(condition.values[0] ?? '')"
+                    type="datetime-local"
+                    :label="condition.operator === 'Between' ? '开始时间' : '时间'"
+                    hide-details
+                    @update:model-value="value => setTimePart(condition, 0, value)"
+                  />
+                  <v-text-field
+                    v-if="condition.operator === 'Between'"
+                    :model-value="toLocalDateTimeInput(condition.values[1] ?? '')"
+                    type="datetime-local"
+                    label="结束时间"
+                    hide-details
+                    @update:model-value="value => setTimePart(condition, 1, value)"
+                  />
+                  <small class="size-note">按浏览器本地时区 {{ localTimezoneLabel() }}，保存时写入明确偏移。</small>
+                </div>
+                <v-combobox
+                  v-else
+                  v-model="condition.values"
+                  multiple
+                  chips
+                  closable-chips
+                  clearable
+                  hide-details
+                  :label="conditionValueLabel()"
+                  @update:model-value="value => condition.values = normalizeTagValues(value)"
+                />
+              </div>
+              <v-btn icon="mdi-close" size="small" variant="text" aria-label="移除条件" :disabled="conditions.length <= 1 || saving" @click="removeCondition(index)" />
+            </div>
+            <p v-if="wildcardHint(condition)" class="editor-hint">{{ wildcardHint(condition) }}</p>
+            <p v-if="conditionRowError(condition)" class="editor-hint is-error">条件 {{ index + 1 }}：{{ conditionRowError(condition) }}</p>
           </div>
-          <p v-if="conditions.some(condition => conditionError(condition))" class="editor-hint is-error">
-            {{ conditions.map(condition => conditionError(condition)).filter(Boolean)[0] }}
-          </p>
         </div>
 
         <div class="editor-section">
           <div class="editor-section-head">
             <div><b>执行动作</b><small>{{ isIncoming ? '命中后按列出的动作执行，可同时移动与转发。' : '命中后可保存 Sent 副本到指定文件夹、转发副本，或直接拒绝发信（SMTP 阶段退信）。' }}</small></div>
-            <v-btn size="small" variant="text" prepend-icon="mdi-plus" :disabled="actions.length >= 21 || saving" @click="addAction">添加动作</v-btn>
+            <v-btn size="small" variant="text" prepend-icon="mdi-plus" :disabled="!canAddAction || saving" @click="addAction">添加动作</v-btn>
           </div>
-          <div v-for="(action, index) in actions" :key="`action-${index}`" class="editor-row editor-row--action">
+          <div v-for="(action, index) in actions" :key="`action-${index}`" class="action-block">
+          <div class="editor-row editor-row--action">
             <v-select :model-value="action.kind" :items="actionItems" label="动作" hide-details @update:model-value="value => changeActionKind(action, value as string)" />
             <v-select v-if="action.kind === 'MoveToFolder'" :model-value="action.values[0] ?? null" :items="folderItems" :label="isIncoming ? '目标文件夹' : 'Sent 副本文件夹'" hide-details @update:model-value="value => action.values = value ? [String(value)] : []" />
             <v-combobox
@@ -547,7 +690,9 @@ function actionValuePlaceholder(kind: string) {
             <v-text-field v-else v-model="action.values[0]" label="拒绝理由（可留空）" hide-details maxlength="255" />
             <v-btn icon="mdi-close" size="small" variant="text" aria-label="移除动作" :disabled="saving" @click="removeAction(index)" />
           </div>
-          <p v-if="ruleActionError(direction, actions)" class="editor-hint is-error">{{ ruleActionError(direction, actions) }}</p>
+          <p v-if="actionRowError(index)" class="editor-hint is-error">动作 {{ index + 1 }}：{{ actionRowError(index) }}</p>
+          </div>
+          <p v-if="actionPairError()" class="editor-hint is-error">{{ actionPairError() }}</p>
         </div>
 
         <div class="editor-actions">
@@ -555,7 +700,7 @@ function actionValuePlaceholder(kind: string) {
           <v-btn variant="text" :disabled="saving" @click="requestCloseEditor">取消</v-btn>
           <v-btn color="primary" :disabled="!editorValid || !editorDirty" :loading="saving" @click="save">{{ editingId ? '保存规则' : '创建规则' }}</v-btn>
         </div>
-      </div>
+      </v-form>
     </v-card>
   </div>
 </template>
@@ -601,8 +746,14 @@ function actionValuePlaceholder(kind: string) {
 .editor-section-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
 .editor-section-head b { display: block; font-size: 13px; }
 .editor-section-head small { color: var(--text-muted); font-size: 11px; }
-.editor-row { display: grid; grid-template-columns: 150px 150px minmax(0, 1fr) 40px; gap: 8px; align-items: center; margin-bottom: 8px; }
+.condition-block, .action-block { padding: 10px 0 4px; border-bottom: 1px dashed var(--border); }
+.condition-block:last-of-type, .action-block:last-of-type { border-bottom: 0; }
+.editor-row { display: grid; grid-template-columns: 150px 150px minmax(0, 1fr) 40px; gap: 8px; align-items: start; margin-bottom: 8px; }
 .editor-row--action { grid-template-columns: 170px minmax(0, 1fr) 40px; }
+.condition-value { min-width: 0; }
+.size-input { display: grid; grid-template-columns: minmax(0, 1fr) 160px; gap: 8px; }
+.time-input { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.size-note { grid-column: 1 / -1; color: var(--text-muted); font-size: 11px; }
 .editor-hint { margin: 8px 0 0; color: var(--text-muted); font-size: 11px; }
 .editor-hint.is-error { color: var(--error, #c43131); }
 .editor-actions { display: flex; align-items: center; gap: 8px; margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border); }
@@ -613,7 +764,7 @@ function actionValuePlaceholder(kind: string) {
   .nav-note { grid-column: 1 / -1; }
 }
 @media (max-width: 720px) {
-  .editor-grid, .editor-row, .editor-row--action { grid-template-columns: 1fr; }
+  .editor-grid, .editor-row, .editor-row--action, .size-input, .time-input { grid-template-columns: 1fr; }
   .rule-nav { grid-template-columns: 1fr; }
 }
 </style>

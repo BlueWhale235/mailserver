@@ -4,6 +4,7 @@ import tseslint from 'typescript-eslint'
 
 const browserGlobals = {
   AbortController: 'readonly',
+  BeforeUnloadEvent: 'readonly',
   Blob: 'readonly',
   crypto: 'readonly',
   document: 'readonly',

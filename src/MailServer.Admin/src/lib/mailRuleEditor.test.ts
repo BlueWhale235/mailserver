@@ -1,5 +1,24 @@
 import { describe, expect, it } from 'vitest'
-import { conditionError, ruleOperators, ruleActionError, ruleActionLabel, ruleTogglePayload } from './mailRuleEditor'
+import {
+  bytesFromSizeInput,
+  conditionError,
+  dedupeValues,
+  formatMessageSize,
+  fromLocalDateTimeInput,
+  nextActionKind,
+  normalizeActionsForSave,
+  normalizeConditionsForSave,
+  ruleActionError,
+  ruleActionLabel,
+  ruleActionPairError,
+  ruleActionRowError,
+  ruleConditionSummary,
+  ruleOperators,
+  ruleTogglePayload,
+  sizeUnitOptions,
+  splitMessageSize,
+  toLocalDateTimeInput,
+} from './mailRuleEditor'
 import { reactive } from 'vue'
 
 describe('mail rule editor contract', () => {
@@ -61,5 +80,78 @@ describe('mail rule editor contract', () => {
       expect(conditionError({ field: 'MessageSize', operator: 'GreaterThan', values: [value] })).not.toBe('')
     }
     expect(conditionError({ field: 'MessageSize', operator: 'GreaterThan', values: ['1048576'] })).toBe('')
+  })
+
+  it('converts a size amount and unit into exact bytes', () => {
+    expect(bytesFromSizeInput('10', 'MiB')).toBe('10485760')
+    expect(bytesFromSizeInput('2', 'GiB')).toBe('2147483648')
+    expect(bytesFromSizeInput('1.5', 'KiB')).toBe('1536')
+    expect(bytesFromSizeInput('0', 'B')).toBe('0')
+    // 非法或溢出输入必须被拒绝，而不是静默截断。
+    for (const [amount, unit] of [['', 'MiB'], ['abc', 'MiB'], ['-1', 'MiB'], ['1.2.3', 'B'], ['99999999999999999999', 'GiB']]) {
+      expect(bytesFromSizeInput(amount!, unit!)).toBe('')
+    }
+    expect(conditionError({ field: 'MessageSize', operator: 'GreaterThan', values: [bytesFromSizeInput('10', 'MiB')] })).toBe('')
+  })
+
+  it('round-trips a byte count through the size editor', () => {
+    expect(splitMessageSize('1048576')).toEqual({ amount: '1', unit: 'MiB' })
+    expect(splitMessageSize('1536')).toEqual({ amount: '1536', unit: 'B' })
+    expect(splitMessageSize('2097152')).toEqual({ amount: '2', unit: 'MiB' })
+    expect(formatMessageSize('1048576')).toBe('1 MiB（1048576 字节）')
+    expect(formatMessageSize('512')).toBe('512 字节')
+    expect(sizeUnitOptions.map(option => option.value)).toEqual(['B', 'KiB', 'MiB', 'GiB'])
+  })
+
+  it('round-trips local datetime input with an explicit offset', () => {
+    const local = '2026-09-19T08:30'
+    const iso = fromLocalDateTimeInput(local)
+    expect(iso).toMatch(/^2026-09-19T08:30:00[+-]\d{2}:\d{2}$/)
+    expect(toLocalDateTimeInput(iso)).toBe(local)
+    expect(conditionError({ field: 'MessageTime', operator: 'Before', values: [iso] })).toBe('')
+    expect(fromLocalDateTimeInput('not-a-date')).toBe('')
+    expect(conditionError({ field: 'MessageTime', operator: 'Before', values: [] })).toBe('请选择时间')
+    expect(conditionError({ field: 'MessageTime', operator: 'Between', values: [iso] })).toBe('请选择开始与结束时间')
+  })
+
+  it('dedupes values case-insensitively like the backend', () => {
+    expect(dedupeValues([' User@Example.com ', 'user@example.com', 'other@example.com'])).toEqual(['User@Example.com', 'other@example.com'])
+    expect(normalizeActionsForSave([{ kind: 'ForwardTo', values: ['a@b.com', 'A@B.com', ''] }])).toEqual([{ kind: 'ForwardTo', values: ['a@b.com'] }])
+    expect(normalizeConditionsForSave([{ field: 'Sender', operator: 'EqualsAny', values: ['A', 'a'] }])).toEqual([{ field: 'Sender', operator: 'EqualsAny', values: ['A'] }])
+    // 去重后转发总数应以后端一致的数量判定。
+    expect(ruleActionError('Incoming', [{ kind: 'ForwardTo', values: Array.from({ length: 21 }, () => 'same@example.com') }])).toBe('')
+    expect(ruleActionError('Incoming', [{ kind: 'ForwardTo', values: Array.from({ length: 21 }, (_, i) => `user${i}@example.com`) }])).toContain('1–20')
+  })
+
+  it('reports action errors next to the offending row', () => {
+    const actions = [
+      { kind: 'MoveToFolder', values: ['Junk'] },
+      { kind: 'ForwardTo', values: ['not-an-email'] },
+    ]
+    expect(ruleActionRowError('Incoming', actions, 0)).toBe('')
+    expect(ruleActionRowError('Incoming', actions, 1)).toContain('完整邮箱地址')
+    expect(ruleActionRowError('Outgoing', [{ kind: 'Reject', values: [] }, { kind: 'ForwardTo', values: ['a@b.com'] }], 1)).toBe('')
+    expect(ruleActionPairError('Outgoing', [{ kind: 'Reject', values: [] }, { kind: 'ForwardTo', values: ['a@b.com'] }])).toContain('不能同时使用')
+    expect(ruleActionPairError('Incoming', [])).toBe('')
+    // 聚合错误仍带动作序号，供无逐行介面的调用方使用。
+    expect(ruleActionError('Incoming', actions)).toContain('动作 2：')
+  })
+
+  it('picks a non-conflicting default action kind', () => {
+    expect(nextActionKind('Incoming', [])).toBe('MoveToFolder')
+    expect(nextActionKind('Incoming', [{ kind: 'MoveToFolder', values: [] }])).toBe('ForwardTo')
+    expect(nextActionKind('Outgoing', [{ kind: 'Reject', values: [] }])).toBe('MoveToFolder')
+    expect(nextActionKind('Outgoing', [{ kind: 'ForwardTo', values: [] }])).toBe('MoveToFolder')
+    // 拒绝与转发互斥（后端 ValidateActions 同样拒绝两者并存），且移动动作只能有一个。
+    expect(nextActionKind('Outgoing', [{ kind: 'MoveToFolder', values: [] }, { kind: 'Reject', values: [] }])).toBeNull()
+    expect(nextActionKind('Outgoing', [{ kind: 'MoveToFolder', values: [] }, { kind: 'ForwardTo', values: [] }])).toBeNull()
+    expect(nextActionKind('Incoming', [{ kind: 'MoveToFolder', values: [] }, { kind: 'ForwardTo', values: [] }])).toBeNull()
+  })
+
+  it('summarises conditions with the field name and human-readable values', () => {
+    expect(ruleConditionSummary({ field: 'Subject', operator: 'ContainsAny', values: ['*invoice*'] })).toBe('主题 包含任意一项（含通配符）：*invoice*')
+    expect(ruleConditionSummary({ field: 'HasAttachment', operator: 'Is', values: ['true'] })).toBe('是否有附件 是否包含附件：有附件')
+    expect(ruleConditionSummary({ field: 'MessageSize', operator: 'GreaterThan', values: ['1048576'] })).toBe('邮件大小 大于：1 MiB（1048576 字节）')
+    expect(ruleConditionSummary({ field: 'Sender', operator: 'EqualsAny', values: [] })).toContain('（未填写）')
   })
 })

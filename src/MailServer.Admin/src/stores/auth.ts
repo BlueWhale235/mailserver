@@ -49,16 +49,22 @@ export const useAuthStore = defineStore('auth', () => {
   function can(code: string, domainId?: string): boolean {
     const snapshot = permissions.value
     if (snapshot.fullAccess) return true
-    const canonical = code.trim().toLowerCase()
-    const reads = ['domain.read', 'api-key.read', 'admin.account.read', 'firewall.read', 'queue.read', 'settings.read', 'dns.read', 'task.read', 'domain.quarantine.read']
-    const candidates = reads.includes(canonical) ? [canonical, canonical.replace(/\.read$/, '.manage')] : [canonical]
+    const candidates = permissionCandidates(code)
     const includes = (grants: string[], value: string) => grants.some(grant => grant.toLowerCase() === value)
     if (domainId) {
-      const domainCandidates = candidates.flatMap(value => value.startsWith('domain.quarantine.') ? [value, value.replace('domain.quarantine.', 'domain.')] : [value])
+      const domainCandidates = domainPermissionCandidates(candidates)
       return domainCandidates.some(value => includes(snapshot.allDomainPermissions, value)
         || Object.entries(snapshot.domainPermissions).some(([key, ids]) => key.toLowerCase() === value && includes(ids, domainId.toLowerCase())))
     }
     return candidates.some(value => includes(snapshot.systemPermissions, value))
+  }
+
+  function canAnyDomain(code: string): boolean {
+    const snapshot = permissions.value
+    if (snapshot.fullAccess) return true
+    const candidates = domainPermissionCandidates(permissionCandidates(code))
+    return candidates.some(value => snapshot.allDomainPermissions.some(grant => grant.toLowerCase() === value)
+      || Object.entries(snapshot.domainPermissions).some(([key, ids]) => key.toLowerCase() === value && ids.length > 0))
   }
 
   async function login(userName: string, password: string, remember: boolean) {
@@ -91,5 +97,15 @@ export const useAuthStore = defineStore('auth', () => {
     }
   }
 
-  return { session, permissions, initialized, permissionsLoaded, initialize, can, login, logout, clearSession }
+  return { session, permissions, initialized, permissionsLoaded, initialize, can, canAnyDomain, login, logout, clearSession }
 })
+
+function permissionCandidates(code: string) {
+  const canonical = code.trim().toLowerCase()
+  const reads = ['domain.read', 'api-key.read', 'admin.account.read', 'firewall.read', 'queue.read', 'settings.read', 'dns.read', 'task.read', 'domain.quarantine.read']
+  return reads.includes(canonical) ? [canonical, canonical.replace(/\.read$/, '.manage')] : [canonical]
+}
+
+function domainPermissionCandidates(candidates: string[]) {
+  return candidates.flatMap(value => value.startsWith('domain.quarantine.') ? [value, value.replace('domain.quarantine.', 'domain.')] : [value])
+}
