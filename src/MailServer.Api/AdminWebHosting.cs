@@ -112,7 +112,8 @@ public static class AdminWebHosting
                     ExpiresUtc = startedAt.AddHours(8)
                 });
             return Results.Ok(new { id = admin.Id, userName = admin.UserName, expiresAt = startedAt.AddHours(8) });
-        }).AllowAnonymous().RequireRateLimiting("admin-login");
+        }).AllowAnonymous().RequireRateLimiting("admin-login")
+            .AddEndpointFilterFactory(RequiredInputValidation.Create);
 
         app.MapGet("/api/v1/session/me", (HttpContext context) => Results.Ok(new
         {
@@ -179,6 +180,14 @@ public static class AdminWebHosting
             options.Cookie.SecurePolicy = CookieSecurePolicy.SameAsRequest;
             options.ExpireTimeSpan = TimeSpan.FromMinutes(30);
             options.SlidingExpiration = true;
+            options.Events.OnValidatePrincipal = async context =>
+            {
+                if (!await AdminPrincipalValidation.IsActiveAsync(
+                        context.Principal,
+                        context.HttpContext.RequestServices,
+                        context.HttpContext.RequestAborted))
+                    context.RejectPrincipal();
+            };
             options.Events.OnRedirectToLogin = context => HandleCookieRedirect(context, StatusCodes.Status401Unauthorized);
             options.Events.OnRedirectToAccessDenied = context => HandleCookieRedirect(context, StatusCodes.Status403Forbidden);
         });

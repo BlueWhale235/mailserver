@@ -106,6 +106,17 @@ builder.Services
     .AddJwtBearer(options =>
     {
         options.MapInboundClaims = false;
+        options.Events = new JwtBearerEvents
+        {
+            OnTokenValidated = async context =>
+            {
+                if (!await AdminPrincipalValidation.IsActiveAsync(
+                        context.Principal,
+                        context.HttpContext.RequestServices,
+                        context.HttpContext.RequestAborted))
+                    context.Fail("Administrator account is disabled or no longer exists.");
+            }
+        };
         options.TokenValidationParameters = new TokenValidationParameters
         {
             ValidateIssuer = true,
@@ -143,6 +154,18 @@ builder.Services.Configure<ForwardedHeadersOptions>(options =>
 
 var app = builder.Build();
 app.UseExceptionHandler();
+app.Use(async (context, next) =>
+{
+    try
+    {
+        await next();
+    }
+    catch (AntiforgeryValidationException)
+    {
+        await AdminApiProblems.Validation(context, "csrf", "安全校验已失效，请刷新页面后重试。")
+            .ExecuteAsync(context);
+    }
+});
 app.UseForwardedHeaders();
 app.ExtractBundledStaticWebAssets();
 app.UseStaticFiles();
@@ -325,9 +348,10 @@ app.MapPost("/api/v1/auth/token", async (
         tokenType = "Bearer",
         expiresAt = expires
     });
-}).AllowAnonymous();
+}).AllowAnonymous().AddEndpointFilterFactory(RequiredInputValidation.Create);
 
-var api = app.MapGroup("/api/v1").RequireAuthorization("admin");
+var api = app.MapGroup("/api/v1").RequireAuthorization("admin")
+    .AddEndpointFilterFactory(RequiredInputValidation.Create);
 
 api.MapGet("/overview", async (
     AdminApplicationService administration,

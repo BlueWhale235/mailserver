@@ -1,0 +1,452 @@
+using System.Diagnostics;
+using System.Net;
+using System.Net.Http.Headers;
+using System.Net.Http.Json;
+using System.Net.Sockets;
+using System.Text.Json;
+using System.Text.RegularExpressions;
+using MailServer.Api;
+using MailServer.Domain;
+using MailServer.Infrastructure;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Xunit;
+
+namespace MailServer.Tests;
+
+// Real Kestrel subprocess, real SQLite migrations and HTTP authentication.
+// No in-memory database or mocked endpoint handlers are used by these tests.
+public sealed class HttpAcceptanceTests
+{
+    [Fact]
+    public async Task EveryOpenApiProtectedOperationRejectsAnonymousRequests()
+    {
+        await using var host = await AcceptanceHost.StartAsync();
+        var specification = await host.JsonAsync(HttpMethod.Get, "/swagger/v1/swagger.json");
+        var checkedOperations = 0;
+        foreach (var path in specification.GetProperty("paths").EnumerateObject())
+        {
+            if (path.Name is "/api/v1/auth/token" or "/api/v1/session/csrf" or "/api/v1/session/login"
+                || path.Name.StartsWith("/api/v1/health", StringComparison.Ordinal)) continue;
+            foreach (var operation in path.Value.EnumerateObject())
+            {
+                if (operation.Name is not ("get" or "post" or "put" or "patch" or "delete")) continue;
+                var url = Regex.Replace(path.Name, "\\{[^}]+\\}", _ => Guid.NewGuid().ToString());
+                using var request = new HttpRequestMessage(new HttpMethod(operation.Name), url);
+                if (operation.Name is "post" or "put" or "patch") request.Content = JsonContent.Create(new { });
+                using var response = await host.Anonymous.SendAsync(request);
+                Assert.True(response.StatusCode == HttpStatusCode.Unauthorized,
+                    $"{operation.Name} {path.Name}: {(int)response.StatusCode} {await response.Content.ReadAsStringAsync()}");
+                await AcceptanceHost.AssertProblemAsync(response, 401);
+                checkedOperations++;
+            }
+        }
+        Assert.True(checkedOperations >= 133, $"Only discovered {checkedOperations} protected operations.");
+    }
+
+    [Fact]
+    public async Task AuthorizedReadRoutesAvoidServerErrors()
+    {
+        await using var host = await AcceptanceHost.StartAsync();
+        var specification = await host.JsonAsync(HttpMethod.Get, "/swagger/v1/swagger.json");
+        var failures = new List<string>();
+        var checkedRoutes = 0;
+        foreach (var path in specification.GetProperty("paths").EnumerateObject())
+        {
+            if (!path.Value.TryGetProperty("get", out _) || path.Name.StartsWith("/api/v1/session", StringComparison.Ordinal))
+                continue;
+            var url = Regex.Replace(path.Name, "\\{[^}]+\\}", _ => Guid.NewGuid().ToString());
+            using var response = await host.Admin.GetAsync(url);
+            if ((int)response.StatusCode >= 500)
+                failures.Add($"GET {path.Name}: {(int)response.StatusCode}");
+            checkedRoutes++;
+        }
+        Assert.True(checkedRoutes >= 55, $"Only checked {checkedRoutes} GET routes.");
+        Assert.True(failures.Count == 0, string.Join(Environment.NewLine, failures));
+    }
+
+    [Fact]
+    public async Task EmptyJsonBodiesNeverCauseInternalServerErrors()
+    {
+        await using var host = await AcceptanceHost.StartAsync();
+        using (var emptyLogin = await host.Anonymous.PostAsJsonAsync("/api/v1/auth/token", new { }))
+        {
+            var problem = await AcceptanceHost.AssertProblemAsync(emptyLogin, 400);
+            Assert.True(problem.GetProperty("errors").TryGetProperty("userName", out _));
+            Assert.True(problem.GetProperty("errors").TryGetProperty("password", out _));
+        }
+        using (var emptySettings = await host.Admin.PutAsJsonAsync("/api/v1/settings/mailboxes", new { }))
+        {
+            var problem = await AcceptanceHost.AssertProblemAsync(emptySettings, 400);
+            Assert.True(problem.GetProperty("errors").TryGetProperty("defaultFolders", out _));
+        }
+        var specification = await host.JsonAsync(HttpMethod.Get, "/swagger/v1/swagger.json");
+        var failures = new List<string>();
+        foreach (var path in specification.GetProperty("paths").EnumerateObject())
+        {
+            if (path.Name.StartsWith("/api/v1/session", StringComparison.Ordinal)) continue;
+            foreach (var operation in path.Value.EnumerateObject())
+            {
+                if (operation.Name is not ("post" or "put" or "patch")
+                    || !operation.Value.TryGetProperty("requestBody", out var body)
+                    || !body.GetProperty("content").TryGetProperty("application/json", out _)) continue;
+                var url = Regex.Replace(path.Name, "\\{[^}]+\\}", _ => Guid.NewGuid().ToString());
+                using var request = new HttpRequestMessage(new HttpMethod(operation.Name), url) { Content = JsonContent.Create(new { }) };
+                using var response = await host.Admin.SendAsync(request);
+                if ((int)response.StatusCode >= 500) failures.Add($"{operation.Name} {path.Name}: {(int)response.StatusCode}");
+            }
+        }
+        Assert.True(failures.Count == 0, string.Join(Environment.NewLine, failures));
+    }
+
+    [Fact]
+    public async Task CookieLoginRequiresCsrfAndProtectsWritesAndLogout()
+    {
+        await using var host = await AcceptanceHost.StartAsync();
+        using var cookies = new HttpClient(new HttpClientHandler { CookieContainer = new CookieContainer() })
+        { BaseAddress = host.Anonymous.BaseAddress };
+        var login = new { userName = "acceptance-admin", password = AcceptanceHost.Password };
+        using var rejectedLogin = await cookies.PostAsJsonAsync("/api/v1/session/login", login);
+        Assert.Equal(HttpStatusCode.BadRequest, rejectedLogin.StatusCode);
+        await AcceptanceHost.AssertProblemAsync(rejectedLogin, 400);
+        var csrf = await cookies.GetFromJsonAsync<JsonElement>("/api/v1/session/csrf");
+        cookies.DefaultRequestHeaders.Add(csrf.GetProperty("headerName").GetString()!, csrf.GetProperty("token").GetString());
+        using var acceptedLogin = await cookies.PostAsJsonAsync("/api/v1/session/login", login);
+        Assert.Equal(HttpStatusCode.OK, acceptedLogin.StatusCode);
+        var me = await cookies.GetFromJsonAsync<JsonElement>("/api/v1/session/me");
+        Assert.True(me.GetProperty("authenticated").GetBoolean());
+        cookies.DefaultRequestHeaders.Remove(csrf.GetProperty("headerName").GetString()!);
+        using var rejectedWrite = await cookies.PutAsJsonAsync("/api/v1/settings/smtp", new { commandTimeoutSeconds = 301 });
+        Assert.Equal(HttpStatusCode.BadRequest, rejectedWrite.StatusCode);
+        await AcceptanceHost.AssertProblemAsync(rejectedWrite, 400);
+        csrf = await cookies.GetFromJsonAsync<JsonElement>("/api/v1/session/csrf");
+        cookies.DefaultRequestHeaders.Add(csrf.GetProperty("headerName").GetString()!, csrf.GetProperty("token").GetString());
+        using var acceptedWrite = await cookies.PutAsJsonAsync("/api/v1/settings/smtp", new { commandTimeoutSeconds = 301 });
+        Assert.Equal(HttpStatusCode.OK, acceptedWrite.StatusCode);
+        using var logout = await cookies.PostAsync("/api/v1/session/logout", null);
+        Assert.Equal(HttpStatusCode.NoContent, logout.StatusCode);
+        using var loggedOut = await cookies.GetAsync("/api/v1/session/me");
+        Assert.Equal(HttpStatusCode.Unauthorized, loggedOut.StatusCode);
+    }
+
+    [Fact]
+    public async Task DomainAccountAndAliasHttpWritesPersistAndAreAudited()
+    {
+        await using var host = await AcceptanceHost.StartAsync();
+        var domain = await host.JsonAsync(HttpMethod.Post, "/api/v1/domains", new { name = "acceptance.invalid" }, 201);
+        var domainId = domain.GetProperty("id").GetGuid();
+        var path = $"/api/v1/domains/{domainId}";
+        await host.JsonAsync(HttpMethod.Put, path + "/details", new
+        {
+            mailHostName = "mail.acceptance.invalid", smtpHostName = "mail.acceptance.invalid",
+            isActive = true, outboundIpAddresses = "", directDeliverSameDomain = true
+        });
+        await host.JsonAsync(HttpMethod.Put, path + "/quota", new { quotaBytes = 2_000_000_000L });
+        var account = await host.JsonAsync(HttpMethod.Post, path + "/accounts", new
+        { localPart = "receiver", password = AcceptanceHost.Password, quotaBytes = 100_000_000L }, 201);
+        var accountId = account.GetProperty("id").GetGuid();
+        await host.JsonAsync(HttpMethod.Patch, $"/api/v1/accounts/{accountId}", new { isEnabled = false, quotaBytes = 110_000_000L }, 204);
+        await host.JsonAsync(HttpMethod.Post, path + "/accounts/batch-enable", new { ids = new[] { accountId } }, 204);
+        await host.JsonAsync(HttpMethod.Post, $"/api/v1/accounts/{accountId}/password", new { password = "ChangedAcceptance_2026" }, 204);
+        var alias = await host.JsonAsync(HttpMethod.Post, path + "/aliases", new
+        { sourceLocalPart = "support", targetAccountId = accountId, mode = "SendReceive" }, 201);
+        var aliasId = alias.GetProperty("id").GetGuid();
+        await host.JsonAsync(HttpMethod.Put, path + $"/aliases/{aliasId}", new
+        { sourceLocalPart = "help", targetAccountId = accountId, mode = "ReceiveOnly" });
+        var found = await host.JsonAsync(HttpMethod.Get, path + "/accounts/search?search=receiver&page=1&pageSize=20");
+        Assert.Equal(1, found.GetProperty("totalCount").GetInt32());
+        await using (var db = await host.Factory.CreateDbContextAsync())
+        {
+            var storedAccount = await db.Accounts.SingleAsync(x => x.Id == accountId);
+            Assert.True(storedAccount.IsEnabled);
+            Assert.Equal(110_000_000L, storedAccount.QuotaBytes);
+            Assert.Equal("help", (await db.Aliases.SingleAsync(x => x.Id == aliasId)).SourceLocalPart);
+            Assert.True(await db.AuditRecords.CountAsync(x => x.Actor == "acceptance-admin") >= 7);
+        }
+        await host.JsonAsync(HttpMethod.Delete, $"/api/v1/aliases/{aliasId}", expected: 204);
+        await host.JsonAsync(HttpMethod.Delete, $"/api/v1/accounts/{accountId}", expected: 409);
+        await host.JsonAsync(HttpMethod.Post, path + "/accounts/batch-disable", new { ids = new[] { accountId } }, 204);
+        await host.JsonAsync(HttpMethod.Delete, $"/api/v1/accounts/{accountId}", expected: 204);
+        await using var deletedDb = await host.Factory.CreateDbContextAsync();
+        Assert.NotNull((await deletedDb.Accounts.IgnoreQueryFilters().SingleAsync(x => x.Id == accountId)).DeletedAt);
+    }
+
+    [Fact]
+    public async Task AdminAndApiKeyLifecycleEnforcesPermissionsAndRevocation()
+    {
+        await using var host = await AcceptanceHost.StartAsync();
+        var grants = new[] { new { permissionCode = "dashboard.read" } };
+        var reader = await host.JsonAsync(HttpMethod.Post, "/api/v1/admins", new
+        { userName = "reader", password = AcceptanceHost.Password, isEnabled = true, grants }, 201);
+        var readerId = reader.GetProperty("id").GetGuid();
+        await host.JsonAsync(HttpMethod.Get, $"/api/v1/admins/{readerId}/grants");
+        await host.JsonAsync(HttpMethod.Put, $"/api/v1/admins/{readerId}/grants", new { grants });
+        using var cookieClient = new HttpClient(new HttpClientHandler { CookieContainer = new CookieContainer() })
+        { BaseAddress = host.Anonymous.BaseAddress };
+        var csrf = await cookieClient.GetFromJsonAsync<JsonElement>("/api/v1/session/csrf");
+        cookieClient.DefaultRequestHeaders.Add(csrf.GetProperty("headerName").GetString()!, csrf.GetProperty("token").GetString());
+        using var cookieLogin = await cookieClient.PostAsJsonAsync("/api/v1/session/login", new
+        { userName = "reader", password = AcceptanceHost.Password });
+        Assert.Equal(HttpStatusCode.OK, cookieLogin.StatusCode);
+        using var limited = await host.LoginAsync("reader");
+        using var allowed = await limited.GetAsync("/api/v1/overview");
+        Assert.Equal(HttpStatusCode.OK, allowed.StatusCode);
+        using var forbidden = await limited.GetAsync("/api/v1/settings/delivery");
+        Assert.Equal(HttpStatusCode.Forbidden, forbidden.StatusCode);
+        await AcceptanceHost.AssertProblemAsync(forbidden, 403);
+        using var escalation = await limited.PostAsJsonAsync("/api/v1/admins", new
+        { userName = "escalated", password = AcceptanceHost.Password, isEnabled = true, grants = new[] { new { permissionCode = "*" } } });
+        Assert.Equal(HttpStatusCode.Forbidden, escalation.StatusCode);
+        var key = await host.JsonAsync(HttpMethod.Post, "/api/v1/api-keys", new { name = "reader-key", grants });
+        var keyId = key.GetProperty("id").GetGuid();
+        using var keyClient = new HttpClient { BaseAddress = host.Anonymous.BaseAddress };
+        keyClient.DefaultRequestHeaders.Add("X-Api-Key", key.GetProperty("apiKey").GetString());
+        using var keyAllowed = await keyClient.GetAsync("/api/v1/overview");
+        Assert.Equal(HttpStatusCode.OK, keyAllowed.StatusCode);
+        using var keyForbidden = await keyClient.GetAsync("/api/v1/domains");
+        Assert.Equal(HttpStatusCode.Forbidden, keyForbidden.StatusCode);
+        await host.JsonAsync(HttpMethod.Get, $"/api/v1/api-keys/{keyId}/grants");
+        await host.JsonAsync(HttpMethod.Put, $"/api/v1/api-keys/{keyId}/grants", new { grants });
+        var rotated = await host.JsonAsync(HttpMethod.Post, $"/api/v1/api-keys/{keyId}/refresh");
+        using var oldKey = await keyClient.GetAsync("/api/v1/overview");
+        Assert.Equal(HttpStatusCode.Unauthorized, oldKey.StatusCode);
+        keyClient.DefaultRequestHeaders.Remove("X-Api-Key");
+        keyClient.DefaultRequestHeaders.Add("X-Api-Key", rotated.GetProperty("apiKey").GetString());
+        using var rotatedKey = await keyClient.GetAsync("/api/v1/overview");
+        Assert.Equal(HttpStatusCode.OK, rotatedKey.StatusCode);
+        await host.JsonAsync(HttpMethod.Delete, $"/api/v1/api-keys/{keyId}", expected: 204);
+        using var removedKey = await keyClient.GetAsync("/api/v1/overview");
+        Assert.Equal(HttpStatusCode.Unauthorized, removedKey.StatusCode);
+        await host.JsonAsync(HttpMethod.Patch, $"/api/v1/admins/{readerId}", new { userName = "reader", isEnabled = false, password = (string?)null });
+        using var disabled = await limited.GetAsync("/api/v1/overview");
+        Assert.True(disabled.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden,
+            $"Disabled administrator's JWT returned {(int)disabled.StatusCode}");
+        using var disabledCookie = await cookieClient.GetAsync("/api/v1/session/me");
+        Assert.Equal(HttpStatusCode.Unauthorized, disabledCookie.StatusCode);
+        await host.JsonAsync(HttpMethod.Delete, $"/api/v1/admins/{readerId}", expected: 204);
+        await using var db = await host.Factory.CreateDbContextAsync();
+        Assert.False(await db.ApiKeys.AnyAsync(x => x.Id == keyId));
+        Assert.False(await db.AdminUsers.AnyAsync(x => x.Id == readerId));
+        Assert.True(await db.AuditRecords.AnyAsync(x => x.Action == "api-key.refresh"));
+    }
+
+    [Fact]
+    public async Task QueueHttpRejectsActiveLeaseAndReturnsPerItemBatchResults()
+    {
+        await using var host = await AcceptanceHost.StartAsync();
+        var message = new StoredMessage
+        {
+            ContentKey = "acceptance-message", EnvelopeFrom = "sender@acceptance.invalid", Size = 42
+        };
+        var failed = new DeliveryJob
+        {
+            Message = message, Sender = "sender@acceptance.invalid",
+            Recipient = "remote@example.invalid", Status = DeliveryStatus.Failed, Attempts = 2
+        };
+        var leased = new DeliveryJob
+        {
+            Message = message, Sender = "sender@acceptance.invalid",
+            Recipient = "other@example.invalid", Status = DeliveryStatus.Processing,
+            Attempts = 1, LeaseOwner = "acceptance-worker", LeaseUntil = DateTimeOffset.UtcNow.AddMinutes(5)
+        };
+        var concurrent = new DeliveryJob
+        {
+            Message = message, Sender = "sender@acceptance.invalid",
+            Recipient = "parallel@example.invalid", Status = DeliveryStatus.Failed, Attempts = 3
+        };
+        await using (var db = await host.Factory.CreateDbContextAsync())
+        {
+            db.Messages.Add(message);
+            db.DeliveryJobs.AddRange(failed, leased, concurrent);
+            await db.SaveChangesAsync();
+        }
+        await host.JsonAsync(HttpMethod.Get, "/api/v1/queues?page=1&pageSize=20");
+        await host.JsonAsync(HttpMethod.Get, "/api/v1/queues/summary");
+        await host.JsonAsync(HttpMethod.Post, $"/api/v1/queues/{failed.Id}/retry", new { }, 400);
+        await host.JsonAsync(HttpMethod.Delete, $"/api/v1/queues/{leased.Id}", expected: 409);
+        var simultaneous = await Task.WhenAll(
+            host.Admin.PostAsJsonAsync($"/api/v1/queues/{concurrent.Id}/retry", new { expectedAttempts = 3 }),
+            host.Admin.PostAsJsonAsync($"/api/v1/queues/{concurrent.Id}/retry", new { expectedAttempts = 3 }));
+        try
+        {
+            Assert.Equal(new[] { 202, 409 }, simultaneous.Select(response => (int)response.StatusCode).Order().ToArray());
+        }
+        finally
+        {
+            foreach (var response in simultaneous) response.Dispose();
+        }
+        var version = new Dictionary<Guid, int> { [failed.Id] = 2, [leased.Id] = 1 };
+        var retry = await host.JsonAsync(HttpMethod.Post, "/api/v1/queues/batch/retry",
+            new { ids = new[] { failed.Id, leased.Id }, expectedAttempts = version });
+        Assert.Equal(1, retry.GetProperty("succeeded").GetInt32());
+        Assert.Equal("Conflict", retry.GetProperty("items")[1].GetProperty("status").GetString());
+        var repeated = await host.JsonAsync(HttpMethod.Post, "/api/v1/queues/batch/retry",
+            new { ids = new[] { failed.Id }, expectedAttempts = new Dictionary<Guid, int> { [failed.Id] = 2 } });
+        Assert.Equal("Conflict", repeated.GetProperty("items")[0].GetProperty("status").GetString());
+        var deletion = await host.JsonAsync(HttpMethod.Post, "/api/v1/queues/batch/delete",
+            new { ids = new[] { failed.Id, leased.Id } });
+        Assert.Equal("Succeeded", deletion.GetProperty("items")[0].GetProperty("status").GetString());
+        Assert.Equal("Conflict", deletion.GetProperty("items")[1].GetProperty("status").GetString());
+        await using var verified = await host.Factory.CreateDbContextAsync();
+        Assert.False(await verified.DeliveryJobs.AnyAsync(x => x.Id == failed.Id));
+        Assert.True(await verified.DeliveryJobs.AnyAsync(x => x.Id == leased.Id));
+        Assert.True(await verified.AuditRecords.AnyAsync(x => x.Action == "queue.batch-retry"));
+        Assert.True(await verified.AuditRecords.AnyAsync(x => x.Action == "queue.batch-delete"));
+    }
+
+    [Fact]
+    public async Task SettingsFirewallAndAuditHttpWorkflowsPersist()
+    {
+        await using var host = await AcceptanceHost.StartAsync();
+        foreach (var section in new[] { "delivery", "smtp", "mailboxes", "message-templates", "certificates" })
+            await host.JsonAsync(HttpMethod.Get, "/api/v1/settings/" + section);
+        await host.JsonAsync(HttpMethod.Put, "/api/v1/settings/delivery", new
+        { batchSize = 11, leaseSeconds = 120, maximumAttempts = 8, pollIntervalSeconds = 7 });
+        await host.JsonAsync(HttpMethod.Put, "/api/v1/settings/smtp", new { commandTimeoutSeconds = 222 });
+        await host.JsonAsync(HttpMethod.Put, "/api/v1/settings/mailboxes", new { defaultFolders = new[] { "INBOX", "Sent", "QA" } });
+        await host.JsonAsync(HttpMethod.Put, "/api/v1/settings/certificates", new { defaultMailHostName = (string?)null, allowSingleCertificateFallback = false });
+        var defaults = await host.JsonAsync(HttpMethod.Get, "/api/v1/settings/message-templates/defaults");
+        await host.JsonAsync(HttpMethod.Put, "/api/v1/settings/message-templates", defaults);
+        await host.JsonAsync(HttpMethod.Post, "/api/v1/settings/message-templates/preview", new { subject = "QA", body = "<p>Safe preview</p>" });
+        await host.JsonAsync(HttpMethod.Post, "/api/v1/settings/message-templates/preview", new { subject = "QA", body = "<script>alert(1)</script>" }, 400);
+        var saved = await host.JsonAsync(HttpMethod.Get, "/api/v1/settings/smtp");
+        Assert.Equal(222, saved.GetProperty("commandTimeoutSeconds").GetInt32());
+        var firewall = await host.JsonAsync(HttpMethod.Post, "/api/v1/firewall/rules", new { cidr = "192.0.2.19/32", note = "acceptance" }, 201);
+        var firewallId = firewall.GetProperty("id").GetGuid();
+        await host.JsonAsync(HttpMethod.Post, "/api/v1/firewall/rules", new { cidr = "192.0.2.19/32", note = "duplicate" }, 409);
+        await host.JsonAsync(HttpMethod.Put, $"/api/v1/firewall/rules/{firewallId}", new { isEnabled = false, note = "updated" });
+        await host.JsonAsync(HttpMethod.Get, "/api/v1/firewall/rules/search?search=updated&page=1&pageSize=20");
+        await host.JsonAsync(HttpMethod.Delete, $"/api/v1/firewall/rules/{firewallId}", expected: 204);
+        var audit = await host.JsonAsync(HttpMethod.Get, "/api/v1/audit?page=1&pageSize=100");
+        Assert.True(audit.GetProperty("totalCount").GetInt32() >= 5);
+        var auditId = audit.GetProperty("items")[0].GetProperty("id").GetGuid();
+        await host.JsonAsync(HttpMethod.Get, $"/api/v1/audit/{auditId}");
+        using var export = await host.Admin.PostAsJsonAsync("/api/v1/audit/export", new { ids = new[] { auditId } });
+        Assert.Equal(HttpStatusCode.OK, export.StatusCode);
+        Assert.NotNull(export.Content.Headers.ContentDisposition);
+        Assert.DoesNotContain(AcceptanceHost.Password, await export.Content.ReadAsStringAsync());
+    }
+
+    private sealed class AcceptanceHost : IAsyncDisposable
+    {
+        public const string Password = "AcceptanceOnly_2026";
+        private readonly ServiceProvider services;
+        private readonly Process process;
+        private readonly List<string> logs = [];
+        public HttpClient Anonymous { get; }
+        public HttpClient Admin { get; }
+        public IDbContextFactory<MailDbContext> Factory => services.GetRequiredService<IDbContextFactory<MailDbContext>>();
+
+        private AcceptanceHost(ServiceProvider services, Process process, Uri address)
+        {
+            this.services = services;
+            this.process = process;
+            Anonymous = new HttpClient { BaseAddress = address, Timeout = TimeSpan.FromSeconds(30) };
+            Admin = new HttpClient { BaseAddress = address, Timeout = TimeSpan.FromSeconds(30) };
+            process.OutputDataReceived += (_, args) => { if (args.Data is { } line) lock (logs) logs.Add(line); };
+            process.ErrorDataReceived += (_, args) => { if (args.Data is { } line) lock (logs) logs.Add(line); };
+        }
+
+        public static async Task<AcceptanceHost> StartAsync()
+        {
+            var root = Path.Combine(Path.GetTempPath(), "mailserver-http-acceptance-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(root);
+            using var listener = new TcpListener(IPAddress.Loopback, 0);
+            listener.Start();
+            var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+            listener.Stop();
+            var values = new Dictionary<string, string?>
+            {
+                ["Database:Provider"] = "Sqlite",
+                ["ConnectionStrings:MailDatabase"] = $"Data Source={Path.Combine(root, "acceptance.db")}",
+                ["Storage:RootPath"] = Path.Combine(root, "messages"),
+                ["SecurityAssets:RootPath"] = Path.Combine(root, "security"),
+                ["AdminServer:BindAddress"] = "127.0.0.1", ["AdminServer:Http:Enabled"] = "true",
+                ["AdminServer:Http:Port"] = port.ToString(), ["AdminServer:Https:Enabled"] = "false",
+                ["Jwt:SigningKey"] = "acceptance-only-signing-key-" + Guid.NewGuid().ToString("N"),
+                ["RunAll:Enabled"] = "false", ["MailServerLogging:File:Enabled"] = "false",
+                ["Logging:LogLevel:Default"] = "Warning"
+            };
+            var config = new ConfigurationBuilder().AddInMemoryCollection(values).Build();
+            var collection = new ServiceCollection().AddSingleton<IConfiguration>(config).AddLogging().AddMailServerInfrastructure(config);
+            var services = collection.BuildServiceProvider();
+            await using (var db = await services.GetRequiredService<IDbContextFactory<MailDbContext>>().CreateDbContextAsync())
+                await db.Database.MigrateAsync();
+            await services.GetRequiredService<AdminApplicationService>().CreateAdminAsync("acceptance-admin", Password, CancellationToken.None);
+            var configPath = Path.Combine(root, "mailserver.json");
+            await File.WriteAllTextAsync(configPath, JsonSerializer.Serialize(values));
+            var start = new ProcessStartInfo("dotnet")
+            { WorkingDirectory = root, RedirectStandardError = true, RedirectStandardOutput = true, UseShellExecute = false, CreateNoWindow = true };
+            start.ArgumentList.Add(typeof(AdminApiProblems).Assembly.Location);
+            start.Environment[PortableConfiguration.EnvironmentVariable] = configPath;
+            var process = new Process { StartInfo = start };
+            var host = new AcceptanceHost(services, process, new Uri($"http://127.0.0.1:{port}"));
+            try
+            {
+                process.Start();
+                process.BeginOutputReadLine();
+                process.BeginErrorReadLine();
+                for (var i = 0; i < 100; i++)
+                {
+                    if (process.HasExited) throw new InvalidOperationException(string.Join(Environment.NewLine, host.logs));
+                    try
+                    {
+                        using var ready = await host.Anonymous.GetAsync("/api/v1/health/ready");
+                        if (ready.IsSuccessStatusCode) break;
+                    }
+                    catch (HttpRequestException) { }
+                    await Task.Delay(100);
+                }
+                using var login = await host.Anonymous.PostAsJsonAsync("/api/v1/auth/token", new { userName = "acceptance-admin", password = Password });
+                login.EnsureSuccessStatusCode();
+                var token = await login.Content.ReadFromJsonAsync<JsonElement>();
+                host.Admin.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token.GetProperty("accessToken").GetString());
+                return host;
+            }
+            catch { await host.DisposeAsync(); throw; }
+        }
+
+        public async Task<JsonElement> JsonAsync(HttpMethod method, string url, object? body = null, int expected = 200)
+        {
+            using var request = new HttpRequestMessage(method, url);
+            if (body is not null) request.Content = JsonContent.Create(body);
+            using var response = await Admin.SendAsync(request);
+            var text = await response.Content.ReadAsStringAsync();
+            Assert.True((int)response.StatusCode == expected, $"{method} {url}: expected {expected}, got {(int)response.StatusCode}: {text}");
+            return string.IsNullOrEmpty(text) ? default : JsonDocument.Parse(text).RootElement.Clone();
+        }
+
+        public async Task<HttpClient> LoginAsync(string userName)
+        {
+            using var login = await Anonymous.PostAsJsonAsync("/api/v1/auth/token", new { userName, password = Password });
+            login.EnsureSuccessStatusCode();
+            var token = await login.Content.ReadFromJsonAsync<JsonElement>();
+            var client = new HttpClient { BaseAddress = Anonymous.BaseAddress };
+            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token.GetProperty("accessToken").GetString());
+            return client;
+        }
+
+        public static async Task<JsonElement> AssertProblemAsync(HttpResponseMessage response, int status)
+        {
+            Assert.Equal("application/problem+json", response.Content.Headers.ContentType?.MediaType);
+            var problem = await response.Content.ReadFromJsonAsync<JsonElement>();
+            Assert.Equal(status, problem.GetProperty("status").GetInt32());
+            Assert.False(string.IsNullOrEmpty(problem.GetProperty("traceId").GetString()));
+            return problem;
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            if (process.Id != 0 && !process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                await process.WaitForExitAsync();
+            }
+            process.Dispose();
+            Anonymous.Dispose();
+            Admin.Dispose();
+            await services.DisposeAsync();
+        }
+    }
+}

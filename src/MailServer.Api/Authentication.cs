@@ -7,6 +7,22 @@ using Microsoft.Extensions.Options;
 
 namespace MailServer.Api;
 
+public static class AdminPrincipalValidation
+{
+    public static async Task<bool> IsActiveAsync(
+        ClaimsPrincipal? principal,
+        IServiceProvider services,
+        CancellationToken cancellationToken)
+    {
+        if (!Guid.TryParse(principal?.FindFirstValue(ClaimTypes.NameIdentifier), out var adminId))
+            return false;
+        var factory = services.GetRequiredService<IDbContextFactory<MailDbContext>>();
+        await using var db = await factory.CreateDbContextAsync(cancellationToken);
+        return await db.AdminUsers.AsNoTracking()
+            .AnyAsync(user => user.Id == adminId && user.IsEnabled, cancellationToken);
+    }
+}
+
 public sealed class ApiKeyAuthenticationHandler(
     IOptionsMonitor<AuthenticationSchemeOptions> options,
     ILoggerFactory logger,
