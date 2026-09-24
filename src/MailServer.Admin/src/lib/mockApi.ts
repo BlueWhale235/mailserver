@@ -1254,7 +1254,20 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
     }
   }
   if (url.pathname === '/api-keys') {
-    if (method === 'GET') return structuredClone(previewApiKeys) as T
+    if (method === 'GET') {
+      const search = url.searchParams.get('search')?.trim().toLowerCase()
+      const status = url.searchParams.get('status')?.trim().toLowerCase()
+      const now = Date.now()
+      const filtered = previewApiKeys.filter(key => {
+        if (search && ![key.name, key.prefix, key.createdBy].some(value => value.toLowerCase().includes(search))) return false
+        const expired = Boolean(key.expiresAt && Date.parse(key.expiresAt) <= now)
+        if (status === 'active') return !key.revokedAt && !expired
+        if (status === 'expired') return !key.revokedAt && expired
+        if (status === 'revoked') return Boolean(key.revokedAt)
+        return true
+      }).sort((left, right) => right.createdAt.localeCompare(left.createdAt) || left.id.localeCompare(right.id))
+      return page(structuredClone(filtered), Number(url.searchParams.get('page') || 1), Number(url.searchParams.get('pageSize') || 20)) as T
+    }
     if (method === 'POST') {
       const input = JSON.parse(String(init.body)) as { name?: string; expiresAt?: string | null; grants?: MockPermissionGrant[] }
       const name = input.name?.trim() ?? ''

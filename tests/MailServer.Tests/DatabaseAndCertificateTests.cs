@@ -20,6 +20,63 @@ namespace MailServer.Tests;
 public sealed class DatabaseAndCertificateTests
 {
     [Fact]
+    public async Task ApiKeySearchPaginatesAndFiltersPersistedKeys()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-api-keys-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Database:Provider"] = "Sqlite",
+                ["ConnectionStrings:MailDatabase"] = $"Data Source={Path.Combine(root, "mailserver.db")}",
+                ["Storage:RootPath"] = Path.Combine(root, "messages")
+            }).Build();
+            var collection = new ServiceCollection();
+            collection.AddLogging();
+            collection.AddSingleton<IConfiguration>(configuration);
+            collection.AddMailServerInfrastructure(configuration);
+            await using var services = collection.BuildServiceProvider();
+            var factory = services.GetRequiredService<IDbContextFactory<MailDbContext>>();
+            var createdAt = DateTimeOffset.UtcNow.AddDays(-1);
+            await using (var db = await factory.CreateDbContextAsync())
+            {
+                await db.Database.MigrateAsync();
+                for (var index = 0; index < 7; index++)
+                {
+                    db.ApiKeys.Add(new ApiKeyRecord
+                    {
+                        Name = $"Agent-{index}", Prefix = $"msk_{index}", SecretHash = "test-only",
+                        CreatedBy = "Ops-Team", CreatedAt = createdAt,
+                        ExpiresAt = index == 5 ? createdAt : null,
+                        RevokedAt = index == 6 ? createdAt : null
+                    });
+                }
+                await db.SaveChangesAsync();
+            }
+
+            var administration = services.GetRequiredService<AdminApplicationService>();
+            var first = await administration.SearchApiKeysAsync(null, ApiKeyStatusFilter.Any, 1, 5, CancellationToken.None);
+            var second = await administration.SearchApiKeysAsync(null, ApiKeyStatusFilter.Any, 2, 5, CancellationToken.None);
+            Assert.Equal(7, first.TotalCount);
+            Assert.Equal(5, first.Items.Count);
+            Assert.Equal(2, second.Items.Count);
+            Assert.Empty(first.Items.Select(item => item.Id).Intersect(second.Items.Select(item => item.Id)));
+            Assert.Equal(5, (await administration.SearchApiKeysAsync(null, ApiKeyStatusFilter.Active, 1, 20, CancellationToken.None)).TotalCount);
+            Assert.Equal(1, (await administration.SearchApiKeysAsync(null, ApiKeyStatusFilter.Expired, 1, 20, CancellationToken.None)).TotalCount);
+            Assert.Equal(1, (await administration.SearchApiKeysAsync(null, ApiKeyStatusFilter.Revoked, 1, 20, CancellationToken.None)).TotalCount);
+            Assert.Equal(7, (await administration.SearchApiKeysAsync("OPS-TEAM", ApiKeyStatusFilter.Any, 1, 20, CancellationToken.None)).TotalCount);
+            Assert.Equal(1, (await administration.SearchApiKeysAsync("agent-3", ApiKeyStatusFilter.Any, 1, 20, CancellationToken.None)).TotalCount);
+            Assert.Empty((await administration.SearchApiKeysAsync(null, ApiKeyStatusFilter.Any, 3, 5, CancellationToken.None)).Items);
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task ReadinessReflectsStorageAndPendingMigrationsWithoutExposingPaths()
     {
         var root = Path.Combine(Path.GetTempPath(), $"mailserver-readiness-{Guid.NewGuid():N}");

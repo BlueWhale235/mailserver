@@ -28,6 +28,10 @@ const Checkbox = defineComponent({
   name: 'VCheckbox', props: ['modelValue', 'label'], emits: ['update:modelValue'],
   template: '<label><input type="checkbox" :checked="modelValue" @change="$emit(`update:modelValue`, $event.target.checked)" />{{ label }}</label>',
 })
+const Pagination = defineComponent({
+  name: 'VPagination', props: ['modelValue', 'length'], emits: ['update:modelValue'],
+  template: '<button v-if="length > 1" @click="$emit(`update:modelValue`, 2)">下一页</button>',
+})
 
 function mountView() {
   return shallowMount(ApiKeysView, {
@@ -49,6 +53,8 @@ function mountView() {
         VDialog: Dialog,
         VBtn: Button,
         VTextField: TextField,
+        VSelect: TextField,
+        VPagination: Pagination,
         VTextarea: Textarea,
         VCheckbox: Checkbox,
       },
@@ -60,7 +66,7 @@ beforeEach(() => {
   vi.mocked(api).mockReset()
   vi.mocked(api).mockImplementation(async (path, init) => {
     if (path === '/api-keys' && init?.method === 'POST') return { apiKey: 'msk_test_secret_value' } as never
-    if (path === '/api-keys') return [] as never
+    if (String(path).startsWith('/api-keys?')) return { items: [], page: 1, pageSize: 20, totalCount: 0 } as never
     if (path === '/permissions/catalog') return [] as never
     if (String(path).startsWith('/domains/search')) return { items: [], page: 1, pageSize: 100, totalCount: 0 } as never
     throw new Error(`unexpected request ${path}`)
@@ -72,6 +78,59 @@ afterEach(() => {
 })
 
 describe('API Key one-time secret', () => {
+  it('shows a load failure without claiming that no keys exist', async () => {
+    vi.mocked(api).mockRejectedValue(new Error('网络连接失败'))
+    const wrapper = mountView()
+    await flushPromises()
+    expect(wrapper.text()).toContain('API Key 列表加载失败，请点击刷新重试')
+    expect(wrapper.text()).not.toContain('还没有创建 API Key')
+    expect(wrapper.text()).not.toContain('第 1 / 1 页')
+    wrapper.unmount()
+  })
+
+  it('requests server-side filters and pages', async () => {
+    vi.mocked(api).mockImplementation(async path => {
+      if (String(path).startsWith('/api-keys?')) return {
+        items: [], page: 1, pageSize: 20, totalCount: 21,
+      } as never
+      throw new Error(`unexpected request ${path}`)
+    })
+    const wrapper = mountView()
+    await flushPromises()
+    wrapper.findAllComponents(TextField).find(field => field.props('label') === '搜索名称、前缀或创建人')!
+      .vm.$emit('update:modelValue', '  AGENT  ')
+    await wrapper.vm.$nextTick()
+    await wrapper.findAll('button').find(button => button.text() === '筛选')!.trigger('click')
+    await flushPromises()
+    expect(api).toHaveBeenCalledWith('/api-keys?page=1&pageSize=20&search=AGENT')
+
+    await wrapper.findAll('button').find(button => button.text() === '下一页')!.trigger('click')
+    await flushPromises()
+    expect(api).toHaveBeenCalledWith('/api-keys?page=2&pageSize=20&search=AGENT')
+    wrapper.unmount()
+  })
+
+  it('reloads the preceding page when the final page becomes empty', async () => {
+    let total = 21
+    vi.mocked(api).mockImplementation(async path => {
+      if (String(path).startsWith('/api-keys?')) {
+        const requestedPage = Number(new URL(String(path), 'http://localhost').searchParams.get('page'))
+        return { items: [], page: requestedPage, pageSize: 20, totalCount: total } as never
+      }
+      throw new Error(`unexpected request ${path}`)
+    })
+    const wrapper = mountView()
+    await flushPromises()
+    await wrapper.findAll('button').find(button => button.text() === '下一页')!.trigger('click')
+    await flushPromises()
+    total = 20
+    await wrapper.find('button[aria-label="刷新 API Key 列表"]').trigger('click')
+    await flushPromises()
+    expect(api).toHaveBeenLastCalledWith('/api-keys?page=1&pageSize=20')
+    expect(wrapper.text()).toContain('第 1 / 1 页 · 共 20 个')
+    wrapper.unmount()
+  })
+
   it('confirms before discarding a dirty creation draft', async () => {
     const wrapper = mountView()
     await flushPromises()
@@ -94,7 +153,7 @@ describe('API Key one-time secret', () => {
   it('does not allow saving an unchanged authorization set', async () => {
     const key = { id: 'key-1', name: 'metrics', prefix: 'msk_test', createdBy: 'admin', createdAt: '2026-01-01T00:00:00Z' }
     vi.mocked(api).mockImplementation(async path => {
-      if (path === '/api-keys') return [key] as never
+      if (String(path).startsWith('/api-keys?')) return { items: [key], page: 1, pageSize: 20, totalCount: 1 } as never
       if (path === '/api-keys/key-1/grants') return [{ permissionCode: 'dashboard.read', resourceType: '', resourceKey: '' }] as never
       if (path === '/permissions/catalog') return [] as never
       if (String(path).startsWith('/domains/search')) return { items: [], page: 1, pageSize: 100, totalCount: 0 } as never

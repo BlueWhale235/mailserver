@@ -158,8 +158,8 @@ describe('API Key preview API', () => {
     })
     expect(created.apiKey).toMatch(/^msk_preview_/)
 
-    const listed = await mockApi<ApiKeyRecord[]>('/api-keys')
-    const record = listed.find(item => item.id === created.id)
+    const listed = await mockApi<PagedResult<ApiKeyRecord>>('/api-keys')
+    const record = listed.items.find(item => item.id === created.id)
     expect(record).toMatchObject({ name })
 
     const updatedGrants: GrantInput[] = [
@@ -177,8 +177,8 @@ describe('API Key preview API', () => {
     expect(rotated.apiKey).not.toBe(created.apiKey)
 
     await mockApi(`/api-keys/${created.id}`, { method: 'DELETE' })
-    const afterDelete = await mockApi<ApiKeyRecord[]>('/api-keys')
-    expect(afterDelete.some(item => item.id === created.id)).toBe(false)
+    const afterDelete = await mockApi<PagedResult<ApiKeyRecord>>('/api-keys')
+    expect(afterDelete.items.some(item => item.id === created.id)).toBe(false)
   })
 
   it('rejects empty grants, past expiration, and rotation of revoked credentials', async () => {

@@ -44,11 +44,21 @@ interface DomainOption {
 
 interface PagedResult<T> {
   items: T[]
+  page: number
+  pageSize: number
+  totalCount: number
 }
 
 const { can } = usePermission()
 
 const rows = ref<ApiKey[]>([])
+const totalCount = ref(0)
+const page = ref(1)
+const pageSize = 20
+const pageCount = computed(() => Math.max(1, Math.ceil(totalCount.value / pageSize)))
+const search = ref<string | null>('')
+const statusFilter = ref<'Any' | 'Active' | 'Expired' | 'Revoked'>('Any')
+let loadVersion = 0
 const loading = ref(false)
 const error = ref('')
 const notice = ref('')
@@ -99,16 +109,36 @@ const discardCopy = computed(() => discardTarget.value === 'create'
   : '当前 API Key 的授权修改尚未保存。')
 
 async function loadKeys() {
+  const version = ++loadVersion
   loading.value = true
   error.value = ''
   try {
-    rows.value = await api<ApiKey[]>('/api-keys')
+    const params = new globalThis.URLSearchParams({ page: String(page.value), pageSize: String(pageSize) })
+    const normalizedSearch = search.value?.trim() ?? ''
+    if (normalizedSearch) params.set('search', normalizedSearch)
+    if (statusFilter.value !== 'Any') params.set('status', statusFilter.value)
+    const result = await api<PagedResult<ApiKey>>(`/api-keys?${params.toString()}`)
+    if (version !== loadVersion) return
+    totalCount.value = result.totalCount
+    if (page.value > pageCount.value) {
+      page.value = pageCount.value
+      await loadKeys()
+      return
+    }
+    rows.value = result.items
   } catch (cause) {
+    if (version !== loadVersion) return
     rows.value = []
+    totalCount.value = 0
     error.value = cause instanceof Error ? cause.message : 'API Key 列表加载失败'
   } finally {
-    loading.value = false
+    if (version === loadVersion) loading.value = false
   }
+}
+
+function applyFilters() {
+  page.value = 1
+  void loadKeys()
 }
 
 async function loadPermissionResources() {
@@ -332,16 +362,22 @@ onBeforeUnmount(() => {
     <div class="table-toolbar">
       <div>
         <strong>已签发凭据</strong>
-        <span class="table-summary">共 {{ rows.length }} 个，轮换后旧密钥立即失效</span>
+        <span class="table-summary">共 {{ totalCount }} 个，轮换后旧密钥立即失效</span>
       </div>
       <v-spacer />
       <v-btn icon="mdi-refresh" variant="text" aria-label="刷新 API Key 列表" :loading="loading" @click="loadKeys" />
+    </div>
+    <div class="key-filters">
+      <v-text-field v-model="search" label="搜索名称、前缀或创建人" prepend-inner-icon="mdi-magnify" hide-details density="compact" clearable @keyup.enter="applyFilters" @click:clear="applyFilters" />
+      <v-select v-model="statusFilter" label="状态" :items="[{ title: '全部状态', value: 'Any' }, { title: '有效', value: 'Active' }, { title: '已过期', value: 'Expired' }, { title: '已吊销', value: 'Revoked' }]" hide-details density="compact" @update:model-value="applyFilters" />
+      <v-btn variant="outlined" :disabled="loading" @click="applyFilters">筛选</v-btn>
     </div>
     <v-table>
       <thead><tr><th>名称</th><th>前缀</th><th>状态</th><th>最近使用</th><th>过期时间</th><th></th></tr></thead>
       <tbody>
         <tr v-if="loading"><td colspan="6"><v-progress-linear indeterminate color="primary" /></td></tr>
-        <tr v-else-if="!rows.length"><td colspan="6" class="text-center py-10 text-medium-emphasis">还没有创建 API Key</td></tr>
+        <tr v-else-if="error"><td colspan="6" class="text-center py-10 text-medium-emphasis">API Key 列表加载失败，请点击刷新重试</td></tr>
+        <tr v-else-if="!rows.length"><td colspan="6" class="text-center py-10 text-medium-emphasis">{{ search?.trim() || statusFilter !== 'Any' ? '没有符合筛选条件的 API Key' : '还没有创建 API Key' }}</td></tr>
         <tr v-for="key in rows" v-else :key="key.id">
           <td><b>{{ key.name }}</b><small>由 {{ key.createdBy }} 创建</small></td>
           <td><code>{{ key.prefix }}</code></td>
@@ -376,6 +412,10 @@ onBeforeUnmount(() => {
         </tr>
       </tbody>
     </v-table>
+    <div v-if="!error" class="table-footer">
+      <span>第 {{ page }} / {{ pageCount }} 页 · 共 {{ totalCount }} 个</span>
+      <v-pagination v-model="page" :length="pageCount" density="compact" :disabled="loading" @update:model-value="loadKeys" />
+    </div>
   </v-card>
 
   <v-dialog :model-value="createOpen" max-width="920" persistent>
@@ -462,6 +502,7 @@ onBeforeUnmount(() => {
 .table-toolbar > div:first-child { display: grid; gap: 3px; }
 .table-toolbar strong { color: var(--text); font-size: 14px; }
 .table-summary { color: var(--text-muted); font-size: 12px; }
+.key-filters { display: grid; grid-template-columns: minmax(250px, 1fr) 180px auto; align-items: center; gap: 12px; padding: 0 20px 16px; }
 .form-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(260px, .7fr); gap: 16px; }
 .section-label { margin: 0 0 10px; color: var(--text-secondary); font-size: 13px; font-weight: 700; }
 .grant-dialog-card { max-height: min(880px, 92vh); }
@@ -471,6 +512,7 @@ onBeforeUnmount(() => {
 .copy-error { color: #b42318; font-size: 13px; }
 .confirmation-copy { margin: 0 0 14px; color: var(--text-secondary); font-size: 14px; }
 @media (max-width: 720px) {
+  .key-filters { grid-template-columns: 1fr; }
   .form-grid { grid-template-columns: 1fr; gap: 0; }
   .copy-row { align-items: flex-start; flex-direction: column; }
 }

@@ -1470,16 +1470,16 @@ public sealed class AdminApplicationService(
     {
         page = Math.Max(1, page);
         pageSize = Math.Clamp(pageSize, 5, 100);
-        var normalizedSearch = NullIfWhiteSpace(search);
+        var normalizedSearch = NullIfWhiteSpace(search)?.ToLowerInvariant();
         var now = DateTimeOffset.UtcNow;
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         var query = db.ApiKeys.AsNoTracking();
         if (normalizedSearch is not null)
         {
             query = query.Where(x =>
-                x.Name.Contains(normalizedSearch)
-                || x.Prefix.Contains(normalizedSearch)
-                || x.CreatedBy.Contains(normalizedSearch));
+                x.Name.ToLower().Contains(normalizedSearch)
+                || x.Prefix.ToLower().Contains(normalizedSearch)
+                || x.CreatedBy.ToLower().Contains(normalizedSearch));
         }
 
         query = status switch
@@ -1493,6 +1493,7 @@ public sealed class AdminApplicationService(
         var total = await query.CountAsync(cancellationToken);
         var rows = await query
             .OrderByDescending(x => x.CreatedAt)
+            .ThenBy(x => x.Id)
             .Skip((page - 1) * pageSize)
             .Take(pageSize)
             .Select(x => new ApiKeyView(

@@ -60,6 +60,7 @@ Desktop.ini
 
 
 # QA artifacts
+.tmp-tests/
 .qa-cdp-profile/
 .qa-login-browser/
 login-redesign-check.png

@@ -1614,9 +1614,18 @@ api.MapPost("/api-keys", async (
     .RequirePermission(PermissionCodes.IamManage);
 
 api.MapGet("/api-keys", async (
+    string? search,
+    ApiKeyStatusFilter? status,
+    int? page,
+    int? pageSize,
     AdminApplicationService administration,
     CancellationToken cancellationToken) =>
-    Results.Ok(await administration.GetApiKeysAsync(cancellationToken)))
+    Results.Ok(await administration.SearchApiKeysAsync(
+        search,
+        status ?? ApiKeyStatusFilter.Any,
+        page ?? 1,
+        pageSize ?? 20,
+        cancellationToken)))
     .RequirePermission(PermissionCodes.ApiKeyList);
 
 api.MapDelete("/api-keys/{id:guid}", async (
