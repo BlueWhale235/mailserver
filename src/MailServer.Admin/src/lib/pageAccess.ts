@@ -46,7 +46,7 @@ export const adminPages: AdminPageDefinition[] = [
   },
   { routeName: 'system-admins', path: '/system/admins', title: '管理员与权限', description: 'RBAC 与域级授权', icon: 'mdi-account-key-outline', accessAny: [systemAccess('admin.account.read')], searchable: true, system: true },
   { routeName: 'system-api-keys', path: '/system/api-keys', title: 'API Key', description: '外部系统访问凭据', icon: 'mdi-key-chain', accessAny: [systemAccess('api-key.read')], searchable: true, system: true },
-  { routeName: 'system-tasks', path: '/system/tasks', title: '计划任务', description: '维护、清理与证书续期', icon: 'mdi-calendar-clock-outline', accessAny: [systemAccess('task.read')], searchable: true, system: true },
+  { routeName: 'system-tasks', path: '/system/tasks', title: '计划任务', description: '回收清理、存储检查与配额校验', icon: 'mdi-calendar-clock-outline', accessAny: [systemAccess('task.read')], searchable: true, system: true },
   { routeName: 'system-audit', path: '/system/audit', title: '审计日志', description: '关键操作与安全事件', icon: 'mdi-file-document-check-outline', accessAny: [systemAccess('audit.read')], searchable: true, system: true },
   { routeName: 'system-plugins', path: '/system/plugins', title: '插件', description: '插件顺序、状态与配置', icon: 'mdi-puzzle-outline', accessAny: [systemAccess('settings.read')], searchable: true, system: true },
   { routeName: 'system-templates', path: '/system/message-templates', title: '消息模板', description: '退信与系统通知模板', icon: 'mdi-file-edit-outline', accessAny: [systemAccess('settings.read')], searchable: true, system: true },

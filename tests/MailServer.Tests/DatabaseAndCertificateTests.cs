@@ -172,6 +172,16 @@ public sealed class DatabaseAndCertificateTests
             Assert.Null(await tasks.GetExecutionAsync(Guid.NewGuid(), CancellationToken.None));
             await Assert.ThrowsAsync<TaskBusyException>(() => tasks.UpdateAsync(first.Id, true, 60, 600, 100, CancellationToken.None));
             await Assert.ThrowsAsync<TaskBusyException>(() => tasks.RunNowAsync(first.Id, CancellationToken.None));
+            await tasks.UpdateAsync(second.Id, true, 45, 300, 20, CancellationToken.None, "qa-admin");
+            var manualExecutionId = await tasks.RunNowAsync(second.Id, CancellationToken.None, "qa-admin");
+            await using (var db = await factory.CreateDbContextAsync())
+            {
+                Assert.Contains(await db.AuditRecords.ToListAsync(), record => record.Action == "task.update"
+                    && record.Actor == "qa-admin" && record.Resource == $"task:{second.Id}");
+                Assert.Contains(await db.AuditRecords.ToListAsync(), record => record.Action == "task.run"
+                    && record.Actor == "qa-admin" && record.RelatedId == manualExecutionId.ToString()
+                    && record.Status == AuditStatus.Failed);
+            }
         }
         finally
         {

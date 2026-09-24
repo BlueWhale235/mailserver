@@ -381,15 +381,16 @@ api.MapPut("/tasks/{id:guid}", async (Guid id, TaskUpdateRequest request, HttpCo
 {
     try
     {
-        await tasks.UpdateAsync(id, request.Enabled, request.IntervalMinutes, request.TimeoutSeconds, request.BatchSize, cancellationToken);
+        await tasks.UpdateAsync(id, request.Enabled, request.IntervalMinutes, request.TimeoutSeconds, request.BatchSize,
+            cancellationToken, Actor(http));
         return Results.NoContent();
     }
     catch (TaskBusyException) { return AdminApiProblems.Conflict(http, "任务正在执行，请等待结束后再修改。"); }
     catch (KeyNotFoundException) { return AdminApiProblems.NotFound(http, "未找到计划任务。"); }
 }).RequirePermission(PermissionCodes.TaskManage);
-api.MapPost("/tasks/{id:guid}/run", async (Guid id, HttpContext http, ITaskScheduler tasks, CancellationToken cancellationToken) =>
+api.MapPost("/tasks/{id:guid}/run", async (Guid id, HttpContext http, TaskExecutionService tasks, CancellationToken cancellationToken) =>
 {
-    try { return Results.Accepted(value: new { executionId = await tasks.RunNowAsync(id, cancellationToken) }); }
+    try { return Results.Accepted(value: new { executionId = await tasks.RunNowAsync(id, cancellationToken, Actor(http)) }); }
     catch (TaskBusyException) { return AdminApiProblems.Conflict(http, "任务正在执行，请等待结束后重试。"); }
     catch (KeyNotFoundException) { return AdminApiProblems.NotFound(http, "未找到计划任务。"); }
 })

@@ -566,6 +566,9 @@ public sealed class TaskExecutionService(
     }
 
     public async Task<Guid> RunNowAsync(Guid taskId, CancellationToken cancellationToken)
+        => await RunNowAsync(taskId, cancellationToken, null);
+
+    public async Task<Guid> RunNowAsync(Guid taskId, CancellationToken cancellationToken, string? actor)
     {
         await using var db = await factory.CreateDbContextAsync(cancellationToken);
         await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
@@ -579,6 +582,21 @@ public sealed class TaskExecutionService(
         task.Status = ScheduledTaskStatus.Running; task.LastRunAt = clock.UtcNow;
         var execution = new TaskExecution { ScheduledTaskId = taskId };
         db.TaskExecutions.Add(execution);
+        AuditRecord? manualAudit = null;
+        if (actor is not null)
+        {
+            manualAudit = new AuditRecord
+            {
+                Actor = actor,
+                Action = "task.run",
+                Resource = $"task:{taskId}",
+                RelatedId = execution.Id.ToString(),
+                Detail = $"Manual execution requested for {task.Type}.",
+                Category = AuditCategory.BackgroundTask,
+                Status = AuditStatus.Running
+            };
+            db.AuditRecords.Add(manualAudit);
+        }
         await db.SaveChangesAsync(cancellationToken);
         await transaction.CommitAsync(cancellationToken);
         try
@@ -596,6 +614,11 @@ public sealed class TaskExecutionService(
             logger.LogError(exception, "Scheduled task {TaskType} failed.", task.Type);
         }
         execution.CompletedAt = clock.UtcNow;
+        if (manualAudit is not null)
+        {
+            manualAudit.Status = execution.Status == TaskExecutionStatus.Succeeded ? AuditStatus.Succeeded : AuditStatus.Failed;
+            manualAudit.Detail = $"Manual execution {execution.Status}; executionId={execution.Id}.";
+        }
         task.NextRunAt = clock.UtcNow.AddMinutes(Math.Max(1, task.IntervalMinutes));
         db.TaskLeases.Remove(lease);
         await db.SaveChangesAsync(cancellationToken);
@@ -639,7 +662,8 @@ public sealed class TaskExecutionService(
         return await db.TaskExecutions.AsNoTracking().SingleOrDefaultAsync(x => x.Id == id, cancellationToken);
     }
 
-    public async Task UpdateAsync(Guid taskId, bool enabled, int intervalMinutes, int timeoutSeconds, int batchSize, CancellationToken cancellationToken)
+    public async Task UpdateAsync(Guid taskId, bool enabled, int intervalMinutes, int timeoutSeconds, int batchSize,
+        CancellationToken cancellationToken, string? actor = null)
     {
         await using var db = await factory.CreateDbContextAsync(cancellationToken);
         var task = await db.ScheduledTasks.SingleOrDefaultAsync(x => x.Id == taskId, cancellationToken)
@@ -647,10 +671,22 @@ public sealed class TaskExecutionService(
         if (task.Status == ScheduledTaskStatus.Running
             || await db.TaskLeases.AnyAsync(x => x.ScheduledTaskId == taskId && x.ExpiresAt > clock.UtcNow, cancellationToken))
             throw new TaskBusyException();
+        var before = new { task.IsEnabled, task.IntervalMinutes, task.TimeoutSeconds, task.BatchSize };
         task.IsEnabled = enabled; task.Status = enabled ? ScheduledTaskStatus.Idle : ScheduledTaskStatus.Paused;
         task.IntervalMinutes = Math.Clamp(intervalMinutes, 1, 525600);
         task.TimeoutSeconds = Math.Clamp(timeoutSeconds, 10, 86400);
         task.BatchSize = Math.Clamp(batchSize, 1, 1000);
+        if (actor is not null)
+            db.AuditRecords.Add(new AuditRecord
+            {
+                Actor = actor,
+                Action = "task.update",
+                Resource = $"task:{taskId}",
+                RelatedId = taskId.ToString(),
+                Detail = $"{task.Type}: enabled {before.IsEnabled}->{task.IsEnabled}; interval {before.IntervalMinutes}->{task.IntervalMinutes}; timeout {before.TimeoutSeconds}->{task.TimeoutSeconds}; batch {before.BatchSize}->{task.BatchSize}.",
+                Category = AuditCategory.BackgroundTask,
+                Status = AuditStatus.Succeeded
+            });
         await db.SaveChangesAsync(cancellationToken);
     }
 }

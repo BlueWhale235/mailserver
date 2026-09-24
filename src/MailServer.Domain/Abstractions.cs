@@ -79,7 +79,8 @@ public interface ITaskExecutionService
         Guid? taskId, TaskExecutionStatus? status, DateTimeOffset? from, DateTimeOffset? to,
         int page, int pageSize, CancellationToken cancellationToken);
     Task<TaskExecution?> GetExecutionAsync(Guid id, CancellationToken cancellationToken);
-    Task UpdateAsync(Guid taskId, bool enabled, int intervalMinutes, int timeoutSeconds, int batchSize, CancellationToken cancellationToken);
+    Task UpdateAsync(Guid taskId, bool enabled, int intervalMinutes, int timeoutSeconds, int batchSize,
+        CancellationToken cancellationToken, string? actor = null);
 }
 
 public interface IRecycleBinService
