@@ -107,6 +107,8 @@ public sealed class AuditLogService(
             .Where(x => idSet.Contains(x.Id))
             .OrderByDescending(x => x.CreatedAt)
             .ToListAsync(cancellationToken);
+        if (records.Count != idSet.Count)
+            throw new KeyNotFoundException("One or more audit records no longer exist.");
         return JsonSerializer.SerializeToUtf8Bytes(records.Select(ToDetail).ToArray(), JsonOptions);
     }
 
@@ -333,6 +335,7 @@ public sealed class AuditLogService(
             ["admin.delete"] = "删除管理员",
             ["task.run"] = "执行后台任务",
             ["task.update"] = "编辑后台任务",
+            ["quota.reconcile"] = "重新计算邮箱配额",
             ["plugin.settings.update"] = "修改插件配置",
             ["plugin.order.update"] = "调整插件顺序",
             ["plugin.load.succeeded"] = "插件加载成功",

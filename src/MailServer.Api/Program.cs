@@ -428,15 +428,17 @@ api.MapGet("/audit", async (
 
 api.MapGet("/audit/{id:guid}", async (
     Guid id,
+    HttpContext http,
     AuditLogService audit,
     CancellationToken cancellationToken) =>
 {
     try { return Results.Ok(await audit.GetAsync(id, cancellationToken)); }
-    catch (KeyNotFoundException) { return Results.NotFound(); }
+    catch (KeyNotFoundException) { return AdminApiProblems.NotFound(http, "未找到该条审计记录。"); }
 }).RequirePermission(PermissionCodes.AuditList);
 
 api.MapPost("/audit/export", async (
     AuditExportRequest request,
+    HttpContext http,
     AuditLogService audit,
     CancellationToken cancellationToken) =>
 {
@@ -445,10 +447,8 @@ api.MapPost("/audit/export", async (
         var payload = await audit.ExportAsync(request.Ids, cancellationToken);
         return Results.File(payload, "application/json; charset=utf-8", $"audit-{DateTimeOffset.UtcNow:yyyyMMddHHmmss}.json");
     }
-    catch (InvalidOperationException exception)
-    {
-        return Results.BadRequest(new { error = exception.Message });
-    }
+    catch (InvalidOperationException) { return AdminApiProblems.Validation(http, "ids", "单次最多导出 1000 条审计记录。"); }
+    catch (KeyNotFoundException) { return AdminApiProblems.Conflict(http, "所选记录已变化，请刷新列表后重新选择。"); }
 }).RequirePermission(PermissionCodes.AuditList);
 
 api.MapGet("/firewall/rules", async (

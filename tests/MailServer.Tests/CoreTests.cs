@@ -2761,6 +2761,12 @@ public sealed class CoreTests
         Assert.Contains("\"operationIp\": \"2001:db8::1\"", detail.RawJson);
         Assert.Contains("message", detail.RawJson, StringComparison.Ordinal);
         Assert.DoesNotContain("plain", detail.RawJson);
+        var export = await service.ExportAsync([plugins.Items.Single().Id], CancellationToken.None);
+        var exportedJson = System.Text.Encoding.UTF8.GetString(export);
+        Assert.Contains("***", exportedJson);
+        Assert.DoesNotContain("plain", exportedJson);
+        await Assert.ThrowsAsync<KeyNotFoundException>(() => service.ExportAsync(
+            [plugins.Items.Single().Id, Guid.NewGuid()], CancellationToken.None));
     }
 
     [Fact]

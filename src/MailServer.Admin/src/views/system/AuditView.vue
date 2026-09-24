@@ -119,6 +119,7 @@ function dateIsValid(value: string) {
 }
 
 async function loadAudit() {
+  selectedIds.value = []
   loading.value = true
   error.value = ''
   try {
@@ -199,7 +200,7 @@ async function exportSelected() {
     anchor.download = result.fileName
     anchor.click()
     globalThis.URL.revokeObjectURL(href)
-    notice.value = `已导出 ${selectedIds.value.length} 条审计记录：${result.fileName}`
+    notice.value = `已导出当前页选中的 ${selectedIds.value.length} 条审计记录：${result.fileName}`
   } catch (cause) {
     error.value = cause instanceof ApiError || cause instanceof Error ? cause.message : '审计日志导出失败'
   } finally {
@@ -310,7 +311,7 @@ onMounted(loadAudit)
     <div class="audit-toolbar">
       <div>
         <strong>{{ selectedCount ? `已选择 ${selectedCount} 条` : '审计事件' }}</strong>
-        <span>{{ selectedCount ? '仅导出选中的完整脱敏记录' : `共 ${totalCount} 条记录` }}</span>
+        <span>{{ selectedCount ? '仅导出当前页选中的完整脱敏记录；翻页或刷新会清空选择' : `共 ${totalCount} 条记录 · 仅可选择当前页` }}</span>
       </div>
       <v-btn
         color="primary"
@@ -330,7 +331,7 @@ onMounted(loadAudit)
       </thead>
       <tbody>
         <tr v-if="loading"><td colspan="7"><v-progress-linear indeterminate color="primary" /></td></tr>
-        <tr v-else-if="!rows.length"><td colspan="7" class="empty-state"><v-icon size="32">mdi-text-box-search-outline</v-icon><b>没有符合条件的审计事件</b><span>调整筛选条件后重试</span></td></tr>
+        <tr v-else-if="!rows.length && !error"><td colspan="7" class="empty-state"><v-icon size="32">mdi-text-box-search-outline</v-icon><b>没有符合条件的审计事件</b><span>调整筛选条件后重试</span></td></tr>
         <tr v-for="row in rows" v-else :key="row.id" :class="{ 'is-selected': selectedIds.includes(row.id) }">
           <td class="select-cell"><v-checkbox-btn :model-value="selectedIds.includes(row.id)" :aria-label="`选择审计事件 ${row.number}`" @update:model-value="value => toggleSelection(row.id, value)" /></td>
           <td><b>{{ row.content }}</b><small><code>{{ row.number }}</code><span v-if="row.requestId"> · 请求 {{ row.requestId }}</span></small></td>
