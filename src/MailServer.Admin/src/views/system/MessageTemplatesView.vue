@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { onBeforeRouteLeave } from 'vue-router'
 import PageHeader from '../../components/PageHeader.vue'
 import { ApiError, api, jsonBody } from '../../lib/api'
@@ -30,6 +30,14 @@ const saving = ref(false)
 const error = ref('')
 const notice = ref('')
 const activeTemplate = ref<TemplateKind>('permanent')
+const resetConfirmOpen = ref(false)
+const defaultsConfirmOpen = ref(false)
+const leaveConfirmOpen = ref(false)
+const previewBusy = ref(false)
+const previewError = ref('')
+const serverPreview = ref<{ key: string; renderedSubject: string; renderedHtml: string } | null>(null)
+let resolvePendingLeave: ((allow: boolean) => void) | null = null
+let previewVersion = 0
 
 const placeholders = [
   { token: '{recipient}', label: '收件人', sample: 'customer@example.net' },
@@ -66,7 +74,11 @@ const currentSubjectError = computed(() => activeTemplate.value === 'permanent' 
 const currentBodyError = computed(() => activeTemplate.value === 'permanent' ? permanentBodyError.value : retryBodyError.value)
 const renderedSubject = computed(() => renderText(currentSubject.value))
 const renderedBody = computed(() => renderHtml(currentBody.value))
-const previewDocument = computed(() => `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:"><style>body{margin:0;padding:28px;color:#25364a;background:#fff;font:14px/1.7 system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}a{color:#2563eb}table{max-width:100%;border-collapse:collapse}img{max-width:100%}code{padding:2px 5px;border-radius:4px;background:#f1f5f9}</style></head><body>${renderedBody.value}</body></html>`)
+const previewKey = computed(() => JSON.stringify([currentSubject.value, currentBody.value]))
+const previewVerified = computed(() => serverPreview.value?.key === previewKey.value)
+const previewSubject = computed(() => previewVerified.value ? serverPreview.value!.renderedSubject : renderedSubject.value)
+const previewBody = computed(() => previewVerified.value ? serverPreview.value!.renderedHtml : renderedBody.value)
+const previewDocument = computed(() => `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:"><style>body{margin:0;padding:28px;color:#25364a;background:#fff;font:14px/1.7 system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}a{color:#2563eb}table{max-width:100%;border-collapse:collapse}img{max-width:100%}code{padding:2px 5px;border-radius:4px;background:#f1f5f9}</style></head><body>${previewBody.value}</body></html>`)
 const unknownTokens = computed(() => {
   const matches = `${settings.value.permanentFailureSubject} ${settings.value.permanentFailureBody} ${settings.value.retryExhaustedSubject} ${settings.value.retryExhaustedBody}`.match(/\{[a-zA-Z][a-zA-Z0-9]*\}/g) ?? []
   const known = new Set(placeholders.map(item => item.token.toLowerCase()))
@@ -124,6 +136,40 @@ function reset() {
   settings.value = JSON.parse(baseline.value) as TemplateSettings
   error.value = ''
   notice.value = ''
+  resetConfirmOpen.value = false
+  serverPreview.value = null
+}
+
+async function restoreDefaults() {
+  if (saving.value || loading.value) return
+  defaultsConfirmOpen.value = false
+  error.value = ''
+  try {
+    settings.value = await api<TemplateSettings>('/settings/message-templates/defaults')
+    serverPreview.value = null
+    notice.value = '已载入系统默认模板，检查后点击“保存模板”才会生效。'
+  } catch (cause) {
+    error.value = cause instanceof Error ? cause.message : '加载系统默认模板失败'
+  }
+}
+
+async function verifyPreview() {
+  if (previewBusy.value || saving.value || !valid.value) return
+  const key = previewKey.value
+  const version = ++previewVersion
+  previewBusy.value = true
+  previewError.value = ''
+  try {
+    const result = await api<{ renderedSubject: string; renderedHtml: string }>('/settings/message-templates/preview', {
+      method: 'POST', body: jsonBody({ subject: currentSubject.value, body: currentBody.value }),
+    })
+    if (version === previewVersion && key === previewKey.value) serverPreview.value = { key, ...result }
+  } catch (cause) {
+    if (version === previewVersion && key === previewKey.value)
+      previewError.value = cause instanceof Error ? cause.message : '服务端预览失败'
+  } finally {
+    if (version === previewVersion) previewBusy.value = false
+  }
 }
 
 function insertPlaceholder(token: string) {
@@ -131,7 +177,7 @@ function insertPlaceholder(token: string) {
 }
 
 async function save() {
-  if (!dirty.value || !valid.value || saving.value) return
+  if (!dirty.value || !valid.value || saving.value || riskyMarkup.value) return
   saving.value = true
   error.value = ''
   notice.value = ''
@@ -150,8 +196,40 @@ async function save() {
   }
 }
 
-onBeforeRouteLeave(() => !dirty.value || globalThis.confirm('消息模板尚未保存，确定离开？'))
-onMounted(load)
+function protectPageExit(event: BeforeUnloadEvent) {
+  if (!dirty.value && !saving.value) return
+  event.preventDefault()
+  event.returnValue = ''
+}
+
+function finishLeave(allow: boolean) {
+  leaveConfirmOpen.value = false
+  const resolve = resolvePendingLeave
+  resolvePendingLeave = null
+  resolve?.(allow)
+}
+
+onBeforeRouteLeave(() => {
+  if (saving.value) {
+    error.value = '模板正在保存，请等待操作完成后再离开。'
+    return false
+  }
+  if (!dirty.value) return true
+  resolvePendingLeave?.(false)
+  leaveConfirmOpen.value = true
+  return new Promise<boolean>(resolve => { resolvePendingLeave = resolve })
+})
+watch(previewKey, () => { previewError.value = '' })
+onMounted(() => {
+  globalThis.addEventListener('beforeunload', protectPageExit)
+  void load()
+})
+onBeforeUnmount(() => {
+  globalThis.removeEventListener('beforeunload', protectPageExit)
+  resolvePendingLeave?.(false)
+  resolvePendingLeave = null
+  ++previewVersion
+})
 </script>
 
 <template>
@@ -162,8 +240,9 @@ onMounted(load)
   </div>
 
   <PageHeader title="消息模板" description="编辑永久失败与重试耗尽时发送给原发件人的退信">
-    <v-btn variant="outlined" prepend-icon="mdi-undo" :disabled="!dirty || saving" @click="reset">撤销修改</v-btn>
-    <v-btn v-if="can('settings.manage')" color="primary" prepend-icon="mdi-content-save-outline" :loading="saving" :disabled="!dirty || !valid" @click="save">保存模板</v-btn>
+    <v-btn v-if="can('settings.manage')" variant="outlined" prepend-icon="mdi-restore" :disabled="saving || loading" @click="defaultsConfirmOpen = true">恢复系统默认值</v-btn>
+    <v-btn v-if="can('settings.manage')" variant="outlined" prepend-icon="mdi-undo" :disabled="!dirty || saving" @click="resetConfirmOpen = true">撤销修改</v-btn>
+    <v-btn v-if="can('settings.manage')" color="primary" prepend-icon="mdi-content-save-outline" :loading="saving" :disabled="!dirty || !valid || riskyMarkup" @click="save">保存模板</v-btn>
   </PageHeader>
 
   <v-alert v-if="error" type="error" variant="tonal" closable class="mb-4" @click:close="error = ''">{{ error }}<v-btn v-if="!ready" variant="text" @click="load">重试</v-btn></v-alert>
@@ -189,8 +268,9 @@ onMounted(load)
       未识别的占位符不会被替换：{{ unknownTokens.join('、') }}
     </v-alert>
     <v-alert v-if="riskyMarkup" type="warning" variant="tonal" density="compact" class="mb-4">
-      正文包含脚本、事件处理器或 javascript 链接。预览沙箱不会执行这些内容，实际邮件客户端的处理方式可能不同，建议移除。
+      正文包含脚本、事件处理器或危险链接；服务端不会保存。请移除后再保存。
     </v-alert>
+    <v-alert type="info" variant="tonal" density="compact" class="mb-4">正文支持安全 XHTML：段落、标题、强调、列表、表格、代码及 http／https／mailto 链接。标签必须闭合；仅允许安全的行内样式，不允许图片或脚本。</v-alert>
 
     <div class="editor-layout">
       <v-card flat class="panel editor-panel">
@@ -208,10 +288,11 @@ onMounted(load)
       </v-card>
 
       <v-card flat class="panel preview-panel">
-        <div class="panel-heading"><div><h2>实时预览</h2><p>使用示例值替换占位符，并在无脚本沙箱中渲染。</p></div><v-icon color="primary">mdi-eye-outline</v-icon></div>
+        <div class="panel-heading"><div><h2>模板预览</h2><p>{{ previewVerified ? '已按真实退信渲染链路通过服务端验证。' : '编辑器示意；点击服务端预览核对实际退信渲染。' }}</p></div><v-btn variant="tonal" size="small" prepend-icon="mdi-server-network" :loading="previewBusy" :disabled="saving || !valid" @click="verifyPreview">服务端预览</v-btn></div>
+        <v-alert v-if="previewError" type="error" variant="tonal" density="compact" class="mx-5 mt-4">{{ previewError }}</v-alert>
         <div class="mail-preview">
           <div class="mail-header">
-            <dl><div><dt>发件人</dt><dd>{{ settings.senderDisplayName || '—' }}</dd></div><div><dt>收件人</dt><dd>original-sender@northwind.cn</dd></div><div><dt>主题</dt><dd>{{ renderedSubject || '—' }}</dd></div></dl>
+            <dl><div><dt>发件人</dt><dd>{{ settings.senderDisplayName || '—' }}</dd></div><div><dt>收件人</dt><dd>original-sender@northwind.cn</dd></div><div><dt>主题</dt><dd>{{ previewSubject || '—' }}</dd></div></dl>
           </div>
           <iframe title="退信 HTML 实时预览" sandbox="" :srcdoc="previewDocument" />
         </div>
@@ -219,6 +300,16 @@ onMounted(load)
       </v-card>
     </div>
   </template>
+
+  <v-dialog v-model="resetConfirmOpen" max-width="500" persistent>
+    <v-card><v-card-title>撤销未保存的模板修改？</v-card-title><v-card-text>将恢复上次从服务器读取的内容，当前草稿无法找回。</v-card-text><v-card-actions><v-spacer /><v-btn variant="text" @click="resetConfirmOpen = false">继续编辑</v-btn><v-btn color="error" variant="tonal" @click="reset">确认撤销</v-btn></v-card-actions></v-card>
+  </v-dialog>
+  <v-dialog v-model="defaultsConfirmOpen" max-width="500" persistent>
+    <v-card><v-card-title>载入系统默认模板？</v-card-title><v-card-text>默认值会替换当前编辑草稿；只有点击“保存模板”后才会写入服务器。</v-card-text><v-card-actions><v-spacer /><v-btn variant="text" @click="defaultsConfirmOpen = false">继续编辑</v-btn><v-btn color="primary" variant="tonal" @click="restoreDefaults">载入默认值</v-btn></v-card-actions></v-card>
+  </v-dialog>
+  <v-dialog :model-value="leaveConfirmOpen" max-width="500" persistent>
+    <v-card><v-card-title>离开并放弃模板修改？</v-card-title><v-card-text>消息模板尚未保存，离开后当前草稿将无法找回。</v-card-text><v-card-actions><v-spacer /><v-btn variant="text" @click="finishLeave(false)">继续编辑</v-btn><v-btn color="error" variant="tonal" @click="finishLeave(true)">放弃并离开</v-btn></v-card-actions></v-card>
+  </v-dialog>
 </template>
 
 <style scoped>

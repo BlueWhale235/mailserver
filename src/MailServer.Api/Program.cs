@@ -1989,6 +1989,40 @@ api.MapGet("/settings/message-templates", async (
     Results.Ok(await administration.GetMessageTemplateSettingsAsync(cancellationToken)))
     .RequirePermission(PermissionCodes.SettingsDetail);
 
+api.MapGet("/settings/message-templates/defaults", () => Results.Ok(MessageTemplateDefaults.Create()))
+    .RequirePermission(PermissionCodes.SettingsDetail);
+
+api.MapPost("/settings/message-templates/preview", (
+    MessageTemplatePreviewRequest request, HttpContext http) =>
+{
+    try
+    {
+        if (string.IsNullOrWhiteSpace(request.Subject) || request.Subject.Length > 200
+            || request.Subject.Contains('\r') || request.Subject.Contains('\n')
+            || string.IsNullOrWhiteSpace(request.Body) || request.Body.Length > 8000)
+            throw new FormatException("主题或正文长度超出允许范围。");
+        MessageTemplateHtmlPolicy.Validate(request.Body);
+        var values = new Dictionary<string, string>
+        {
+            ["recipient"] = "customer@example.net",
+            ["reason"] = "550 5.1.1 收件人不存在",
+            ["queueId"] = "8f5d1b62-0b36-42d8-9bb5-1a81d9d12e40",
+            ["attempts"] = "5"
+        };
+        return Results.Ok(new
+        {
+            renderedSubject = SystemSettingsService.RenderTemplate(request.Subject, values),
+            renderedHtml = SystemSettingsService.RenderHtmlTemplate(request.Body, values)
+        });
+    }
+    catch (FormatException exception)
+    {
+        return Results.Problem(statusCode: 400, title: "消息模板预览失败", detail: exception.Message,
+            type: "https://mailserver.local/problems/invalid-message-template",
+            extensions: new Dictionary<string, object?> { ["traceId"] = http.TraceIdentifier });
+    }
+}).RequirePermission(PermissionCodes.SettingsDetail);
+
 api.MapPut("/settings/message-templates", async (
     MessageTemplateSettingsRequest request,
     HttpContext http,
@@ -2009,7 +2043,15 @@ api.MapPut("/settings/message-templates", async (
     }
     catch (ArgumentOutOfRangeException exception)
     {
-        return Results.BadRequest(new { error = exception.Message });
+        return Results.Problem(statusCode: 400, title: "消息模板无效", detail: exception.Message,
+            type: "https://mailserver.local/problems/invalid-message-template",
+            extensions: new Dictionary<string, object?> { ["traceId"] = http.TraceIdentifier });
+    }
+    catch (FormatException exception)
+    {
+        return Results.Problem(statusCode: 400, title: "消息模板无效", detail: exception.Message,
+            type: "https://mailserver.local/problems/invalid-message-template",
+            extensions: new Dictionary<string, object?> { ["traceId"] = http.TraceIdentifier });
     }
 }).RequirePermission(PermissionCodes.SettingsUpdate);
 
@@ -2158,6 +2200,7 @@ public sealed record MessageTemplateSettingsRequest(
     string PermanentFailureBody,
     string RetryExhaustedSubject,
     string RetryExhaustedBody);
+public sealed record MessageTemplatePreviewRequest(string Subject, string Body);
 public sealed record CertificateSelectionSettingsRequest(
     string? DefaultMailHostName,
     bool AllowSingleCertificateFallback);

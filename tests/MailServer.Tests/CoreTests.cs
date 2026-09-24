@@ -1460,6 +1460,29 @@ public sealed class CoreTests
                 new Dictionary<string, string> { ["reason"] = "<bad>", ["queueId"] = "abc" }));
     }
 
+    [Theory]
+    [InlineData("<script>alert(1)</script>")]
+    [InlineData("<p onclick='alert(1)'>bad</p>")]
+    [InlineData("<a href='javascript&#58;alert(1)'>bad</a>")]
+    [InlineData("<p style='background:url(https://bad.example/x)'>bad</p>")]
+    [InlineData("<img src='https://bad.example/tracker'>")]
+    [InlineData("<!DOCTYPE x><p>bad</p>")]
+    public async Task MessageTemplateRejectsUnsafeMarkupAndRendersLegacyTextSafely(string unsafeBody)
+    {
+        var factory = CreateFactory();
+        var service = CreateSystemSettingsService(factory);
+        var defaults = MessageTemplateDefaults.Create();
+        MessageTemplateHtmlPolicy.Validate(defaults.PermanentFailureBody);
+        MessageTemplateHtmlPolicy.Validate(defaults.RetryExhaustedBody);
+        await Assert.ThrowsAsync<FormatException>(() => service.SaveMessageTemplateSettingsAsync(
+            defaults with { PermanentFailureBody = unsafeBody }, CancellationToken.None));
+        var rendered = SystemSettingsService.RenderHtmlTemplate(unsafeBody,
+            new Dictionary<string, string> { ["reason"] = "<secret>" });
+        Assert.DoesNotContain("<script", rendered, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("<img", rendered, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("&lt;", rendered);
+    }
+
     [Fact]
     public async Task SystemSettingsSaveCertificateSelectionSettings()
     {

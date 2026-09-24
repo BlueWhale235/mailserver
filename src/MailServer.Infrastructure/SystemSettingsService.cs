@@ -306,7 +306,17 @@ public sealed class SystemSettingsService(
 
     public static string RenderHtmlTemplate(string template, IReadOnlyDictionary<string, string> values)
     {
-        var rendered = template;
+        string rendered;
+        try
+        {
+            MessageTemplateHtmlPolicy.Validate(template);
+            rendered = template;
+        }
+        catch (FormatException)
+        {
+            // 旧版本可能保存过不安全的正文；发信时把它当纯文本展示，避免执行标记。
+            rendered = $"<pre>{WebUtility.HtmlEncode(template)}</pre>";
+        }
         foreach (var value in values)
         {
             rendered = rendered.Replace(
@@ -438,8 +448,13 @@ public sealed class SystemSettingsService(
             throw new ArgumentOutOfRangeException(nameof(settings), "Sender display name must contain between 1 and 120 characters.");
         if (permanentSubject.Length is < 1 or > 200 || retrySubject.Length is < 1 or > 200)
             throw new ArgumentOutOfRangeException(nameof(settings), "Template subjects must contain between 1 and 200 characters.");
+        if (permanentSubject.Contains('\r') || permanentSubject.Contains('\n')
+            || retrySubject.Contains('\r') || retrySubject.Contains('\n'))
+            throw new FormatException("Template subjects cannot contain line breaks.");
         if (permanentBody.Length is < 1 or > 8000 || retryBody.Length is < 1 or > 8000)
             throw new ArgumentOutOfRangeException(nameof(settings), "Message template bodies must contain between 1 and 8000 characters.");
+        MessageTemplateHtmlPolicy.Validate(permanentBody);
+        MessageTemplateHtmlPolicy.Validate(retryBody);
         return new MessageTemplateSettingsView(senderName, permanentSubject, permanentBody, retrySubject, retryBody);
     }
 

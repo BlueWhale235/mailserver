@@ -742,6 +742,13 @@ function createDnsCheck(domain: MockDomain): MockDnsCheck {
     checkedAt: domain.dnsCheckedAt ?? new Date().toISOString(),
   }
 }
+const previewTemplateDefaults = {
+  senderDisplayName: 'Mail Delivery Subsystem',
+  permanentFailureSubject: 'Delivery Status Notification (Failure)',
+  permanentFailureBody: '<section><h2>Delivery failed</h2><p>Delivery to <strong>{recipient}</strong> failed permanently.</p><pre>{reason}</pre><p>Original queue id: <code>{queueId}</code></p></section>',
+  retryExhaustedSubject: 'Delivery Status Notification (Retry exhausted)',
+  retryExhaustedBody: '<section><h2>Delivery could not be completed</h2><p>Delivery to <strong>{recipient}</strong> could not be completed after {attempts} attempts.</p><pre>{reason}</pre></section>',
+}
 
 function createUnpublishedDnsCheck(domain: MockDomain, selector = 'mail'): MockDnsCheck {
   return {
@@ -1300,6 +1307,17 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
     delete previewApiKeyGrants[key.id]
     return undefined as T
   }
+  if (url.pathname === '/settings/message-templates/defaults' && method === 'GET') return structuredClone(previewTemplateDefaults) as T
+  if (url.pathname === '/settings/message-templates/preview' && method === 'POST') {
+    const request = JSON.parse(String(init.body)) as { subject: string; body: string }
+    if (!request.subject?.trim() || !request.body?.trim() || /<script\b|\son\w+\s*=|(?:javascript|data)\s*:/i.test(request.body)) throw new Error('消息模板包含不安全的 HTML')
+    const values: Record<string, string> = { recipient: 'customer@example.net', reason: '550 5.1.1 收件人不存在', queueid: '8f5d1b62-0b36-42d8-9bb5-1a81d9d12e40', attempts: '5' }
+    const replace = (value: string, encode: boolean) => value.replace(/\{(recipient|reason|queueId|attempts)\}/gi, (_, key: string) => {
+      const sample = values[key.toLowerCase()] ?? ''
+      return encode ? sample.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;') : sample
+    })
+    return { renderedSubject: replace(request.subject, false), renderedHtml: replace(request.body, true) } as T
+  }
   if (previewSettings[url.pathname]) {
     if (method === 'PUT') {
       const input = JSON.parse(String(init.body)) as Record<string, unknown>
@@ -1312,6 +1330,7 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
         if (senderName.length < 1 || senderName.length > 120) throw new Error('发件人显示名称必须为 1 至 120 个字符')
         if (permanentSubject.length < 1 || permanentSubject.length > 200 || retrySubject.length < 1 || retrySubject.length > 200) throw new Error('模板主题必须为 1 至 200 个字符')
         if (permanentBody.length < 1 || permanentBody.length > 8000 || retryBody.length < 1 || retryBody.length > 8000) throw new Error('消息模板正文必须为 1 至 8000 个字符')
+        if (/<script\b|\son\w+\s*=|(?:javascript|data)\s*:/i.test(permanentBody + retryBody)) throw new Error('消息模板包含不安全的 HTML')
         previewSettings[url.pathname] = {
           senderDisplayName: senderName,
           permanentFailureSubject: permanentSubject,
