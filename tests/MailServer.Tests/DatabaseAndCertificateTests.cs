@@ -128,7 +128,7 @@ public sealed class DatabaseAndCertificateTests
                 Assert.False(await db.Messages.AnyAsync(x => x.Id == unreferencedMessageId));
             }
             await queue.CompleteAsync(leased[0].Id, DeliveryResult.Temporary(
-                "451 temporary", diagnostic: new DeliveryDiagnostic("SMTP",
+                "451 token=hidden-token sender@example.com", diagnostic: new DeliveryDiagnostic("SMTP",
                     SessionSummary: "C: AUTH PLAIN c2VjcmV0\r\nC: RCPT TO:<recipient@example.net>\r\nC: DATA\r\nmail body")),
                 CancellationToken.None);
             await using (var db = await factory.CreateDbContextAsync())
@@ -140,7 +140,23 @@ public sealed class DatabaseAndCertificateTests
                 Assert.DoesNotContain("c2VjcmV0", attempt.SessionSummary);
                 Assert.DoesNotContain("mail body", attempt.SessionSummary);
                 Assert.True(System.Text.Encoding.UTF8.GetByteCount(attempt.SessionSummary!) <= DeliverySessionSummary.MaximumBytes);
+                Assert.DoesNotContain("hidden-token", attempt.Response);
+                Assert.DoesNotContain("sender@example.com", attempt.Response);
+                var savedJob = await db.DeliveryJobs.SingleAsync(x => x.Id == leased[0].Id);
+                Assert.DoesNotContain("hidden-token", savedJob.LastError);
+                Assert.DoesNotContain("sender@example.com", savedJob.LastError);
+                // Old stored values still need filtering at the admin read boundary.
+                attempt.Response = "550 token=legacy-token legacy@example.net";
+                savedJob.LastError = "550 token=legacy-token legacy@example.net";
+                await db.SaveChangesAsync();
             }
+            var oldAttempts = await administration.GetDeliveryAttemptsAsync(leased[0].Id, CancellationToken.None);
+            Assert.DoesNotContain("legacy-token", oldAttempts[0].Response);
+            Assert.DoesNotContain("legacy@example.net", oldAttempts[0].Response);
+            var oldJobs = await administration.SearchDeliveryJobsAsync(null, null, DeliveryJobScope.Active, 1, 20, CancellationToken.None);
+            var oldJob = Assert.Single(oldJobs.Items, x => x.Id == leased[0].Id);
+            Assert.DoesNotContain("legacy-token", oldJob.LastError);
+            Assert.DoesNotContain("legacy@example.net", oldJob.LastError);
             var report = new TlsReportDelivery
             {
                 PolicyDomain = "example.net",

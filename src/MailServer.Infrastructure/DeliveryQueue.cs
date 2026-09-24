@@ -103,6 +103,7 @@ public sealed class DeliveryQueue(
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         var job = await db.DeliveryJobs.SingleAsync(x => x.Id == jobId, cancellationToken);
         var diagnostic = result.Diagnostic;
+        var safeResponse = DeliverySessionSummary.SanitizeResponse(result.Response);
         var attempt = new DeliveryAttempt
         {
             DeliveryJobId = job.Id,
@@ -119,13 +120,13 @@ public sealed class DeliveryQueue(
             DurationMilliseconds = diagnostic?.DurationMilliseconds ?? 0,
             FailureCategory = diagnostic?.FailureCategory,
             SessionSummary = DeliverySessionSummary.Sanitize(diagnostic?.SessionSummary),
-            Response = Truncate(result.Response, 4_096)
+            Response = safeResponse
         };
         db.DeliveryAttempts.Add(attempt);
 
         job.LeaseOwner = null;
         job.LeaseUntil = null;
-        job.LastError = result.Succeeded ? null : result.Response;
+        job.LastError = result.Succeeded ? null : safeResponse;
         job.UpdatedAt = DateTimeOffset.UtcNow;
         var options = await settings.GetDeliveryOptionsAsync(cancellationToken);
         if (result.Succeeded)
@@ -156,11 +157,8 @@ public sealed class DeliveryQueue(
             job.Attempts,
             job.NextAttemptAt,
             result.RemoteHost ?? string.Empty,
-            result.Response);
+            safeResponse);
     }
-
-    private static string? Truncate(string? value, int maximumLength) =>
-        string.IsNullOrEmpty(value) || value.Length <= maximumLength ? value : value[..maximumLength];
 
     public async Task RetryNowAsync(Guid jobId, CancellationToken cancellationToken)
     {

@@ -9,6 +9,7 @@ public static partial class DeliverySessionSummary
     public const int MaximumBytes = 64 * 1024;
     public const string RedactedMarker = "[敏感信息已脱敏]";
     public const string TruncatedMarker = "[摘要已截断至 64 KiB]";
+    public const string ResponseTruncatedMarker = "[响应已截断]";
     private const string BodyMarker = "[邮件正文已省略]";
 
     [GeneratedRegex(@"(?i)(?<![\w@])(?:[\p{L}\p{N}._%+\-]+)@(?:[\p{L}\p{N}\-]+\.)+[\p{L}\p{N}\-]+")]
@@ -84,6 +85,19 @@ public static partial class DeliverySessionSummary
             bytes += rune.Utf8SequenceLength;
         }
         return result.Append('\n').Append(TruncatedMarker).ToString();
+    }
+
+    public static string? SanitizeResponse(string? input)
+    {
+        var safe = Sanitize(input);
+        if (safe is null || safe.Length <= 4096) return safe;
+        var result = new StringBuilder(4096);
+        foreach (var rune in safe.EnumerateRunes())
+        {
+            if (result.Length + rune.Utf16SequenceLength + ResponseTruncatedMarker.Length > 4096) break;
+            result.Append(rune.ToString());
+        }
+        return result.Append(ResponseTruncatedMarker).ToString();
     }
 
     private static string ReplaceAndMark(Regex regex, string input, string replacement, ref bool redacted)

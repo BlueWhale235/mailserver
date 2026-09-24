@@ -1590,7 +1590,9 @@ public sealed class AdminApplicationService(
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         var query = db.DeliveryJobs.AsNoTracking();
         if (status is not null) query = query.Where(x => x.Status == status);
-        return await query.OrderByDescending(x => x.UpdatedAt).Take(200).ToListAsync(cancellationToken);
+        var jobs = await query.OrderByDescending(x => x.UpdatedAt).Take(200).ToListAsync(cancellationToken);
+        foreach (var job in jobs) job.LastError = DeliverySessionSummary.SanitizeResponse(job.LastError);
+        return jobs;
     }
 
     public async Task<IReadOnlyList<DeliveryAttemptDetail>> GetDeliveryAttemptsAsync(
@@ -1612,6 +1614,7 @@ public sealed class AdminApplicationService(
         // 旧版本保存的摘要也必须在 API 边界脱敏，避免升级后继续泄露历史数据。
         return attempts.Select(attempt => attempt with
         {
+            Response = DeliverySessionSummary.SanitizeResponse(attempt.Response),
             SessionSummary = DeliverySessionSummary.Sanitize(attempt.SessionSummary)
         }).ToArray();
     }
@@ -1663,7 +1666,10 @@ public sealed class AdminApplicationService(
                 x.CreatedAt,
                 x.UpdatedAt))
             .ToListAsync(cancellationToken);
-        return new PagedResult<DeliveryJobView>(rows, page, pageSize, total);
+        return new PagedResult<DeliveryJobView>(rows.Select(row => row with
+        {
+            LastError = DeliverySessionSummary.SanitizeResponse(row.LastError)
+        }).ToArray(), page, pageSize, total);
     }
 
     public async Task<DeliveryQueueSummary> GetDeliveryQueueSummaryAsync(CancellationToken cancellationToken)

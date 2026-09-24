@@ -170,6 +170,22 @@ public sealed class CoreTests
     }
 
     [Fact]
+    public void DeliveryResponseRedactsAndFitsPersistentField()
+    {
+        var response = DeliverySessionSummary.SanitizeResponse(
+            "550 token=hidden-value recipient@example.net\r\nC: DATA\r\nprivate body");
+        Assert.NotNull(response);
+        Assert.DoesNotContain("hidden-value", response);
+        Assert.DoesNotContain("recipient@example.net", response);
+        Assert.DoesNotContain("private body", response);
+        Assert.DoesNotContain('\r', response);
+        var longResponse = DeliverySessionSummary.SanitizeResponse(new string('x', 5000));
+        Assert.NotNull(longResponse);
+        Assert.True(longResponse.Length <= 4096);
+        Assert.EndsWith(DeliverySessionSummary.ResponseTruncatedMarker, longResponse);
+    }
+
+    [Fact]
     public void DeliverySessionSummaryLimitsUtf8BytesWithoutSplittingCharacters()
     {
         var summary = DeliverySessionSummary.Sanitize(new string('中', 40_000));
