@@ -91,7 +91,7 @@ public interface IRecycleBinService
         DateTimeOffset? purgeFrom, DateTimeOffset? purgeTo,
         int page, int pageSize, CancellationToken cancellationToken);
     Task RestoreAsync(Guid queueId, string actor, CancellationToken cancellationToken);
-    Task PurgeAsync(Guid queueId, CancellationToken cancellationToken);
+    Task PurgeAsync(Guid queueId, string actor, CancellationToken cancellationToken);
 }
 
 public interface ICleanupQueueService

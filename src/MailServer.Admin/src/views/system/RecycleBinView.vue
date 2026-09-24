@@ -3,7 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import PageHeader from '../../components/PageHeader.vue'
 import StatusPill from '../../components/StatusPill.vue'
 import { usePermission } from '../../composables/usePermission'
-import { api } from '../../lib/api'
+import { ApiError, api } from '../../lib/api'
 
 type ResourceType = 'Domain' | 'Account' | 'Mailbox' | 'MailboxMessage' | 'ContentFile'
 type QueueStatus = 'Pending' | 'Failed'
@@ -143,7 +143,9 @@ async function execute() {
     target.value = null
     await load()
   } catch (cause) {
-    dialogError.value = cause instanceof Error ? cause.message : '操作失败，请稍后重试'
+    dialogError.value = cause instanceof ApiError && cause.status === 409
+      ? `${cause.message} 请刷新列表核对状态后再操作。`
+      : cause instanceof Error ? cause.message : '操作失败，请稍后重试'
   } finally {
     actionLoading.value = false
   }
@@ -151,6 +153,12 @@ async function execute() {
 
 function isRestorable(item: RecycleBinItem) {
   return item.resourceType !== 'ContentFile' && Boolean(item.resourceId)
+    && new Date(item.purgeAfter).getTime() > Date.now()
+}
+
+function restoreUnavailableReason(item: RecycleBinItem) {
+  if (new Date(item.purgeAfter).getTime() <= Date.now()) return '保留期已结束，无法恢复'
+  return '内容文件没有可恢复的数据库对象'
 }
 
 function typeView(value: ResourceType) {
@@ -278,7 +286,7 @@ onMounted(load)
                 variant="text"
                 prepend-icon="mdi-restore"
                 :disabled="loading || !isRestorable(item)"
-                :title="isRestorable(item) ? `恢复 ${item.displayName}` : '内容文件没有可恢复的数据库对象'"
+                :title="isRestorable(item) ? `恢复 ${item.displayName}` : restoreUnavailableReason(item)"
                 :aria-label="isRestorable(item) ? `恢复 ${item.displayName}` : `${item.displayName} 不支持恢复`"
                 @click="openAction(item, 'restore')"
               >恢复</v-btn>

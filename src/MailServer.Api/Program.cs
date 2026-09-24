@@ -432,13 +432,23 @@ api.MapGet("/recycle-bin/search", async (
 }).RequirePermission(PermissionCodes.TaskRead);
 api.MapPost("/recycle-bin/{id:guid}/restore", async (Guid id, HttpContext http, IRecycleBinService recycle, CancellationToken cancellationToken) =>
 {
-    await recycle.RestoreAsync(id, Actor(http), cancellationToken);
-    return Results.NoContent();
+    try
+    {
+        await recycle.RestoreAsync(id, Actor(http), cancellationToken);
+        return Results.NoContent();
+    }
+    catch (KeyNotFoundException) { return AdminApiProblems.NotFound(http, "未找到该回收站对象。"); }
+    catch (RecycleBinConflictException exception) { return AdminApiProblems.Conflict(http, exception.Message); }
 }).RequirePermission(PermissionCodes.TaskManage);
-api.MapDelete("/recycle-bin/{id:guid}", async (Guid id, IRecycleBinService recycle, CancellationToken cancellationToken) =>
+api.MapDelete("/recycle-bin/{id:guid}", async (Guid id, HttpContext http, IRecycleBinService recycle, CancellationToken cancellationToken) =>
 {
-    await recycle.PurgeAsync(id, cancellationToken);
-    return Results.NoContent();
+    try
+    {
+        await recycle.PurgeAsync(id, Actor(http), cancellationToken);
+        return Results.NoContent();
+    }
+    catch (KeyNotFoundException) { return AdminApiProblems.NotFound(http, "未找到该回收站对象。"); }
+    catch (RecycleBinConflictException exception) { return AdminApiProblems.Conflict(http, exception.Message); }
 }).RequirePermission(PermissionCodes.TaskManage);
 api.MapGet("/audit", async (
     string? search,

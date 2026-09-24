@@ -87,6 +87,8 @@ public sealed class QuotaReconciliationService(
     }
 }
 
+public sealed class RecycleBinConflictException(string message) : Exception(message);
+
 public sealed class CleanupQueueService(
     IDbContextFactory<MailDbContext> factory,
     IMessageContentStore contentStore,
@@ -198,15 +200,20 @@ public sealed class CleanupQueueService(
     public async Task RestoreAsync(Guid queueId, string actor, CancellationToken cancellationToken)
     {
         await using var db = await factory.CreateDbContextAsync(cancellationToken);
-        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
-        var item = await db.CleanupQueue.SingleAsync(x => x.Id == queueId, cancellationToken);
-        if (item.Status is CleanupQueueStatus.Completed or CleanupQueueStatus.Processing)
-            throw new InvalidOperationException("The item can no longer be restored.");
-        if (item.ResourceId is not { } id) throw new InvalidOperationException("The item has no restorable resource.");
+        await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
+        var item = await db.CleanupQueue.SingleOrDefaultAsync(x => x.Id == queueId, cancellationToken)
+            ?? throw new KeyNotFoundException("Recycle-bin item not found.");
+        if (item.Status is not (CleanupQueueStatus.Pending or CleanupQueueStatus.Failed))
+            throw new RecycleBinConflictException("该对象已进入清理或恢复流程，请刷新回收站。");
+        if (item.PurgeAfter <= clock.UtcNow)
+            throw new RecycleBinConflictException("保留期已结束，请刷新回收站确认清理状态。");
+        if (item.ResourceId is not { } id)
+            throw new RecycleBinConflictException("该对象没有可恢复的数据库记录。");
         switch (item.ResourceType)
         {
             case CleanupResourceType.Domain:
-                var domain = await db.Domains.IgnoreQueryFilters().SingleAsync(x => x.Id == id, cancellationToken);
+                var domain = await db.Domains.IgnoreQueryFilters().SingleOrDefaultAsync(x => x.Id == id, cancellationToken);
+                if (domain?.DeletedAt is null) throw new RecycleBinConflictException("域已恢复或被清理，请刷新回收站。");
                 domain.DeletedAt = domain.PurgeAfter = null; domain.DeletedBy = null; domain.IsActive = true;
                 foreach (var account in await db.Accounts.IgnoreQueryFilters().Where(x => x.DomainId == id).ToListAsync(cancellationToken))
                 { account.DeletedAt = account.PurgeAfter = null; account.DeletedBy = null; account.IsEnabled = true; }
@@ -219,7 +226,10 @@ public sealed class CleanupQueueService(
                 { mailboxMessage.DeletedAt = mailboxMessage.PurgeAfter = null; mailboxMessage.DeletedBy = null; }
                 break;
             case CleanupResourceType.Account:
-                var restoredAccount = await db.Accounts.IgnoreQueryFilters().SingleAsync(x => x.Id == id, cancellationToken);
+                var restoredAccount = await db.Accounts.IgnoreQueryFilters().SingleOrDefaultAsync(x => x.Id == id, cancellationToken);
+                if (restoredAccount?.DeletedAt is null) throw new RecycleBinConflictException("账号已恢复或被清理，请刷新回收站。");
+                if (!await db.Domains.IgnoreQueryFilters().AnyAsync(x => x.Id == restoredAccount.DomainId && x.DeletedAt == null, cancellationToken))
+                    throw new RecycleBinConflictException("所属域尚未恢复，请先恢复域。");
                 restoredAccount.DeletedAt = restoredAccount.PurgeAfter = null; restoredAccount.DeletedBy = null; restoredAccount.IsEnabled = true;
                 var accountMailboxes = await db.Mailboxes.IgnoreQueryFilters().Where(x => x.AccountId == id).ToListAsync(cancellationToken);
                 foreach (var accountMailbox in accountMailboxes)
@@ -229,15 +239,23 @@ public sealed class CleanupQueueService(
                 { accountMailboxMessage.DeletedAt = accountMailboxMessage.PurgeAfter = null; accountMailboxMessage.DeletedBy = null; }
                 break;
             case CleanupResourceType.Mailbox:
-                var restoredMailbox = await db.Mailboxes.IgnoreQueryFilters().SingleAsync(x => x.Id == id, cancellationToken);
+                var restoredMailbox = await db.Mailboxes.IgnoreQueryFilters().SingleOrDefaultAsync(x => x.Id == id, cancellationToken);
+                if (restoredMailbox?.DeletedAt is null) throw new RecycleBinConflictException("邮箱文件夹已恢复或被清理，请刷新回收站。");
+                if (!await db.Accounts.IgnoreQueryFilters().AnyAsync(x => x.Id == restoredMailbox.AccountId
+                    && x.DeletedAt == null && x.Domain.DeletedAt == null, cancellationToken))
+                    throw new RecycleBinConflictException("所属账号或域尚未恢复，请先恢复上级对象。");
                 restoredMailbox.DeletedAt = restoredMailbox.PurgeAfter = null; restoredMailbox.DeletedBy = null;
                 break;
             case CleanupResourceType.MailboxMessage:
-                var message = await db.MailboxMessages.IgnoreQueryFilters().SingleAsync(x => x.Id == id, cancellationToken);
+                var message = await db.MailboxMessages.IgnoreQueryFilters().SingleOrDefaultAsync(x => x.Id == id, cancellationToken);
+                if (message?.DeletedAt is null) throw new RecycleBinConflictException("邮件已恢复或被清理，请刷新回收站。");
+                if (!await db.Mailboxes.IgnoreQueryFilters().AnyAsync(x => x.Id == message.MailboxId
+                    && x.DeletedAt == null && x.Account.DeletedAt == null && x.Account.Domain.DeletedAt == null, cancellationToken))
+                    throw new RecycleBinConflictException("所属文件夹、账号或域尚未恢复，请先恢复上级对象。");
                 message.DeletedAt = message.PurgeAfter = null; message.DeletedBy = null;
                 break;
             default:
-                throw new InvalidOperationException("This item cannot be restored.");
+                throw new RecycleBinConflictException("该对象类型不支持恢复。");
         }
         item.Status = CleanupQueueStatus.Restored;
         item.CompletedAt = clock.UtcNow;
@@ -246,8 +264,8 @@ public sealed class CleanupQueueService(
         await transaction.CommitAsync(cancellationToken);
     }
 
-    public async Task PurgeAsync(Guid queueId, CancellationToken cancellationToken) =>
-        await PurgeOneAsync(queueId, force: true, cancellationToken);
+    public async Task PurgeAsync(Guid queueId, string actor, CancellationToken cancellationToken) =>
+        await PurgeOneAsync(queueId, force: true, cancellationToken, actor);
 
     public async Task<ScheduledTaskRunResult> PurgeDueAsync(int batchSize, CancellationToken cancellationToken)
     {
@@ -262,20 +280,27 @@ public sealed class CleanupQueueService(
         return new ScheduledTaskRunResult(ids.Count, released);
     }
 
-    private async Task<long> PurgeOneAsync(Guid queueId, bool force, CancellationToken cancellationToken)
+    private async Task<long> PurgeOneAsync(Guid queueId, bool force, CancellationToken cancellationToken, string? actor = null)
     {
         var contentKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         long released = 0;
         await using (var db = await factory.CreateDbContextAsync(cancellationToken))
         {
             await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
-            var item = await db.CleanupQueue.SingleAsync(x => x.Id == queueId, cancellationToken);
-            if (item.Status == CleanupQueueStatus.Completed || item.Status == CleanupQueueStatus.Restored) return 0;
+            var item = await db.CleanupQueue.SingleOrDefaultAsync(x => x.Id == queueId, cancellationToken)
+                ?? throw new KeyNotFoundException("Recycle-bin item not found.");
+            if (item.Status is CleanupQueueStatus.Completed or CleanupQueueStatus.Restored or CleanupQueueStatus.Processing)
+            {
+                if (force) throw new RecycleBinConflictException("该对象已进入清理或恢复流程，请刷新回收站。");
+                return 0;
+            }
             if (!force && item.PurgeAfter > clock.UtcNow) return 0;
             item.Status = CleanupQueueStatus.Processing;
             item.Attempts++;
             try
             {
+                if (item.ResourceType == CleanupResourceType.ContentFile && !string.IsNullOrWhiteSpace(item.ContentKey))
+                    contentKeys.Add(item.ContentKey);
                 if (item.ResourceId is { } id)
                 {
                     switch (item.ResourceType)
@@ -341,6 +366,17 @@ public sealed class CleanupQueueService(
                     }
                 }
                 item.Status = CleanupQueueStatus.Completed; item.CompletedAt = clock.UtcNow; item.LastError = null;
+                if (actor is not null)
+                    db.AuditRecords.Add(new AuditRecord
+                    {
+                        Actor = actor,
+                        Action = "recycle.purge",
+                        Resource = $"cleanup:{queueId}",
+                        Detail = $"{item.ResourceType}; database cleanup completed; unreferenced content files are removed after commit.",
+                        Category = AuditCategory.Delete,
+                        Status = AuditStatus.Succeeded,
+                        RelatedId = item.ResourceId?.ToString()
+                    });
                 await db.SaveChangesAsync(cancellationToken);
                 foreach (var key in contentKeys)
                 {

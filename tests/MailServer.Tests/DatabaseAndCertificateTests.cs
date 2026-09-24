@@ -41,16 +41,35 @@ public sealed class DatabaseAndCertificateTests
             await using var services = collection.BuildServiceProvider();
             var factory = services.GetRequiredService<IDbContextFactory<MailDbContext>>();
             var now = DateTimeOffset.UtcNow;
+            Guid expiredQueueId;
+            Guid accountQueueId;
+            Guid processingQueueId;
+            Guid manualPurgeQueueId;
             await using (var db = await factory.CreateDbContextAsync())
             {
                 await db.Database.MigrateAsync();
                 var domain = new MailDomain { Name = "recycled.example", DeletedAt = now };
                 db.Domains.Add(domain);
+                var account = new MailAccount { DomainId = domain.Id, LocalPart = "old", PasswordHash = "test", DeletedAt = now };
+                db.Accounts.Add(account);
                 db.CleanupQueue.Add(new CleanupQueueItem
                 {
                     ResourceType = CleanupResourceType.Domain, ResourceId = domain.Id,
                     CreatedAt = now.AddDays(-2), PurgeAfter = now.AddDays(2)
                 });
+                var expired = new CleanupQueueItem { ResourceType = CleanupResourceType.Domain, ResourceId = domain.Id,
+                    Status = CleanupQueueStatus.Completed, PurgeAfter = now.AddDays(-1) };
+                var accountItem = new CleanupQueueItem { ResourceType = CleanupResourceType.Account, ResourceId = account.Id,
+                    PurgeAfter = now.AddDays(2) };
+                var processing = new CleanupQueueItem { ResourceType = CleanupResourceType.ContentFile,
+                    Status = CleanupQueueStatus.Processing, PurgeAfter = now.AddDays(2) };
+                var manualPurge = new CleanupQueueItem { ResourceType = CleanupResourceType.ContentFile,
+                    ContentKey = new string('a', 64), PurgeAfter = now.AddDays(3) };
+                expiredQueueId = expired.Id;
+                accountQueueId = accountItem.Id;
+                processingQueueId = processing.Id;
+                manualPurgeQueueId = manualPurge.Id;
+                db.CleanupQueue.AddRange(expired, accountItem, processing, manualPurge);
                 db.CleanupQueue.AddRange(Enumerable.Range(0, 25).Select(index => new CleanupQueueItem
                 {
                     ResourceType = CleanupResourceType.ContentFile,
@@ -64,15 +83,31 @@ public sealed class DatabaseAndCertificateTests
             var recycle = services.GetRequiredService<IRecycleBinService>();
             var first = await recycle.SearchAsync(null, null, null, null, null, null, null, 1, 20, CancellationToken.None);
             var second = await recycle.SearchAsync(null, null, null, null, null, null, null, 2, 20, CancellationToken.None);
-            Assert.Equal(26, first.TotalCount);
+            Assert.Equal(28, first.TotalCount);
             Assert.Equal(20, first.Items.Count);
-            Assert.Equal(6, second.Items.Count);
+            Assert.Equal(8, second.Items.Count);
             var failed = await recycle.SearchAsync(null, null, CleanupQueueStatus.Failed, null, null, null, null, 1, 20, CancellationToken.None);
             Assert.Equal(5, failed.TotalCount);
             var domainResult = await recycle.SearchAsync("recycled.example", CleanupResourceType.Domain, null,
                 now.AddDays(-3), now, now, now.AddDays(3), 1, 20, CancellationToken.None);
             Assert.Single(domainResult.Items);
             Assert.Equal("recycled.example", domainResult.Items[0].DisplayName);
+            await Assert.ThrowsAsync<RecycleBinConflictException>(() => recycle.RestoreAsync(expiredQueueId, "tester", CancellationToken.None));
+            await Assert.ThrowsAsync<RecycleBinConflictException>(() => recycle.RestoreAsync(accountQueueId, "tester", CancellationToken.None));
+            await Assert.ThrowsAsync<RecycleBinConflictException>(() => recycle.PurgeAsync(processingQueueId, "tester", CancellationToken.None));
+            await Assert.ThrowsAsync<KeyNotFoundException>(() => recycle.RestoreAsync(Guid.NewGuid(), "tester", CancellationToken.None));
+            var contentDirectory = Path.Combine(root, "messages", "aa", "aa");
+            Directory.CreateDirectory(contentDirectory);
+            var contentPath = Path.Combine(contentDirectory, $"{new string('a', 64)}.eml");
+            await File.WriteAllTextAsync(contentPath, "isolated test content");
+            await recycle.PurgeAsync(manualPurgeQueueId, "tester", CancellationToken.None);
+            Assert.False(File.Exists(contentPath));
+            await using (var db = await factory.CreateDbContextAsync())
+            {
+                Assert.Equal(CleanupQueueStatus.Completed, (await db.CleanupQueue.SingleAsync(x => x.Id == manualPurgeQueueId)).Status);
+                Assert.Contains(await db.AuditRecords.ToListAsync(), x => x.Action == "recycle.purge"
+                    && x.Actor == "tester" && x.Resource == $"cleanup:{manualPurgeQueueId}");
+            }
         }
         finally
         {
