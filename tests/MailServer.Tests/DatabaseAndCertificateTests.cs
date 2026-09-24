@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Security.Authentication;
 using System.Net.Security;
 using System.Security.Cryptography.X509Certificates;
+using System.Security.Claims;
 using MailServer.Api;
 using MailServer.Domain;
 using MailServer.Infrastructure;
@@ -19,6 +20,91 @@ namespace MailServer.Tests;
 
 public sealed class DatabaseAndCertificateTests
 {
+    [Fact]
+    public async Task PermissionDelegationCannotExceedActorCapabilitiesOrDomainScope()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-delegation-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Database:Provider"] = "Sqlite",
+                ["ConnectionStrings:MailDatabase"] = $"Data Source={Path.Combine(root, "mailserver.db")}",
+                ["Storage:RootPath"] = Path.Combine(root, "messages")
+            }).Build();
+            var collection = new ServiceCollection();
+            collection.AddLogging();
+            collection.AddSingleton<IConfiguration>(configuration);
+            collection.AddMailServerInfrastructure(configuration);
+            await using var services = collection.BuildServiceProvider();
+            var factory = services.GetRequiredService<IDbContextFactory<MailDbContext>>();
+            var primary = new AdminUser { UserName = "primary", PasswordHash = "test", CreatedAt = DateTimeOffset.UtcNow.AddDays(-1) };
+            var limited = new AdminUser { UserName = "limited", PasswordHash = "test" };
+            var allowed = new MailDomain { Name = "allowed.example" };
+            var hidden = new MailDomain { Name = "hidden.example" };
+            await using (var db = await factory.CreateDbContextAsync())
+            {
+                await db.Database.MigrateAsync();
+                db.AdminUsers.AddRange(primary, limited);
+                db.Domains.AddRange(allowed, hidden);
+                foreach (var code in new[] { PermissionCodes.IamManage, PermissionCodes.AdminAccountManage, PermissionCodes.ApiKeyManage })
+                {
+                    db.PermissionGrants.Add(new PermissionGrant
+                    {
+                        SubjectType = PermissionSubjectType.AdminUser,
+                        SubjectId = limited.Id,
+                        PermissionCode = code
+                    });
+                }
+                db.PermissionGrants.Add(new PermissionGrant
+                {
+                    SubjectType = PermissionSubjectType.AdminUser,
+                    SubjectId = limited.Id,
+                    PermissionCode = PermissionCodes.DomainRead,
+                    ResourceType = PermissionService.DomainResourceType,
+                    ResourceKey = allowed.Id.ToString()
+                });
+                await db.SaveChangesAsync();
+            }
+
+            var permissions = services.GetRequiredService<PermissionService>();
+            var principal = new ClaimsPrincipal(new ClaimsIdentity(
+                [new Claim(ClaimTypes.NameIdentifier, limited.Id.ToString())], "test"));
+            Assert.True(await permissions.CanDelegateGrantsAsync(principal,
+                [new PermissionGrantInput(PermissionCodes.DomainRead, "domain", allowed.Id.ToString())], CancellationToken.None));
+            Assert.False(await permissions.CanDelegateGrantsAsync(principal,
+                [new PermissionGrantInput(PermissionCodes.DomainRead, "domain", hidden.Id.ToString())], CancellationToken.None));
+            Assert.False(await permissions.CanDelegateGrantsAsync(principal,
+                [new PermissionGrantInput(PermissionCodes.DomainRead, "domain", "*")], CancellationToken.None));
+            Assert.False(await permissions.CanDelegateGrantsAsync(principal,
+                [new PermissionGrantInput(PermissionCodes.DomainManage, "domain", allowed.Id.ToString())], CancellationToken.None));
+            Assert.False(await permissions.CanDelegateGrantsAsync(principal,
+                [new PermissionGrantInput(PermissionCodes.QueueManage)], CancellationToken.None));
+            Assert.False(await permissions.CanDelegateGrantsAsync(principal,
+                [new PermissionGrantInput(PermissionCodes.FullAccess)], CancellationToken.None));
+            Assert.True(await permissions.CanDelegateGrantsAsync(principal,
+                [new PermissionGrantInput(PermissionCodes.AdminAccountRead)], CancellationToken.None));
+            var quarantineScope = await permissions.GetPermittedDomainScopeAsync(
+                principal, PermissionCodes.DomainQuarantineRead, CancellationToken.None);
+            Assert.False(quarantineScope.AllDomains);
+            Assert.Contains(allowed.Id, quarantineScope.DomainIds);
+            Assert.DoesNotContain(hidden.Id, quarantineScope.DomainIds);
+            Assert.True(await permissions.CanDelegateGrantsAsync(principal,
+                [new PermissionGrantInput(PermissionCodes.DomainQuarantineRead, "domain", allowed.Id.ToString())], CancellationToken.None));
+
+            var primaryPrincipal = new ClaimsPrincipal(new ClaimsIdentity(
+                [new Claim(ClaimTypes.NameIdentifier, primary.Id.ToString())], "test"));
+            Assert.True(await permissions.CanDelegateGrantsAsync(primaryPrincipal,
+                [new PermissionGrantInput(PermissionCodes.FullAccess)], CancellationToken.None));
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
     [Fact]
     public async Task PermissionDomainOptionsPageBeyondOneHundredAndRespectScope()
     {

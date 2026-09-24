@@ -1455,6 +1455,7 @@ api.MapGet("/permissions/catalog", (PermissionService permissions) =>
     .RequirePermission(PermissionCodes.IamManage);
 
 api.MapGet("/permissions/domains", async (
+    string code,
     string? search,
     int? page,
     int? pageSize,
@@ -1463,22 +1464,28 @@ api.MapGet("/permissions/domains", async (
     AdminApplicationService administration,
     CancellationToken cancellationToken) =>
 {
-    var scope = await permissions.GetPermittedDomainScopeAsync(http.User, PermissionCodes.DomainList, cancellationToken);
-    return Results.Ok(await administration.SearchPermissionDomainsAsync(
-        search, page ?? 1, pageSize ?? 20, scope, cancellationToken));
+    if (!PermissionCodes.SupportsDomainScope(code))
+        return AdminApiProblems.Validation(http, "code", "请选择支持域范围的权限代码。");
+    var scope = await permissions.GetPermittedDomainScopeAsync(http.User, code, cancellationToken);
+    var result = await administration.SearchPermissionDomainsAsync(
+        search, page ?? 1, pageSize ?? 20, scope, cancellationToken);
+    return Results.Ok(new { result.Items, result.Page, result.PageSize, result.TotalCount, canSelectAll = scope.AllDomains });
 }).RequirePermission(PermissionCodes.IamManage);
 
 api.MapGet("/permissions/domains/resolve", async (
+    string code,
     string? ids,
     HttpContext http,
     PermissionService permissions,
     AdminApplicationService administration,
     CancellationToken cancellationToken) =>
 {
+    if (!PermissionCodes.SupportsDomainScope(code))
+        return AdminApiProblems.Validation(http, "code", "请选择支持域范围的权限代码。");
     var values = ids?.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries) ?? [];
     if (values.Length > 100 || values.Any(value => !Guid.TryParse(value, out _)))
         return AdminApiProblems.Validation(http, "ids", "每次最多查询 100 个有效的域 ID。");
-    var scope = await permissions.GetPermittedDomainScopeAsync(http.User, PermissionCodes.DomainList, cancellationToken);
+    var scope = await permissions.GetPermittedDomainScopeAsync(http.User, code, cancellationToken);
     return Results.Ok(await administration.ResolvePermissionDomainsAsync(
         values.Select(Guid.Parse).Distinct().ToArray(), scope, cancellationToken));
 }).RequirePermission(PermissionCodes.IamManage);
@@ -1502,10 +1509,13 @@ api.MapPost("/admins", async (
     AdminUserRequest request,
     HttpContext http,
     AdminApplicationService administration,
+    PermissionService permissions,
     CancellationToken cancellationToken) =>
 {
     try
     {
+        if (!await permissions.CanDelegateGrantsAsync(http.User, request.Grants, cancellationToken))
+            return AdminApiProblems.Forbidden(http);
         var admin = await administration.CreateAdminUserAsync(
             request.UserName,
             request.Password,
@@ -1579,6 +1589,8 @@ api.MapPut("/admins/{id:guid}/grants", async (
 {
     try
     {
+        if (!await permissions.CanDelegateGrantsAsync(http.User, request.Grants, cancellationToken))
+            return AdminApiProblems.Forbidden(http);
         return Results.Ok(await permissions.ReplaceGrantsAsync(
             PermissionSubjectType.AdminUser,
             id,
@@ -1608,6 +1620,8 @@ api.MapPut("/api-keys/{id:guid}/grants", async (
 {
     try
     {
+        if (!await permissions.CanDelegateGrantsAsync(http.User, request.Grants, cancellationToken))
+            return AdminApiProblems.Forbidden(http);
         return Results.Ok(await permissions.ReplaceGrantsAsync(
             PermissionSubjectType.ApiKey,
             id,
@@ -1623,10 +1637,13 @@ api.MapPost("/api-keys", async (
     ApiKeyRequest request,
     HttpContext http,
     AdminApplicationService administration,
+    PermissionService permissions,
     CancellationToken cancellationToken) =>
 {
     try
     {
+        if (!await permissions.CanDelegateGrantsAsync(http.User, request.Grants, cancellationToken))
+            return AdminApiProblems.Forbidden(http);
         var key = await administration.CreateApiKeyAsync(
             request.Name,
             request.Grants,

@@ -3,15 +3,16 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { api } from '../lib/api'
 
 interface DomainOption { id: string; name: string }
-interface PagedResult<T> { items: T[]; totalCount: number }
+interface PagedResult<T> { items: T[]; totalCount: number; canSelectAll: boolean }
 
-defineProps<{ disabled?: boolean }>()
+const props = defineProps<{ permissionCode: string; disabled?: boolean }>()
 const selected = defineModel<string[]>({ required: true })
 const searchDraft = ref('')
 const search = ref('')
 const page = ref(1)
 const pageSize = 20
 const totalCount = ref(0)
+const canSelectAll = ref(false)
 const pageCount = computed(() => Math.max(1, Math.ceil(totalCount.value / pageSize)))
 const items = ref<DomainOption[]>([])
 const names = ref<Record<string, string>>({})
@@ -28,11 +29,12 @@ async function loadPage() {
   loading.value = true
   error.value = ''
   try {
-    const params = new URLSearchParams({ page: String(page.value), pageSize: String(pageSize) })
+    const params = new URLSearchParams({ code: props.permissionCode, page: String(page.value), pageSize: String(pageSize) })
     if (search.value) params.set('search', search.value)
     const result = await api<PagedResult<DomainOption>>(`/permissions/domains?${params}`)
     if (!active || current !== version) return
     totalCount.value = result.totalCount
+    canSelectAll.value = result.canSelectAll
     if (page.value > pageCount.value) {
       page.value = pageCount.value
       await loadPage()
@@ -54,7 +56,8 @@ async function resolveSelected(ids: string[]) {
   for (let index = 0; index < missing.length; index += 100) {
     const chunk = missing.slice(index, index + 100)
     try {
-      const resolved = await api<DomainOption[]>(`/permissions/domains/resolve?ids=${chunk.join(',')}`)
+      const params = new URLSearchParams({ code: props.permissionCode, ids: chunk.join(',') })
+      const resolved = await api<DomainOption[]>(`/permissions/domains/resolve?${params}`)
       if (!active) return
       for (const domain of resolved) names.value[domain.id] = domain.name
     } catch {
@@ -106,8 +109,9 @@ onBeforeUnmount(() => { active = false; version++ })
       </v-chip>
       <span v-if="!selected.length" class="text-medium-emphasis">尚未选择</span>
     </div>
+    <div v-if="allSelected && !canSelectAll && !loading && !error" class="domain-picker-message" role="alert">当前账号不能授予所有域，请从下方选择可授权的域。</div>
     <div class="domain-picker-list">
-      <v-checkbox :model-value="allSelected" label="所有域" hide-details density="compact" :disabled="disabled" @update:model-value="toggleAll" />
+      <v-checkbox v-if="canSelectAll" :model-value="allSelected" label="所有域" hide-details density="compact" :disabled="disabled" @update:model-value="toggleAll" />
       <v-progress-linear v-if="loading" indeterminate color="primary" />
       <div v-else-if="error" class="domain-picker-message" role="alert">{{ error }} <v-btn variant="text" size="small" @click="loadPage">重试</v-btn></div>
       <div v-else-if="!items.length" class="domain-picker-message">{{ search ? '没有符合条件的域' : '没有可选择的域' }}</div>

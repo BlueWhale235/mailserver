@@ -1527,7 +1527,7 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
     const matches = domains.filter(domain => !search || domain.name.includes(search))
       .sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id))
       .map(domain => ({ id: domain.id, name: domain.name }))
-    return page(matches, Number(url.searchParams.get('page') || 1), Number(url.searchParams.get('pageSize') || 20)) as T
+    return { ...page(matches, Number(url.searchParams.get('page') || 1), Number(url.searchParams.get('pageSize') || 20)), canSelectAll: true } as T
   }
   if (url.pathname === '/domains/search') {
     const search = url.searchParams.get('search')?.toLowerCase()

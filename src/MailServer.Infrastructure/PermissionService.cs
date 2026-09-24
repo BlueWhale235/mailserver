@@ -116,7 +116,7 @@ public static class PermissionCodes
     /// </summary>
     public static string? ManagementPermissionFor(string code)
     {
-        var canonical = code.Trim();
+        var canonical = code.Trim().ToLowerInvariant();
         return ReadToManageMap.TryGetValue(canonical, out var management) ? management : null;
     }
 }
@@ -170,7 +170,7 @@ public sealed class PermissionSnapshot
     public bool Has(string code, Guid? domainId = null)
     {
         if (FullAccess) return true;
-        var canonical = code.Trim();
+        var canonical = code.Trim().ToLowerInvariant();
         var management = PermissionCodes.ManagementPermissionFor(canonical);
         if (domainId is null)
         {
@@ -189,7 +189,7 @@ public sealed class PermissionSnapshot
     public bool HasAnyDomainPermission(string code)
     {
         if (FullAccess) return true;
-        var canonical = code.Trim();
+        var canonical = code.Trim().ToLowerInvariant();
         var management = PermissionCodes.ManagementPermissionFor(canonical);
         return AllDomainPermissions.Contains(canonical)
                || DomainPermissions.ContainsKey(canonical)
@@ -200,10 +200,20 @@ public sealed class PermissionSnapshot
     public bool HasAllDomains(string code)
     {
         if (FullAccess) return true;
-        var canonical = code.Trim();
+        var canonical = code.Trim().ToLowerInvariant();
         var management = PermissionCodes.ManagementPermissionFor(canonical);
-        return AllDomainPermissions.Contains(canonical)
-               || (management is not null && AllDomainPermissions.Contains(management));
+        if (AllDomainPermissions.Contains(canonical)
+            || (management is not null && AllDomainPermissions.Contains(management)))
+            return true;
+        return canonical switch
+        {
+            PermissionCodes.DomainQuarantineRead =>
+                AllDomainPermissions.Contains(PermissionCodes.DomainRead)
+                || AllDomainPermissions.Contains(PermissionCodes.DomainManage),
+            PermissionCodes.DomainQuarantineManage =>
+                AllDomainPermissions.Contains(PermissionCodes.DomainManage),
+            _ => false
+        };
     }
 
     private bool HasDomainPermission(string code, Guid domainId)
@@ -340,7 +350,7 @@ public sealed class PermissionService(IDbContextFactory<MailDbContext> dbFactory
             return new PermittedDomainScope(true, new HashSet<Guid>());
         }
 
-        var canonical = permissionCode.Trim();
+        var canonical = permissionCode.Trim().ToLowerInvariant();
         var management = PermissionCodes.ManagementPermissionFor(canonical);
         var result = new HashSet<Guid>();
         if (snapshot.DomainPermissions.TryGetValue(canonical, out var ids))
@@ -353,7 +363,53 @@ public sealed class PermissionService(IDbContextFactory<MailDbContext> dbFactory
             result.UnionWith(managementIds);
         }
 
+        if (canonical == PermissionCodes.DomainQuarantineRead)
+        {
+            if (snapshot.DomainPermissions.TryGetValue(PermissionCodes.DomainRead, out var readIds))
+                result.UnionWith(readIds);
+            if (snapshot.DomainPermissions.TryGetValue(PermissionCodes.DomainManage, out var manageIds))
+                result.UnionWith(manageIds);
+        }
+        else if (canonical == PermissionCodes.DomainQuarantineManage
+                 && snapshot.DomainPermissions.TryGetValue(PermissionCodes.DomainManage, out var manageIds))
+        {
+            result.UnionWith(manageIds);
+        }
+
         return new PermittedDomainScope(false, result);
+    }
+
+    public async Task<bool> CanDelegateGrantsAsync(
+        ClaimsPrincipal principal,
+        IReadOnlyCollection<PermissionGrantInput> grants,
+        CancellationToken cancellationToken)
+    {
+        var normalized = NormalizeGrantInputs(grants);
+        var snapshot = await GetSnapshotAsync(principal, cancellationToken);
+        foreach (var grant in normalized)
+        {
+            if (grant.PermissionCode == PermissionCodes.FullAccess)
+            {
+                if (!snapshot.FullAccess) return false;
+            }
+            else if (PermissionCodes.SupportsDomainScope(grant.PermissionCode))
+            {
+                if (grant.ResourceKey == AllResources)
+                {
+                    if (!snapshot.HasAllDomains(grant.PermissionCode)) return false;
+                }
+                else if (!Guid.TryParse(grant.ResourceKey, out var domainId)
+                         || !snapshot.Has(grant.PermissionCode, domainId))
+                {
+                    return false;
+                }
+            }
+            else if (!snapshot.Has(grant.PermissionCode))
+            {
+                return false;
+            }
+        }
+        return true;
     }
 
     public async Task<IReadOnlyList<PermissionGrantView>> GetGrantsAsync(

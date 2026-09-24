@@ -102,6 +102,7 @@ function selectedCount(group: PermissionCatalogGroup) {
           </div>
           <PermissionDomainPicker
             v-if="permission.supportsDomainScope && isSelected(permission.code)"
+            :permission-code="permission.code"
             :model-value="scopeValues(permission.code)"
             :disabled="disabled"
             class="permission-scope"
