@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Security.Authentication;
 using System.Net.Security;
 using System.Security.Cryptography.X509Certificates;
+using MailServer.Api;
 using MailServer.Domain;
 using MailServer.Infrastructure;
 using Microsoft.Data.Sqlite;
@@ -18,6 +19,77 @@ namespace MailServer.Tests;
 
 public sealed class DatabaseAndCertificateTests
 {
+    [Fact]
+    public async Task ReadinessReflectsStorageAndPendingMigrationsWithoutExposingPaths()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-readiness-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            var storage = Path.Combine(root, "messages");
+            var security = Path.Combine(root, "security");
+            var blocked = Path.Combine(root, "not-a-directory");
+            File.WriteAllText(blocked, "blocked");
+            var settings = new Dictionary<string, string?>
+            {
+                ["Database:Provider"] = "Sqlite",
+                ["ConnectionStrings:MailDatabase"] = $"Data Source={Path.Combine(root, "mailserver.db")}",
+                ["Storage:RootPath"] = storage,
+                ["SecurityAssets:RootPath"] = security
+            };
+            var configuration = new ConfigurationBuilder().AddInMemoryCollection(settings).Build();
+            var services = new ServiceCollection();
+            services.AddLogging();
+            services.AddMailServerInfrastructure(configuration);
+            {
+                await using var provider = services.BuildServiceProvider();
+                var factory = provider.GetRequiredService<IDbContextFactory<MailDbContext>>();
+                await using (var db = await factory.CreateDbContextAsync())
+                    await db.Database.MigrateAsync();
+
+                var healthy = await MailServerReadiness.CheckAsync(factory, configuration, CancellationToken.None);
+                Assert.Equal("ready", healthy.Status);
+                Assert.Equal("ready", healthy.Database);
+                Assert.Equal("ready", healthy.MessageStorage);
+                Assert.Equal("ready", healthy.SecurityAssets);
+
+                settings["Storage:RootPath"] = blocked;
+                var blockedStorage = await MailServerReadiness.CheckAsync(factory,
+                    new ConfigurationBuilder().AddInMemoryCollection(settings).Build(), CancellationToken.None);
+                Assert.Equal("unavailable", blockedStorage.Status);
+                Assert.Equal("unavailable", blockedStorage.MessageStorage);
+                Assert.DoesNotContain(root, System.Text.Json.JsonSerializer.Serialize(blockedStorage));
+
+                settings["Storage:RootPath"] = storage;
+                await using (var db = await factory.CreateDbContextAsync())
+                    await db.Database.ExecuteSqlRawAsync("DELETE FROM \"__EFMigrationsHistory\"");
+                var outdated = await MailServerReadiness.CheckAsync(factory, configuration, CancellationToken.None);
+                Assert.Equal("unavailable", outdated.Status);
+                Assert.Equal("migration-pending", outdated.Database);
+            }
+
+            settings["ConnectionStrings:MailDatabase"] =
+                $"Data Source={Path.Combine(root, "missing-parent", "mailserver.db")}";
+            var unavailableConfiguration = new ConfigurationBuilder().AddInMemoryCollection(settings).Build();
+            var unavailableServices = new ServiceCollection();
+            unavailableServices.AddLogging();
+            unavailableServices.AddMailServerInfrastructure(unavailableConfiguration);
+            await using (var unavailableProvider = unavailableServices.BuildServiceProvider())
+            {
+                var unavailableFactory = unavailableProvider.GetRequiredService<IDbContextFactory<MailDbContext>>();
+                var unavailable = await MailServerReadiness.CheckAsync(
+                    unavailableFactory, unavailableConfiguration, CancellationToken.None);
+                Assert.Equal("unavailable", unavailable.Status);
+                Assert.Equal("unavailable", unavailable.Database);
+            }
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
     [Fact]
     public async Task SqliteMigrationsAndQueueLeaseWorkEndToEnd()
     {

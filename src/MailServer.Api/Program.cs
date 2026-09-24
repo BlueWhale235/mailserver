@@ -280,7 +280,15 @@ app.MapGet("/api/v1/health", async (IDbContextFactory<MailDbContext> factory, Ca
 }).AllowAnonymous();
 
 app.MapGet("/api/v1/health/live", () => Results.Ok(new { status = "alive" })).AllowAnonymous();
-app.MapGet("/api/v1/health/ready", () => Results.Ok(new { status = "ready" })).AllowAnonymous();
+app.MapGet("/api/v1/health/ready", async (
+    IDbContextFactory<MailDbContext> dbFactory,
+    IConfiguration configuration,
+    CancellationToken cancellationToken) =>
+{
+    var snapshot = await MailServerReadiness.CheckAsync(dbFactory, configuration, cancellationToken);
+    return Results.Json(snapshot, statusCode: snapshot.Status == "ready"
+        ? StatusCodes.Status200OK : StatusCodes.Status503ServiceUnavailable);
+}).AllowAnonymous();
 app.MapPost("/api/v1/auth/token", async (
     LoginRequest request,
     HttpContext http,
