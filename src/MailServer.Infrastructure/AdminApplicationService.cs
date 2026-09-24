@@ -72,6 +72,8 @@ public sealed record ApiKeyView(
     DateTimeOffset? ExpiresAt,
     DateTimeOffset? RevokedAt);
 
+public sealed record PermissionDomainOption(Guid Id, string Name);
+
 public sealed record DeliveryRawMessageView(
     Guid DeliveryJobId,
     string FileName,
@@ -445,6 +447,42 @@ public sealed class AdminApplicationService(
             .Include(x => x.Certificate)
             .Include(x => x.DnsSettings)
             .OrderBy(x => x.Name)
+            .ToListAsync(cancellationToken);
+    }
+
+    public async Task<PagedResult<PermissionDomainOption>> SearchPermissionDomainsAsync(
+        string? search,
+        int page,
+        int pageSize,
+        PermittedDomainScope permittedScope,
+        CancellationToken cancellationToken)
+    {
+        page = Math.Max(1, page);
+        pageSize = Math.Clamp(pageSize, 5, 100);
+        var normalizedSearch = NullIfWhiteSpace(search)?.ToLowerInvariant();
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+        var query = BuildDomainQuery(db, permittedScope);
+        if (normalizedSearch is not null)
+            query = query.Where(domain => domain.Name.ToLower().Contains(normalizedSearch));
+        var total = await query.CountAsync(cancellationToken);
+        var items = await query.OrderBy(domain => domain.Name).ThenBy(domain => domain.Id)
+            .Skip((page - 1) * pageSize).Take(pageSize)
+            .Select(domain => new PermissionDomainOption(domain.Id, domain.Name))
+            .ToListAsync(cancellationToken);
+        return new PagedResult<PermissionDomainOption>(items, page, pageSize, total);
+    }
+
+    public async Task<IReadOnlyList<PermissionDomainOption>> ResolvePermissionDomainsAsync(
+        IReadOnlyCollection<Guid> ids,
+        PermittedDomainScope permittedScope,
+        CancellationToken cancellationToken)
+    {
+        if (ids.Count == 0) return [];
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+        return await BuildDomainQuery(db, permittedScope)
+            .Where(domain => ids.Contains(domain.Id))
+            .OrderBy(domain => domain.Name)
+            .Select(domain => new PermissionDomainOption(domain.Id, domain.Name))
             .ToListAsync(cancellationToken);
     }
 

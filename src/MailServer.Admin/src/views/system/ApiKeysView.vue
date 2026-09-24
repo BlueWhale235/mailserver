@@ -37,11 +37,6 @@ interface GrantInput {
   resourceKey: string
 }
 
-interface DomainOption {
-  id: string
-  name: string
-}
-
 interface PagedResult<T> {
   items: T[]
   page: number
@@ -69,7 +64,6 @@ const createResourcesLoading = ref(false)
 const createError = ref('')
 const createForm = ref({ name: '', expiresAt: null as string | null })
 const grantCatalog = ref<PermissionCatalogGroup[]>([])
-const permissionDomains = ref<DomainOption[]>([])
 const grantSelection = ref<GrantInput[]>([{ permissionCode: 'dashboard.read', resourceType: '', resourceKey: '' }])
 const createBaseline = ref('')
 
@@ -142,12 +136,7 @@ function applyFilters() {
 }
 
 async function loadPermissionResources() {
-  const [catalog, domains] = await Promise.all([
-    api<PermissionCatalogGroup[]>('/permissions/catalog'),
-    api<PagedResult<DomainOption>>('/domains/search?page=1&pageSize=100'),
-  ])
-  grantCatalog.value = catalog
-  permissionDomains.value = domains.items
+  grantCatalog.value = await api<PermissionCatalogGroup[]>('/permissions/catalog')
 }
 
 async function openCreate() {
@@ -430,7 +419,7 @@ onBeforeUnmount(() => {
         <v-alert type="info" variant="tonal" density="compact" class="mb-5">建议每个系统使用独立密钥，并只授予完成任务所需的最小权限。</v-alert>
         <div class="section-label">初始授权</div>
         <v-progress-linear v-if="createResourcesLoading" indeterminate color="primary" />
-        <PermissionGrantEditor v-else v-model="grantSelection" :catalog="grantCatalog" :domains="permissionDomains" :disabled="createLoading" />
+          <PermissionGrantEditor v-else v-model="grantSelection" :catalog="grantCatalog" :disabled="createLoading" />
       </v-card-text>
       <v-card-actions><v-spacer /><v-btn variant="text" :disabled="createLoading" @click="requestCloseCreate">取消</v-btn><v-btn color="primary" :loading="createLoading" :disabled="!createValid || createResourcesLoading" @click="createKey">创建 API Key</v-btn></v-card-actions>
     </v-card>
@@ -459,7 +448,7 @@ onBeforeUnmount(() => {
       <v-card-text class="grant-dialog-body">
         <v-alert v-if="editGrantsError" type="error" variant="tonal" density="compact" class="mb-3">{{ editGrantsError }}</v-alert>
         <v-progress-linear v-if="editGrantsLoading" indeterminate color="primary" />
-        <PermissionGrantEditor v-else v-model="editGrants" :catalog="grantCatalog" :domains="permissionDomains" :disabled="editGrantsSaving" />
+          <PermissionGrantEditor v-else v-model="editGrants" :catalog="grantCatalog" :disabled="editGrantsSaving" />
       </v-card-text>
       <v-card-actions><v-spacer /><v-btn variant="text" :disabled="editGrantsSaving" @click="requestCloseEditGrants">取消</v-btn><v-btn color="primary" :loading="editGrantsSaving" :disabled="editGrantsLoading || !editGrants.length || !editGrantsDirty" @click="saveEditGrants">保存授权</v-btn></v-card-actions>
     </v-card>

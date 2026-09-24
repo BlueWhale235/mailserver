@@ -1454,6 +1454,35 @@ api.MapGet("/permissions/catalog", (PermissionService permissions) =>
     Results.Ok(permissions.GetCatalog()))
     .RequirePermission(PermissionCodes.IamManage);
 
+api.MapGet("/permissions/domains", async (
+    string? search,
+    int? page,
+    int? pageSize,
+    HttpContext http,
+    PermissionService permissions,
+    AdminApplicationService administration,
+    CancellationToken cancellationToken) =>
+{
+    var scope = await permissions.GetPermittedDomainScopeAsync(http.User, PermissionCodes.DomainList, cancellationToken);
+    return Results.Ok(await administration.SearchPermissionDomainsAsync(
+        search, page ?? 1, pageSize ?? 20, scope, cancellationToken));
+}).RequirePermission(PermissionCodes.IamManage);
+
+api.MapGet("/permissions/domains/resolve", async (
+    string? ids,
+    HttpContext http,
+    PermissionService permissions,
+    AdminApplicationService administration,
+    CancellationToken cancellationToken) =>
+{
+    var values = ids?.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries) ?? [];
+    if (values.Length > 100 || values.Any(value => !Guid.TryParse(value, out _)))
+        return AdminApiProblems.Validation(http, "ids", "每次最多查询 100 个有效的域 ID。");
+    var scope = await permissions.GetPermittedDomainScopeAsync(http.User, PermissionCodes.DomainList, cancellationToken);
+    return Results.Ok(await administration.ResolvePermissionDomainsAsync(
+        values.Select(Guid.Parse).Distinct().ToArray(), scope, cancellationToken));
+}).RequirePermission(PermissionCodes.IamManage);
+
 api.MapGet("/admins", async (
     string? search,
     AdminUserStatusFilter? status,

@@ -1518,6 +1518,17 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
     } as T
   }
 
+  if (url.pathname === '/permissions/domains/resolve') {
+    const ids = new Set((url.searchParams.get('ids') ?? '').split(',').filter(Boolean))
+    return domains.filter(domain => ids.has(domain.id)).map(domain => ({ id: domain.id, name: domain.name })) as T
+  }
+  if (url.pathname === '/permissions/domains') {
+    const search = url.searchParams.get('search')?.trim().toLowerCase()
+    const matches = domains.filter(domain => !search || domain.name.includes(search))
+      .sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id))
+      .map(domain => ({ id: domain.id, name: domain.name }))
+    return page(matches, Number(url.searchParams.get('page') || 1), Number(url.searchParams.get('pageSize') || 20)) as T
+  }
   if (url.pathname === '/domains/search') {
     const search = url.searchParams.get('search')?.toLowerCase()
     const active = url.searchParams.get('isActive')

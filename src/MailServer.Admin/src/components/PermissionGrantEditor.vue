@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import PermissionDomainPicker from './PermissionDomainPicker.vue'
 
 interface PermissionCatalogItem {
   code: string
@@ -21,23 +21,12 @@ interface PermissionGrant {
   resourceKey: string
 }
 
-interface DomainOption {
-  id: string
-  name: string
-}
-
-const props = withDefaults(defineProps<{
+withDefaults(defineProps<{
   catalog: PermissionCatalogGroup[]
-  domains: DomainOption[]
   disabled?: boolean
 }>(), { disabled: false })
 
 const grants = defineModel<PermissionGrant[]>({ required: true })
-
-const domainItems = computed(() => [
-  { title: '所有域', value: '*' },
-  ...props.domains.map(domain => ({ title: domain.name, value: domain.id })),
-])
 
 function grantsFor(code: string) {
   return grants.value.filter(grant => grant.permissionCode === code)
@@ -111,15 +100,9 @@ function selectedCount(group: PermissionCatalogGroup) {
             <p>{{ permission.description }}</p>
             <code>{{ permission.code }}</code>
           </div>
-          <v-select
+          <PermissionDomainPicker
             v-if="permission.supportsDomainScope && isSelected(permission.code)"
             :model-value="scopeValues(permission.code)"
-            :items="domainItems"
-            label="授权域范围"
-            multiple
-            chips
-            closable-chips
-            hide-details="auto"
             :disabled="disabled"
             class="permission-scope"
             @update:model-value="value => updateScopes(permission, value)"
@@ -144,10 +127,10 @@ function selectedCount(group: PermissionCatalogGroup) {
 .permission-description { padding-top: 9px; }
 .permission-description p { margin: 0 0 3px; color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
 .permission-description code { color: var(--text-muted); font-size: 11px; }
-.permission-scope { grid-column: 1 / -1; max-width: 560px; margin: 2px 0 4px 38px; }
+.permission-scope { grid-column: 1 / -1; }
 @media (max-width: 720px) {
   .permission-list article { grid-template-columns: 1fr; }
   .permission-description { padding: 0 0 4px 38px; }
-  .permission-scope { grid-column: 1; margin-left: 38px; }
+  .permission-scope { grid-column: 1; }
 }
 </style>

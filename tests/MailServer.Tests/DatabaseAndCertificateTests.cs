@@ -20,6 +20,63 @@ namespace MailServer.Tests;
 public sealed class DatabaseAndCertificateTests
 {
     [Fact]
+    public async Task PermissionDomainOptionsPageBeyondOneHundredAndRespectScope()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-permission-domains-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Database:Provider"] = "Sqlite",
+                ["ConnectionStrings:MailDatabase"] = $"Data Source={Path.Combine(root, "mailserver.db")}",
+                ["Storage:RootPath"] = Path.Combine(root, "messages")
+            }).Build();
+            var collection = new ServiceCollection();
+            collection.AddLogging();
+            collection.AddSingleton<IConfiguration>(configuration);
+            collection.AddMailServerInfrastructure(configuration);
+            await using var services = collection.BuildServiceProvider();
+            var factory = services.GetRequiredService<IDbContextFactory<MailDbContext>>();
+            Guid hiddenId;
+            Guid allowedId;
+            await using (var db = await factory.CreateDbContextAsync())
+            {
+                await db.Database.MigrateAsync();
+                var domains = Enumerable.Range(1, 125)
+                    .Select(index => new MailDomain { Name = $"domain-{index:D3}.example" }).ToArray();
+                db.Domains.AddRange(domains);
+                await db.SaveChangesAsync();
+                allowedId = domains[124].Id;
+                hiddenId = domains[0].Id;
+            }
+
+            var administration = services.GetRequiredService<AdminApplicationService>();
+            var all = new PermittedDomainScope(true, new HashSet<Guid>());
+            var last = await administration.SearchPermissionDomainsAsync(null, 7, 20, all, CancellationToken.None);
+            Assert.Equal(125, last.TotalCount);
+            Assert.Equal(5, last.Items.Count);
+            Assert.Contains(last.Items, item => item.Id == allowedId);
+            Assert.Equal(1, (await administration.SearchPermissionDomainsAsync(
+                "DOMAIN-125", 1, 20, all, CancellationToken.None)).TotalCount);
+
+            var restricted = new PermittedDomainScope(false, new HashSet<Guid> { allowedId });
+            var visible = await administration.SearchPermissionDomainsAsync(null, 1, 20, restricted, CancellationToken.None);
+            Assert.Single(visible.Items);
+            Assert.Equal(allowedId, visible.Items[0].Id);
+            var resolved = await administration.ResolvePermissionDomainsAsync(
+                [allowedId, hiddenId], restricted, CancellationToken.None);
+            Assert.Single(resolved);
+            Assert.Equal(allowedId, resolved[0].Id);
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task ApiKeySearchPaginatesAndFiltersPersistedKeys()
     {
         var root = Path.Combine(Path.GetTempPath(), $"mailserver-api-keys-{Guid.NewGuid():N}");

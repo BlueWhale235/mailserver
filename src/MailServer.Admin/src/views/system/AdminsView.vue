@@ -35,11 +35,6 @@ interface GrantInput {
   resourceKey: string
 }
 
-interface DomainOption {
-  id: string
-  name: string
-}
-
 interface PagedResult<T> {
   items: T[]
   page: number
@@ -66,7 +61,6 @@ const createError = ref('')
 const createForm = ref({ userName: '', password: '', isEnabled: true })
 const createGrants = ref<GrantInput[]>([{ permissionCode: 'dashboard.read', resourceType: '', resourceKey: '' }])
 const createBaseline = ref('')
-const permissionDomains = ref<DomainOption[]>([])
 const permissionLoading = ref(false)
 
 const editOpen = ref(false)
@@ -112,12 +106,7 @@ const discardCopy = computed(() => {
 })
 
 async function loadPermissionResources() {
-  const [catalog, domains] = await Promise.all([
-    api<PermissionCatalogGroup[]>('/permissions/catalog'),
-    api<PagedResult<DomainOption>>('/domains/search?page=1&pageSize=100'),
-  ])
-  grantCatalog.value = catalog
-  permissionDomains.value = domains.items
+  grantCatalog.value = await api<PermissionCatalogGroup[]>('/permissions/catalog')
 }
 
 async function loadAdmins() {
@@ -417,7 +406,7 @@ onBeforeUnmount(() => {
         <v-switch v-model="createForm.isEnabled" label="立即启用" color="primary" />
         <div class="section-label">初始授权</div>
         <v-progress-linear v-if="permissionLoading" indeterminate class="mb-4" />
-        <PermissionGrantEditor v-else v-model="createGrants" :catalog="grantCatalog" :domains="permissionDomains" :disabled="createLoading" />
+          <PermissionGrantEditor v-else v-model="createGrants" :catalog="grantCatalog" :disabled="createLoading" />
       </v-card-text>
       <v-card-actions><v-spacer /><v-btn variant="text" :disabled="createLoading" @click="requestClose('create')">取消</v-btn><v-btn color="primary" :loading="createLoading" :disabled="!createValid || permissionLoading" @click="createAdmin">创建管理员</v-btn></v-card-actions>
     </v-card>
@@ -445,7 +434,7 @@ onBeforeUnmount(() => {
       </v-card-title>
       <v-card-text>
         <v-progress-linear v-if="grantLoading" indeterminate />
-        <PermissionGrantEditor v-else v-model="grantSelection" :catalog="grantCatalog" :domains="permissionDomains" :disabled="grantSaving" />
+          <PermissionGrantEditor v-else v-model="grantSelection" :catalog="grantCatalog" :disabled="grantSaving" />
       </v-card-text>
       <v-card-actions><v-spacer /><v-btn variant="text" :disabled="grantSaving" @click="requestClose('grants')">取消</v-btn><v-btn color="primary" :loading="grantSaving" :disabled="grantLoading || !grantSelection.length || !grantDirty" @click="saveGrants">保存授权</v-btn></v-card-actions>
     </v-card>
