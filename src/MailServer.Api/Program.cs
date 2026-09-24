@@ -397,6 +397,39 @@ api.MapPost("/tasks/{id:guid}/run", async (Guid id, HttpContext http, ITaskSched
 api.MapGet("/recycle-bin", async (IRecycleBinService recycle, CancellationToken cancellationToken) =>
     Results.Ok(await recycle.ListAsync(cancellationToken)))
     .RequirePermission(PermissionCodes.TaskRead);
+api.MapGet("/recycle-bin/search", async (
+    string? search, string? resourceType, string? status,
+    DateTimeOffset? deletedFrom, DateTimeOffset? deletedTo,
+    DateTimeOffset? purgeFrom, DateTimeOffset? purgeTo,
+    int? page, int? pageSize, HttpContext http, IRecycleBinService recycle, CancellationToken cancellationToken) =>
+{
+    if (page is < 1 || pageSize is < 1 or > 100)
+        return AdminApiProblems.Validation(http, "page", "页码必须大于零，每页最多 100 条。");
+    if (deletedFrom is { } start && deletedTo is { } end && end <= start)
+        return AdminApiProblems.Validation(http, "deletedTo", "删除时间的结束值必须晚于开始值。");
+    if (purgeFrom is { } purgeStart && purgeTo is { } purgeEnd && purgeEnd <= purgeStart)
+        return AdminApiProblems.Validation(http, "purgeTo", "清理时间的结束值必须晚于开始值。");
+    CleanupResourceType? parsedType = null;
+    if (!string.IsNullOrWhiteSpace(resourceType))
+    {
+        if (!Enum.TryParse<CleanupResourceType>(resourceType, true, out var value) || !Enum.IsDefined(value))
+            return AdminApiProblems.Validation(http, "resourceType", "请选择有效的对象类型。");
+        parsedType = value;
+    }
+    CleanupQueueStatus? parsedStatus = null;
+    if (!string.IsNullOrWhiteSpace(status))
+    {
+        if (!Enum.TryParse<CleanupQueueStatus>(status, true, out var value)
+            || value is not (CleanupQueueStatus.Pending or CleanupQueueStatus.Failed))
+            return AdminApiProblems.Validation(http, "status", "请选择有效的清理状态。");
+        parsedStatus = value;
+    }
+    var currentPage = page ?? 1;
+    var currentPageSize = pageSize ?? 20;
+    var result = await recycle.SearchAsync(search, parsedType, parsedStatus,
+        deletedFrom, deletedTo, purgeFrom, purgeTo, currentPage, currentPageSize, cancellationToken);
+    return Results.Ok(new { result.Items, Page = currentPage, PageSize = currentPageSize, result.TotalCount });
+}).RequirePermission(PermissionCodes.TaskRead);
 api.MapPost("/recycle-bin/{id:guid}/restore", async (Guid id, HttpContext http, IRecycleBinService recycle, CancellationToken cancellationToken) =>
 {
     await recycle.RestoreAsync(id, Actor(http), cancellationToken);

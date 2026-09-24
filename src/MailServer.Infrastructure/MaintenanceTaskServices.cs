@@ -108,6 +108,54 @@ public sealed class CleanupQueueService(
         var rows = await db.CleanupQueue.AsNoTracking()
             .Where(x => x.Status == CleanupQueueStatus.Pending || x.Status == CleanupQueueStatus.Failed)
             .OrderBy(x => x.PurgeAfter).ToListAsync(cancellationToken);
+        return await MapRowsAsync(db, rows, cancellationToken);
+    }
+
+    public async Task<(IReadOnlyList<RecycleBinItem> Items, int TotalCount)> SearchAsync(
+        string? search, CleanupResourceType? resourceType, CleanupQueueStatus? status,
+        DateTimeOffset? deletedFrom, DateTimeOffset? deletedTo,
+        DateTimeOffset? purgeFrom, DateTimeOffset? purgeTo,
+        int page, int pageSize, CancellationToken cancellationToken)
+    {
+        await using var db = await factory.CreateDbContextAsync(cancellationToken);
+        var query = db.CleanupQueue.AsNoTracking()
+            .Where(x => x.Status == CleanupQueueStatus.Pending || x.Status == CleanupQueueStatus.Failed);
+        if (resourceType is { } type) query = query.Where(x => x.ResourceType == type);
+        if (status is { } currentStatus) query = query.Where(x => x.Status == currentStatus);
+        if (deletedFrom is { } start) query = query.Where(x => x.CreatedAt >= start);
+        if (deletedTo is { } end) query = query.Where(x => x.CreatedAt < end);
+        if (purgeFrom is { } purgeStart) query = query.Where(x => x.PurgeAfter >= purgeStart);
+        if (purgeTo is { } purgeEnd) query = query.Where(x => x.PurgeAfter < purgeEnd);
+        if (!string.IsNullOrWhiteSpace(search))
+        {
+            var term = search.Trim();
+            var isId = Guid.TryParse(term, out var parsedId);
+            query = query.Where(x =>
+                (isId && (x.Id == parsedId || x.ResourceId == parsedId))
+                || (x.ContentKey != null && x.ContentKey.Contains(term))
+                || (x.ResourceType == CleanupResourceType.Domain && db.Domains.IgnoreQueryFilters()
+                    .Any(domain => domain.Id == x.ResourceId && domain.Name.Contains(term)))
+                || (x.ResourceType == CleanupResourceType.Account && db.Accounts.IgnoreQueryFilters()
+                    .Any(account => account.Id == x.ResourceId
+                        && (account.LocalPart.Contains(term) || account.Domain.Name.Contains(term))))
+                || (x.ResourceType == CleanupResourceType.Mailbox && db.Mailboxes.IgnoreQueryFilters()
+                    .Any(mailbox => mailbox.Id == x.ResourceId
+                        && (mailbox.Name.Contains(term) || mailbox.Account.LocalPart.Contains(term)
+                            || mailbox.Account.Domain.Name.Contains(term))))
+                || (x.ResourceType == CleanupResourceType.MailboxMessage && db.MailboxMessages.IgnoreQueryFilters()
+                    .Any(message => message.Id == x.ResourceId
+                        && (message.Mailbox.Name.Contains(term) || message.Mailbox.Account.LocalPart.Contains(term)
+                            || message.Mailbox.Account.Domain.Name.Contains(term)))));
+        }
+        var totalCount = await query.CountAsync(cancellationToken);
+        var rows = await query.OrderBy(x => x.PurgeAfter).ThenBy(x => x.Id)
+            .Skip((page - 1) * pageSize).Take(pageSize).ToListAsync(cancellationToken);
+        return (await MapRowsAsync(db, rows, cancellationToken), totalCount);
+    }
+
+    private static async Task<IReadOnlyList<RecycleBinItem>> MapRowsAsync(
+        MailDbContext db, IReadOnlyList<CleanupQueueItem> rows, CancellationToken cancellationToken)
+    {
         var resourceIds = rows.Where(x => x.ResourceId.HasValue).Select(x => x.ResourceId!.Value).Distinct().ToArray();
         var domainNames = (await db.Domains.IgnoreQueryFilters().AsNoTracking()
                 .Where(x => resourceIds.Contains(x.Id))

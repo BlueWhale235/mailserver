@@ -46,20 +46,19 @@ const target = ref<RecycleBinItem | null>(null)
 const action = ref<'restore' | 'purge'>('restore')
 const confirmation = ref('')
 const dialogError = ref('')
+const page = ref(1)
+const pageSize = 20
+const totalCount = ref(0)
+const totalPages = computed(() => Math.max(1, Math.ceil(totalCount.value / pageSize)))
+const appliedFilters = ref({ search: '', resourceType: '' as '' | ResourceType, status: '' as '' | QueueStatus })
+const filtersChanged = computed(() => (search.value?.trim() ?? '') !== appliedFilters.value.search
+  || resourceType.value !== appliedFilters.value.resourceType || status.value !== appliedFilters.value.status)
+let requestVersion = 0
 
-const filteredItems = computed(() => {
-  const needle = search.value?.trim().toLowerCase() ?? ''
-  return items.value.filter(item => {
-    const haystack = `${item.displayName} ${item.queueId} ${item.resourceId ?? ''}`.toLowerCase()
-    return (!needle || haystack.includes(needle))
-      && (!resourceType.value || item.resourceType === resourceType.value)
-      && (!status.value || item.status === status.value)
-  })
-})
 const totalBytes = computed(() => items.value.reduce((sum, item) => sum + item.estimatedBytes, 0))
 const failedCount = computed(() => items.value.filter(item => item.status === 'Failed').length)
 const urgentCount = computed(() => items.value.filter(item => new Date(item.purgeAfter).getTime() - Date.now() <= 72 * 60 * 60 * 1000).length)
-const activeFilterCount = computed(() => Number(Boolean(search.value?.trim())) + Number(Boolean(resourceType.value)) + Number(Boolean(status.value)))
+const activeFilterCount = computed(() => Number(Boolean(appliedFilters.value.search)) + Number(Boolean(appliedFilters.value.resourceType)) + Number(Boolean(appliedFilters.value.status)))
 const canRestoreTarget = computed(() => target.value ? isRestorable(target.value) : false)
 const canExecute = computed(() => {
   if (!target.value || actionLoading.value) return false
@@ -67,15 +66,29 @@ const canExecute = computed(() => {
 })
 
 async function load() {
+  const request = ++requestVersion
   loading.value = true
   error.value = ''
   try {
-    items.value = await api<RecycleBinItem[]>('/recycle-bin')
+    const params = new URLSearchParams({ page: String(page.value), pageSize: String(pageSize) })
+    if (appliedFilters.value.search) params.set('search', appliedFilters.value.search)
+    if (appliedFilters.value.resourceType) params.set('resourceType', appliedFilters.value.resourceType)
+    if (appliedFilters.value.status) params.set('status', appliedFilters.value.status)
+    const result = await api<{ items: RecycleBinItem[]; totalCount: number }>(`/recycle-bin/search?${params}`)
+    if (request !== requestVersion) return
+    items.value = result.items
+    totalCount.value = result.totalCount
+    if (page.value > totalPages.value) {
+      page.value = totalPages.value
+      await load()
+    }
   } catch (cause) {
+    if (request !== requestVersion) return
     items.value = []
+    totalCount.value = 0
     error.value = cause instanceof Error ? cause.message : '回收站加载失败'
   } finally {
-    loading.value = false
+    if (request === requestVersion) loading.value = false
   }
 }
 
@@ -83,6 +96,21 @@ function resetFilters() {
   search.value = ''
   resourceType.value = ''
   status.value = ''
+  appliedFilters.value = { search: '', resourceType: '', status: '' }
+  page.value = 1
+  void load()
+}
+
+function applyFilters() {
+  appliedFilters.value = { search: search.value?.trim() ?? '', resourceType: resourceType.value, status: status.value }
+  page.value = 1
+  void load()
+}
+
+function changePage(next: number) {
+  if (next < 1 || next > totalPages.value || next === page.value) return
+  page.value = next
+  void load()
 }
 
 function openAction(item: RecycleBinItem, operation: 'restore' | 'purge') {
@@ -184,11 +212,11 @@ onMounted(load)
   <v-alert v-if="error" type="error" variant="tonal" closable class="mb-4" @click:close="error = ''">{{ error }}</v-alert>
   <v-alert v-if="notice" type="success" variant="tonal" closable class="mb-4" @click:close="notice = ''">{{ notice }}</v-alert>
 
-  <section class="recycle-summary" aria-label="回收站摘要">
-    <div><span>待处理对象</span><strong>{{ items.length }}</strong><small>等待恢复或自动清理</small></div>
-    <div><span>预计可释放</span><strong>{{ formatBytes(totalBytes) }}</strong><small>最终释放量以清理结果为准</small></div>
-    <div><span>清理失败</span><strong :class="{ danger: failedCount }">{{ failedCount }}</strong><small>需要检查任务与存储状态</small></div>
-    <div><span>即将或已经到期</span><strong :class="{ warning: urgentCount }">{{ urgentCount }}</strong><small>72 小时内进入自动清理</small></div>
+  <section v-if="!error" class="recycle-summary" aria-label="回收站摘要">
+    <div><span>符合条件的对象</span><strong>{{ totalCount }}</strong><small>服务端筛选结果</small></div>
+    <div><span>本页预计可释放</span><strong>{{ formatBytes(totalBytes) }}</strong><small>最终释放量以清理结果为准</small></div>
+    <div><span>本页清理失败</span><strong :class="{ danger: failedCount }">{{ failedCount }}</strong><small>需要检查任务与存储状态</small></div>
+    <div><span>本页即将或已经到期</span><strong :class="{ warning: urgentCount }">{{ urgentCount }}</strong><small>72 小时内进入自动清理</small></div>
   </section>
 
   <v-alert type="warning" variant="tonal" density="compact" class="recycle-warning">
@@ -205,13 +233,15 @@ onMounted(load)
           prepend-inner-icon="mdi-magnify"
           clearable
           hide-details
+          @keyup.enter="applyFilters"
         />
         <v-select v-model="resourceType" :items="resourceTypes" label="资源类型" hide-details />
         <v-select v-model="status" :items="statusTypes" label="清理状态" hide-details />
       </div>
       <div class="recycle-filter-meta">
-        <span>{{ activeFilterCount ? `已应用 ${activeFilterCount} 项筛选` : `共 ${items.length} 个对象` }}</span>
-        <v-btn variant="text" size="small" :disabled="!activeFilterCount" @click="resetFilters">重置筛选</v-btn>
+        <span>{{ activeFilterCount ? `已应用 ${activeFilterCount} 项筛选 · 共 ${totalCount} 个对象` : `共 ${totalCount} 个对象` }}</span>
+        <v-btn variant="text" size="small" :disabled="!activeFilterCount && !filtersChanged" @click="resetFilters">重置筛选</v-btn>
+        <v-btn color="primary" size="small" :disabled="!filtersChanged" @click="applyFilters">应用筛选</v-btn>
       </div>
     </div>
 
@@ -221,14 +251,14 @@ onMounted(load)
       </thead>
       <tbody>
         <tr v-if="loading"><td colspan="7"><v-progress-linear indeterminate color="primary" /></td></tr>
-        <tr v-else-if="!filteredItems.length">
+        <tr v-else-if="!items.length && !error">
           <td colspan="7" class="recycle-empty">
             <v-icon size="34">mdi-delete-clock-outline</v-icon>
-            <b>{{ items.length ? '没有符合筛选条件的对象' : '回收站为空' }}</b>
-            <span>{{ items.length ? '调整搜索或筛选条件后重试' : '被软删除的域、账号、邮箱和邮件会显示在这里' }}</span>
+            <b>{{ activeFilterCount ? '没有符合筛选条件的对象' : '回收站为空' }}</b>
+            <span>{{ activeFilterCount ? '调整搜索或筛选条件后重试' : '被软删除的域、账号、邮箱和邮件会显示在这里' }}</span>
           </td>
         </tr>
-        <tr v-for="item in filteredItems" v-else :key="item.queueId">
+        <tr v-for="item in items" v-else :key="item.queueId">
           <td class="object-cell">
             <b>{{ item.displayName }}</b>
             <small>队列 {{ shortId(item.queueId) }}<template v-if="item.resourceId"> · 资源 {{ shortId(item.resourceId) }}</template></small>
@@ -267,6 +297,11 @@ onMounted(load)
         </tr>
       </tbody>
     </v-table>
+    <div v-if="!error && totalCount > pageSize" class="recycle-pagination">
+      <span>第 {{ page }} / {{ totalPages }} 页</span>
+      <v-btn size="small" variant="outlined" :disabled="loading || page <= 1" @click="changePage(page - 1)">上一页</v-btn>
+      <v-btn size="small" variant="outlined" :disabled="loading || page >= totalPages" @click="changePage(page + 1)">下一页</v-btn>
+    </div>
   </v-card>
 
   <v-dialog :model-value="Boolean(target)" max-width="600" :persistent="actionLoading" @update:model-value="value => { if (!value) closeDialog() }">
@@ -337,6 +372,7 @@ onMounted(load)
 .recycle-filters { display: grid; grid-template-columns: minmax(280px, 1.6fr) minmax(160px, .7fr) minmax(150px, .65fr); gap: 10px; width: min(800px, 75%); }
 .recycle-filter-meta { display: flex; align-items: center; gap: 8px; color: var(--text-muted); font-size: 12px; white-space: nowrap; }
 .recycle-table :deep(th) { white-space: nowrap; }
+.recycle-pagination { display: flex; align-items: center; justify-content: flex-end; gap: 10px; padding: 14px 20px; color: var(--text-muted); font-size: 12px; }
 .recycle-table :deep(td) { color: var(--text-secondary); font-size: 12px; }
 .object-cell { min-width: 250px; }
 .object-cell b, .object-cell small, .purge-date, .purge-date + small { display: block; }

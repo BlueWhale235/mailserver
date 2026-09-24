@@ -1493,6 +1493,17 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
     }
     return { plugin: structuredClone(plugin), definitions: structuredClone(configuration.definitions), values: structuredClone(configuration.values) } as T
   }
+  if (url.pathname === '/recycle-bin/search' && method === 'GET') {
+    const search = url.searchParams.get('search')?.trim().toLowerCase() ?? ''
+    const type = url.searchParams.get('resourceType')
+    const status = url.searchParams.get('status')
+    const page = Math.max(1, Number(url.searchParams.get('page') ?? 1))
+    const pageSize = Math.min(100, Math.max(1, Number(url.searchParams.get('pageSize') ?? 20)))
+    const matches = previewRecycle.filter(item =>
+      (!search || `${item.displayName} ${item.queueId} ${item.resourceId ?? ''}`.toLowerCase().includes(search))
+      && (!type || item.resourceType === type) && (!status || item.status === status))
+    return { items: structuredClone(matches.slice((page - 1) * pageSize, page * pageSize)), page, pageSize, totalCount: matches.length } as T
+  }
   if (url.pathname === '/recycle-bin' && method === 'GET') return structuredClone(previewRecycle) as T
   const recycleMatch = url.pathname.match(/^\/recycle-bin\/([^/]+)(\/restore)?$/)
   if (recycleMatch) {

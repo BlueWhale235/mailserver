@@ -85,6 +85,11 @@ public interface ITaskExecutionService
 public interface IRecycleBinService
 {
     Task<IReadOnlyList<RecycleBinItem>> ListAsync(CancellationToken cancellationToken);
+    Task<(IReadOnlyList<RecycleBinItem> Items, int TotalCount)> SearchAsync(
+        string? search, CleanupResourceType? resourceType, CleanupQueueStatus? status,
+        DateTimeOffset? deletedFrom, DateTimeOffset? deletedTo,
+        DateTimeOffset? purgeFrom, DateTimeOffset? purgeTo,
+        int page, int pageSize, CancellationToken cancellationToken);
     Task RestoreAsync(Guid queueId, string actor, CancellationToken cancellationToken);
     Task PurgeAsync(Guid queueId, CancellationToken cancellationToken);
 }

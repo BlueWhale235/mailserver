@@ -21,6 +21,67 @@ namespace MailServer.Tests;
 public sealed class DatabaseAndCertificateTests
 {
     [Fact]
+    public async Task RecycleBinSearchPagesAndFiltersDeletedRecordsOnSqlite()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-recycle-search-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Database:Provider"] = "Sqlite",
+                ["ConnectionStrings:MailDatabase"] = $"Data Source={Path.Combine(root, "mailserver.db")}",
+                ["Storage:RootPath"] = Path.Combine(root, "messages"),
+                ["SecurityAssets:RootPath"] = Path.Combine(root, "security")
+            }).Build();
+            var collection = new ServiceCollection();
+            collection.AddLogging();
+            collection.AddSingleton<IConfiguration>(configuration);
+            collection.AddMailServerInfrastructure(configuration);
+            await using var services = collection.BuildServiceProvider();
+            var factory = services.GetRequiredService<IDbContextFactory<MailDbContext>>();
+            var now = DateTimeOffset.UtcNow;
+            await using (var db = await factory.CreateDbContextAsync())
+            {
+                await db.Database.MigrateAsync();
+                var domain = new MailDomain { Name = "recycled.example", DeletedAt = now };
+                db.Domains.Add(domain);
+                db.CleanupQueue.Add(new CleanupQueueItem
+                {
+                    ResourceType = CleanupResourceType.Domain, ResourceId = domain.Id,
+                    CreatedAt = now.AddDays(-2), PurgeAfter = now.AddDays(2)
+                });
+                db.CleanupQueue.AddRange(Enumerable.Range(0, 25).Select(index => new CleanupQueueItem
+                {
+                    ResourceType = CleanupResourceType.ContentFile,
+                    ContentKey = $"content-{index:00}",
+                    Status = index % 5 == 0 ? CleanupQueueStatus.Failed : CleanupQueueStatus.Pending,
+                    CreatedAt = now.AddDays(-1), PurgeAfter = now.AddDays(3).AddMinutes(index)
+                }));
+                await db.SaveChangesAsync();
+            }
+
+            var recycle = services.GetRequiredService<IRecycleBinService>();
+            var first = await recycle.SearchAsync(null, null, null, null, null, null, null, 1, 20, CancellationToken.None);
+            var second = await recycle.SearchAsync(null, null, null, null, null, null, null, 2, 20, CancellationToken.None);
+            Assert.Equal(26, first.TotalCount);
+            Assert.Equal(20, first.Items.Count);
+            Assert.Equal(6, second.Items.Count);
+            var failed = await recycle.SearchAsync(null, null, CleanupQueueStatus.Failed, null, null, null, null, 1, 20, CancellationToken.None);
+            Assert.Equal(5, failed.TotalCount);
+            var domainResult = await recycle.SearchAsync("recycled.example", CleanupResourceType.Domain, null,
+                now.AddDays(-3), now, now, now.AddDays(3), 1, 20, CancellationToken.None);
+            Assert.Single(domainResult.Items);
+            Assert.Equal("recycled.example", domainResult.Items[0].DisplayName);
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task TaskExecutionSearchPagesFiltersAndRejectsActiveLease()
     {
         var root = Path.Combine(Path.GetTempPath(), $"mailserver-task-search-{Guid.NewGuid():N}");
