@@ -52,6 +52,27 @@ public sealed class MailRulesAndAliasesTests
     }
 
     [Fact]
+    public async Task FirewallMutationsPersistAuditRequestIds()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var factory = environment.Services.GetRequiredService<IDbContextFactory<MailDbContext>>();
+        var administration = environment.Services.GetRequiredService<AdminApplicationService>();
+        var created = await administration.CreateFirewallRuleAsync("198.51.100.41", "qa", "admin", CancellationToken.None, "trace-create");
+        Assert.Equal("198.51.100.41/32", created.Cidr);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => administration.CreateFirewallRuleAsync(
+            "198.51.100.41/32", "duplicate", "admin", CancellationToken.None, "trace-duplicate"));
+        await administration.UpdateFirewallRuleAsync(created.Id, false, "updated", "admin", CancellationToken.None, "trace-update");
+        await administration.DeleteFirewallRuleAsync(created.Id, "admin", CancellationToken.None, "trace-delete");
+        await using var db = await factory.CreateDbContextAsync();
+        Assert.False(await db.FirewallRules.AnyAsync(x => x.Id == created.Id));
+        var records = await db.AuditRecords.Where(x => x.Resource == $"firewall:{created.Id}").ToListAsync();
+        Assert.Equal(3, records.Count);
+        Assert.Contains(records, x => x.Action == "firewall.create" && x.RequestId == "trace-create");
+        Assert.Contains(records, x => x.Action == "firewall.update" && x.RequestId == "trace-update");
+        Assert.Contains(records, x => x.Action == "firewall.delete" && x.RequestId == "trace-delete");
+    }
+
+    [Fact]
     public async Task DomainSearchSupportsFullAddressesAndKeepsPagesDomainScoped()
     {
         await using var environment = await TestEnvironment.CreateAsync();

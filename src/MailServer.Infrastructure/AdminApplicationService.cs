@@ -372,7 +372,8 @@ public sealed class AdminApplicationService(
         string cidr,
         string? note,
         string actor,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? requestId = null)
     {
         var normalized = IpFirewallRules.NormalizeCidr(cidr);
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
@@ -387,7 +388,7 @@ public sealed class AdminApplicationService(
             UpdatedAt = now
         };
         db.FirewallRules.Add(rule);
-        AddAudit(db, actor, "firewall.create", $"firewall:{rule.Id}", normalized);
+        AddAudit(db, actor, "firewall.create", $"firewall:{rule.Id}", normalized, requestId);
         await db.SaveChangesAsync(cancellationToken);
         return new FirewallRuleView(rule.Id, rule.Cidr, rule.Note, rule.IsEnabled, rule.CreatedAt, rule.UpdatedAt);
     }
@@ -397,7 +398,8 @@ public sealed class AdminApplicationService(
         bool isEnabled,
         string? note,
         string actor,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? requestId = null)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         var rule = await db.FirewallRules.SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
@@ -405,7 +407,7 @@ public sealed class AdminApplicationService(
         rule.IsEnabled = isEnabled;
         rule.Note = NullIfWhiteSpace(note);
         rule.UpdatedAt = DateTimeOffset.UtcNow;
-        AddAudit(db, actor, "firewall.update", $"firewall:{rule.Id}", $"{rule.Cidr}; enabled={isEnabled}");
+        AddAudit(db, actor, "firewall.update", $"firewall:{rule.Id}", $"{rule.Cidr}; enabled={isEnabled}", requestId);
         await db.SaveChangesAsync(cancellationToken);
         return new FirewallRuleView(rule.Id, rule.Cidr, rule.Note, rule.IsEnabled, rule.CreatedAt, rule.UpdatedAt);
     }
@@ -413,13 +415,14 @@ public sealed class AdminApplicationService(
     public async Task DeleteFirewallRuleAsync(
         Guid id,
         string actor,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? requestId = null)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         var rule = await db.FirewallRules.SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
             ?? throw new KeyNotFoundException("Firewall rule not found.");
         db.FirewallRules.Remove(rule);
-        AddAudit(db, actor, "firewall.delete", $"firewall:{rule.Id}", rule.Cidr);
+        AddAudit(db, actor, "firewall.delete", $"firewall:{rule.Id}", rule.Cidr, requestId);
         await db.SaveChangesAsync(cancellationToken);
     }
 

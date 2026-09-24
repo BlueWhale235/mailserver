@@ -413,13 +413,15 @@ api.MapPost("/firewall/rules", async (
             request.Cidr,
             request.Note,
             Actor(http),
-            cancellationToken);
+            cancellationToken,
+            http.TraceIdentifier);
         return Results.Created($"/api/v1/firewall/rules/{rule.Id}", rule);
     }
-    catch (Exception exception) when (exception is FormatException or InvalidOperationException)
+    catch (FormatException exception)
     {
-        return Results.BadRequest(new { error = exception.Message });
+        return AdminApiProblems.Validation(http, nameof(FirewallRuleRequest.Cidr), exception.Message);
     }
+    catch (InvalidOperationException) { return AdminApiProblems.Conflict(http, "相同的 IP 或 CIDR 防火墙规则已存在，请检查现有规则。"); }
 }).RequirePermission(PermissionCodes.FirewallCreate);
 
 api.MapPut("/firewall/rules/{id:guid}", async (
@@ -436,9 +438,10 @@ api.MapPut("/firewall/rules/{id:guid}", async (
             request.IsEnabled,
             request.Note,
             Actor(http),
-            cancellationToken));
+            cancellationToken,
+            http.TraceIdentifier));
     }
-    catch (KeyNotFoundException) { return Results.NotFound(); }
+    catch (KeyNotFoundException) { return AdminApiProblems.NotFound(http, "防火墙规则不存在或已被删除。"); }
 }).RequirePermission(PermissionCodes.FirewallUpdate);
 
 api.MapDelete("/firewall/rules/{id:guid}", async (
@@ -449,10 +452,10 @@ api.MapDelete("/firewall/rules/{id:guid}", async (
 {
     try
     {
-        await administration.DeleteFirewallRuleAsync(id, Actor(http), cancellationToken);
+        await administration.DeleteFirewallRuleAsync(id, Actor(http), cancellationToken, http.TraceIdentifier);
         return Results.NoContent();
     }
-    catch (KeyNotFoundException) { return Results.NotFound(); }
+    catch (KeyNotFoundException) { return AdminApiProblems.NotFound(http, "防火墙规则不存在或已被删除。"); }
 }).RequirePermission(PermissionCodes.FirewallDelete);
 
 api.MapGet("/domains", async (
