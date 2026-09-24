@@ -2317,7 +2317,10 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
     if (!job) throw new Error('投递任务不存在')
     return structuredClone(deliveryAttempts[job.id] ?? [])
       .sort((left, right) => right.attemptNumber - left.attemptNumber)
-      .map(attempt => ({ ...attempt, sessionSummary: attempt.sessionSummary?.replace(/<[^<>\s@]+@([^<>\s]+)>/g, '<***@$1>') })) as T
+      .map(attempt => {
+        const summary = attempt.sessionSummary?.replace(/[\w.%+-]+@[\w.-]+\.[a-z]{2,}/gi, '[地址已脱敏]')
+        return { ...attempt, sessionSummary: summary !== attempt.sessionSummary ? `[敏感信息已脱敏]\n${summary}` : summary }
+      }) as T
   }
 
   const rawMatch = url.pathname.match(/^\/queues\/([^/]+)\/raw$/)

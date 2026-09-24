@@ -140,7 +140,7 @@ onBeforeUnmount(() => { ++requestVersion })
                   </div>
                   <p v-if="attempt.response" class="attempt-response">{{ attempt.response }}</p>
                   <details v-if="attempt.sessionSummary" class="session-summary">
-                    <summary>查看已脱敏会话摘要</summary>
+                    <summary>查看会话摘要 <span v-if="attempt.sessionSummary.includes('[敏感信息已脱敏]')">· 已脱敏</span><span v-if="attempt.sessionSummary.includes('[摘要已截断至 64 KiB]')">· 已截断</span></summary>
                     <pre>{{ attempt.sessionSummary }}</pre>
                   </details>
                 </article>

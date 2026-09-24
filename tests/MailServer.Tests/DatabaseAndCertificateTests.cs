@@ -125,6 +125,20 @@ public sealed class DatabaseAndCertificateTests
                 Assert.False(await db.DeliveryJobs.AnyAsync(x => x.Id == unreferencedJobId));
                 Assert.False(await db.Messages.AnyAsync(x => x.Id == unreferencedMessageId));
             }
+            await queue.CompleteAsync(leased[0].Id, DeliveryResult.Temporary(
+                "451 temporary", diagnostic: new DeliveryDiagnostic("SMTP",
+                    SessionSummary: "C: AUTH PLAIN c2VjcmV0\r\nC: RCPT TO:<recipient@example.net>\r\nC: DATA\r\nmail body")),
+                CancellationToken.None);
+            await using (var db = await factory.CreateDbContextAsync())
+            {
+                var attempt = await db.DeliveryAttempts.SingleAsync(x => x.DeliveryJobId == leased[0].Id);
+                Assert.StartsWith(DeliverySessionSummary.RedactedMarker, attempt.SessionSummary);
+                Assert.Contains("[认证会话已省略]", attempt.SessionSummary);
+                Assert.DoesNotContain("recipient@example.net", attempt.SessionSummary);
+                Assert.DoesNotContain("c2VjcmV0", attempt.SessionSummary);
+                Assert.DoesNotContain("mail body", attempt.SessionSummary);
+                Assert.True(System.Text.Encoding.UTF8.GetByteCount(attempt.SessionSummary!) <= DeliverySessionSummary.MaximumBytes);
+            }
             await services.VerifyMailDatabaseAsync();
         }
         finally

@@ -141,6 +141,91 @@ public sealed class CoreTests
     }
 
     [Fact]
+    public void DeliverySessionSummaryRedactsSecretsAddressesAndMessageBody()
+    {
+        var summary = DeliverySessionSummary.Sanitize(
+            "S: 220 mx.example.net\r\nC: MAIL FROM:<sender@example.com>\rC: AUTH PLAIN c2VjcmV0\n" +
+            "S: token=hidden-token Bearer another-secret\nC: DATA\nSubject: confidential\n\nmail body");
+
+        Assert.NotNull(summary);
+        Assert.StartsWith(DeliverySessionSummary.RedactedMarker, summary);
+        Assert.Contains("S: 220 mx.example.net\n", summary);
+        Assert.Contains("[地址已脱敏]", summary);
+        Assert.Contains("[认证会话已省略]", summary);
+        Assert.DoesNotContain('\r', summary);
+        Assert.DoesNotContain("sender@example.com", summary);
+        Assert.DoesNotContain("c2VjcmV0", summary);
+        Assert.DoesNotContain("hidden-token", summary);
+        Assert.DoesNotContain("another-secret", summary);
+        Assert.DoesNotContain("confidential", summary);
+        Assert.DoesNotContain("mail body", summary);
+        var bodySummary = DeliverySessionSummary.Sanitize("C: DATA\r\nSubject: confidential\r\n\r\nmail body");
+        Assert.Contains("[邮件正文已省略]", bodySummary);
+        Assert.DoesNotContain("confidential", bodySummary);
+        Assert.DoesNotContain("mail body", bodySummary);
+        var unusual = DeliverySessionSummary.Sanitize("RCPT TO:<\"quoted local\"@example.net>\nS: api key: hidden-value");
+        Assert.Contains("[含地址的行已省略]", unusual);
+        Assert.DoesNotContain("quoted local", unusual);
+        Assert.DoesNotContain("hidden-value", unusual);
+    }
+
+    [Fact]
+    public void DeliverySessionSummaryLimitsUtf8BytesWithoutSplittingCharacters()
+    {
+        var summary = DeliverySessionSummary.Sanitize(new string('中', 40_000));
+
+        Assert.NotNull(summary);
+        Assert.True(Encoding.UTF8.GetByteCount(summary) <= DeliverySessionSummary.MaximumBytes);
+        Assert.EndsWith(DeliverySessionSummary.TruncatedMarker, summary);
+        Assert.DoesNotContain('\uFFFD', summary);
+    }
+
+    [Fact]
+    public async Task DeliveryAttemptSummaryIsSanitizedOnWriteAndLegacyRead()
+    {
+        var factory = CreateFactory();
+        var settings = CreateSystemSettingsService(factory);
+        Guid jobId;
+        await using (var db = await factory.CreateDbContextAsync())
+        {
+            var job = new DeliveryJob
+            {
+                Message = new StoredMessage { ContentKey = "diagnostic-test", EnvelopeFrom = "from@example.com" },
+                Sender = "from@example.com",
+                Recipient = "to@example.net",
+                Status = DeliveryStatus.Processing,
+                Attempts = 1
+            };
+            db.DeliveryJobs.Add(job);
+            await db.SaveChangesAsync();
+            jobId = job.Id;
+        }
+
+        var queue = new DeliveryQueue(factory, settings,
+            Options.Create(new DatabaseOptions { Provider = DatabaseProvider.Sqlite }),
+            NullLogger<DeliveryQueue>.Instance);
+        await queue.CompleteAsync(jobId, DeliveryResult.Temporary(
+            "451 temporary", diagnostic: new DeliveryDiagnostic("SMTP",
+                SessionSummary: "C: AUTH LOGIN dG9rZW4=\r\nC: RCPT TO:<to@example.net>")), CancellationToken.None);
+
+        await using (var db = await factory.CreateDbContextAsync())
+        {
+            var attempt = await db.DeliveryAttempts.SingleAsync();
+            Assert.Contains(DeliverySessionSummary.RedactedMarker, attempt.SessionSummary);
+            Assert.DoesNotContain("to@example.net", attempt.SessionSummary);
+            attempt.SessionSummary = "S: 550 rejected user@example.org token=legacy-secret";
+            await db.SaveChangesAsync();
+        }
+
+        var administration = CreateAdministration(factory, settings, new CredentialService(), null!);
+        var visible = await administration.GetDeliveryAttemptsAsync(jobId, CancellationToken.None);
+        Assert.Single(visible);
+        Assert.Contains(DeliverySessionSummary.RedactedMarker, visible[0].SessionSummary);
+        Assert.DoesNotContain("user@example.org", visible[0].SessionSummary);
+        Assert.DoesNotContain("legacy-secret", visible[0].SessionSummary);
+    }
+
+    [Fact]
     public async Task PluginSettingsValidatePersistAndProtectSecrets()
     {
         var factory = CreateFactory();

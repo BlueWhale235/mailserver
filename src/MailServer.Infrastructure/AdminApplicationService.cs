@@ -1599,7 +1599,7 @@ public sealed class AdminApplicationService(
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         if (!await db.DeliveryJobs.AsNoTracking().AnyAsync(x => x.Id == deliveryJobId, cancellationToken))
             throw new KeyNotFoundException("Delivery job not found.");
-        return await db.DeliveryAttempts.AsNoTracking()
+        var attempts = await db.DeliveryAttempts.AsNoTracking()
             .Where(x => x.DeliveryJobId == deliveryJobId)
             .OrderByDescending(x => x.AttemptNumber)
             .Select(x => new DeliveryAttemptDetail(
@@ -1608,6 +1608,11 @@ public sealed class AdminApplicationService(
                 x.TlsProtocol, x.TlsCipherSuite, x.DurationMilliseconds, x.FailureCategory,
                 x.NextRetryAt, x.Response, x.SessionSummary, x.CreatedAt))
             .ToListAsync(cancellationToken);
+        // 旧版本保存的摘要也必须在 API 边界脱敏，避免升级后继续泄露历史数据。
+        return attempts.Select(attempt => attempt with
+        {
+            SessionSummary = DeliverySessionSummary.Sanitize(attempt.SessionSummary)
+        }).ToArray();
     }
 
     public async Task<PagedResult<DeliveryJobView>> SearchDeliveryJobsAsync(

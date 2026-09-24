@@ -118,7 +118,7 @@ public sealed class DeliveryQueue(
             TlsCipherSuite = diagnostic?.TlsCipherSuite,
             DurationMilliseconds = diagnostic?.DurationMilliseconds ?? 0,
             FailureCategory = diagnostic?.FailureCategory,
-            SessionSummary = Truncate(diagnostic?.SessionSummary, 65_536),
+            SessionSummary = DeliverySessionSummary.Sanitize(diagnostic?.SessionSummary),
             Response = Truncate(result.Response, 4_096)
         };
         db.DeliveryAttempts.Add(attempt);

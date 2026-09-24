@@ -137,3 +137,31 @@ it('distinguishes an attempts request failure from an empty attempt history', as
   expect(wrapper.text()).toContain('投递尝试加载失败')
   expect(wrapper.text()).not.toContain('尚无投递尝试')
 })
+
+it('labels a sanitized and truncated delivery session summary', async () => {
+  const timestamp = '2026-09-18T12:00:00Z'
+  const job: DeliveryJob = {
+    id: 'job-1', sender: 'sender@example.com', recipient: 'recipient@example.net',
+    status: 'Deferred', attempts: 1, nextAttemptAt: timestamp, createdAt: timestamp, updatedAt: timestamp,
+  }
+  vi.mocked(api).mockResolvedValueOnce([{
+    id: 'attempt-1', attemptNumber: 1, succeeded: false, permanentFailure: false,
+    stage: 'SMTP', durationMilliseconds: 10, response: '451 temporary', createdAt: timestamp,
+    sessionSummary: '[敏感信息已脱敏]\n[地址已脱敏]\n[摘要已截断至 64 KiB]',
+  }])
+  const wrapper = shallowMount(DeliveryJobDetailDialog, {
+    props: { modelValue: true, job },
+    global: { stubs: {
+      VDialog: { template: '<div><slot /></div>' }, VCard: { template: '<div><slot /></div>' },
+      VWindow: { template: '<div><slot /></div>' }, VWindowItem: { template: '<div><slot /></div>' },
+      VCardText: { template: '<div><slot /></div>' }, VTabs: true, VTab: true,
+      VBtn: true, VIcon: true, VAlert: true, VProgressLinear: true,
+      StatusPill: true,
+    } },
+  })
+  mounted.push(wrapper)
+  await flushPromises()
+  expect(wrapper.text()).toContain('查看会话摘要')
+  expect(wrapper.text()).toContain('· 已脱敏')
+  expect(wrapper.text()).toContain('· 已截断')
+})
