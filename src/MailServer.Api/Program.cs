@@ -352,13 +352,47 @@ api.MapGet("/tasks", async (ITaskExecutionService tasks, CancellationToken cance
 api.MapGet("/tasks/executions", async (int? take, ITaskExecutionService tasks, CancellationToken cancellationToken) =>
     Results.Ok(await tasks.ListExecutionsAsync(take ?? 100, cancellationToken)))
     .RequirePermission(PermissionCodes.TaskRead);
-api.MapPut("/tasks/{id:guid}", async (Guid id, TaskUpdateRequest request, ITaskExecutionService tasks, CancellationToken cancellationToken) =>
+api.MapGet("/tasks/executions/search", async (
+    Guid? taskId, string? status, DateTimeOffset? from, DateTimeOffset? to, int? page, int? pageSize,
+    HttpContext http, ITaskExecutionService tasks, CancellationToken cancellationToken) =>
 {
-    await tasks.UpdateAsync(id, request.Enabled, request.IntervalMinutes, request.TimeoutSeconds, request.BatchSize, cancellationToken);
-    return Results.NoContent();
+    if (page is < 1 || pageSize is < 1 or > 100)
+        return AdminApiProblems.Validation(http, "page", "页码必须大于零，每页最多 100 条。");
+    if (from is { } start && to is { } end && (end <= start || end - start > TimeSpan.FromDays(90)))
+        return AdminApiProblems.Validation(http, "to", "结束时间必须晚于开始时间，单次范围不能超过 90 天。");
+    TaskExecutionStatus? parsedStatus = null;
+    if (!string.IsNullOrWhiteSpace(status))
+    {
+        if (!Enum.TryParse<TaskExecutionStatus>(status, true, out var value) || !Enum.IsDefined(value))
+            return AdminApiProblems.Validation(http, "status", "请选择有效的执行状态。");
+        parsedStatus = value;
+    }
+    var currentPage = page ?? 1;
+    var currentPageSize = pageSize ?? 20;
+    var result = await tasks.SearchExecutionsAsync(taskId, parsedStatus, from, to, currentPage, currentPageSize, cancellationToken);
+    return Results.Ok(new { result.Items, Page = currentPage, PageSize = currentPageSize, result.TotalCount });
+}).RequirePermission(PermissionCodes.TaskRead);
+api.MapGet("/tasks/executions/{id:guid}", async (Guid id, HttpContext http, ITaskExecutionService tasks, CancellationToken cancellationToken) =>
+{
+    var execution = await tasks.GetExecutionAsync(id, cancellationToken);
+    return execution is null ? AdminApiProblems.NotFound(http, "未找到该次任务执行记录。") : Results.Ok(execution);
+}).RequirePermission(PermissionCodes.TaskRead);
+api.MapPut("/tasks/{id:guid}", async (Guid id, TaskUpdateRequest request, HttpContext http, ITaskExecutionService tasks, CancellationToken cancellationToken) =>
+{
+    try
+    {
+        await tasks.UpdateAsync(id, request.Enabled, request.IntervalMinutes, request.TimeoutSeconds, request.BatchSize, cancellationToken);
+        return Results.NoContent();
+    }
+    catch (TaskBusyException) { return AdminApiProblems.Conflict(http, "任务正在执行，请等待结束后再修改。"); }
+    catch (KeyNotFoundException) { return AdminApiProblems.NotFound(http, "未找到计划任务。"); }
 }).RequirePermission(PermissionCodes.TaskManage);
-api.MapPost("/tasks/{id:guid}/run", async (Guid id, ITaskScheduler tasks, CancellationToken cancellationToken) =>
-    Results.Accepted(value: new { executionId = await tasks.RunNowAsync(id, cancellationToken) }))
+api.MapPost("/tasks/{id:guid}/run", async (Guid id, HttpContext http, ITaskScheduler tasks, CancellationToken cancellationToken) =>
+{
+    try { return Results.Accepted(value: new { executionId = await tasks.RunNowAsync(id, cancellationToken) }); }
+    catch (TaskBusyException) { return AdminApiProblems.Conflict(http, "任务正在执行，请等待结束后重试。"); }
+    catch (KeyNotFoundException) { return AdminApiProblems.NotFound(http, "未找到计划任务。"); }
+})
     .RequirePermission(PermissionCodes.TaskManage);
 api.MapGet("/recycle-bin", async (IRecycleBinService recycle, CancellationToken cancellationToken) =>
     Results.Ok(await recycle.ListAsync(cancellationToken)))

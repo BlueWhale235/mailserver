@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { ApiError, api, jsonBody } from '../../lib/api'
 import PageHeader from '../../components/PageHeader.vue'
 import StatusPill from '../../components/StatusPill.vue'
@@ -61,6 +61,13 @@ const runLoading = ref(false)
 const executionDetail = ref<TaskExecution | null>(null)
 const executionStatusFilter = ref<'All' | TaskExecution['status']>('All')
 const executionTaskFilter = ref('All')
+const executionPage = ref(1)
+const executionPageSize = 20
+const executionTotalCount = ref(0)
+const executionLoading = ref(false)
+const executionError = ref('')
+const executionPageCount = computed(() => Math.max(1, Math.ceil(executionTotalCount.value / executionPageSize)))
+let executionRequest = 0
 
 const enabledCount = computed(() => tasks.value.filter(task => task.isEnabled).length)
 const runningCount = computed(() => tasks.value.filter(task => task.status === 'Running').length)
@@ -75,10 +82,6 @@ const executionTaskItems = computed(() => [
   { title: '全部任务', value: 'All' },
   ...tasks.value.map(task => ({ title: task.name, value: task.id })),
 ])
-
-const filteredExecutions = computed(() => executions.value.filter(execution =>
-  (executionStatusFilter.value === 'All' || execution.status === executionStatusFilter.value)
-  && (executionTaskFilter.value === 'All' || execution.scheduledTaskId === executionTaskFilter.value)))
 
 function taskStatus(task: ScheduledTask) {
   if (task.status === 'Running') return { label: '运行中', tone: 'warning' as const }
@@ -98,19 +101,57 @@ async function loadTasks() {
   loading.value = true
   error.value = ''
   try {
-    const [taskList, executionList] = await Promise.all([
-      api<ScheduledTask[]>('/tasks'),
-      api<TaskExecution[]>('/tasks/executions?take=50'),
-    ])
-    tasks.value = taskList
-    executions.value = executionList
+    tasks.value = await api<ScheduledTask[]>('/tasks')
   } catch (cause) {
     tasks.value = []
-    executions.value = []
     error.value = cause instanceof Error ? cause.message : '计划任务加载失败'
   } finally {
     loading.value = false
   }
+  await loadExecutions()
+}
+
+async function loadExecutions() {
+  const request = ++executionRequest
+  executionLoading.value = true
+  executionError.value = ''
+  const params = new URLSearchParams({ page: String(executionPage.value), pageSize: String(executionPageSize) })
+  if (executionTaskFilter.value !== 'All') params.set('taskId', executionTaskFilter.value)
+  if (executionStatusFilter.value !== 'All') params.set('status', executionStatusFilter.value)
+  try {
+    const result = await api<{ items: TaskExecution[]; totalCount: number }>(`/tasks/executions/search?${params}`)
+    if (request !== executionRequest) return
+    executions.value = result.items
+    executionTotalCount.value = result.totalCount
+    if (executionPage.value > executionPageCount.value) {
+      executionPage.value = executionPageCount.value
+      await loadExecutions()
+    }
+  } catch (cause) {
+    if (request !== executionRequest) return
+    executions.value = []
+    executionTotalCount.value = 0
+    executionError.value = cause instanceof Error ? cause.message : '执行历史加载失败'
+  } finally {
+    if (request === executionRequest) executionLoading.value = false
+  }
+}
+
+watch([executionTaskFilter, executionStatusFilter], () => {
+  executionPage.value = 1
+  void loadExecutions()
+})
+
+async function changeExecutionPage(page: number) {
+  if (page < 1 || page > executionPageCount.value || page === executionPage.value) return
+  executionPage.value = page
+  await loadExecutions()
+}
+
+async function openExecutionDetail(id: string) {
+  executionError.value = ''
+  try { executionDetail.value = await api<TaskExecution>(`/tasks/executions/${id}`) }
+  catch (cause) { executionError.value = cause instanceof Error ? cause.message : '执行详情加载失败' }
 }
 
 function openEdit(task: ScheduledTask) {
@@ -178,6 +219,7 @@ async function confirmRun() {
     runTarget.value = null
     notice.value = `${targetName} 已执行，记录 ${result.executionId.slice(0, 8)}`
     await loadTasks()
+    await openExecutionDetail(result.executionId)
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : '触发任务失败'
   } finally {
@@ -227,14 +269,14 @@ onMounted(loadTasks)
   <v-alert v-if="error" type="error" variant="tonal" closable class="mb-4" @click:close="error = ''">{{ error }}</v-alert>
   <v-alert v-if="notice" type="success" variant="tonal" closable class="mb-4" @click:close="notice = ''">{{ notice }}</v-alert>
 
-  <div class="task-summary" aria-label="计划任务状态摘要">
+  <div v-if="!error" class="task-summary" aria-label="计划任务状态摘要">
     <span><b>{{ tasks.length }}</b>任务总数</span>
     <span><b>{{ enabledCount }}</b>已启用</span>
     <span :class="{ 'is-active': runningCount > 0 }"><b>{{ runningCount }}</b>运行中</span>
     <span :class="{ 'is-danger': attentionCount > 0 }"><b>{{ attentionCount }}</b>需要关注</span>
   </div>
 
-  <v-card flat class="panel table-panel">
+  <v-card v-if="!error" flat class="panel table-panel">
     <div class="panel-head px-5 pt-5">
       <div><h2>任务配置</h2><p>手动执行前会再次确认；运行中的任务不能修改或重复触发</p></div>
     </div>
@@ -277,7 +319,7 @@ onMounted(loadTasks)
 
   <v-card flat class="panel table-panel mt-4">
     <div class="history-head">
-      <div><h2>执行历史</h2><p>最近 50 次执行；失败记录可展开查看完整原因</p></div>
+      <div><h2>执行历史</h2><p>按任务和状态在服务器筛选，共 {{ executionTotalCount }} 条记录</p></div>
       <div class="history-filters">
         <v-select v-model="executionTaskFilter" :items="executionTaskItems" label="任务" hide-details density="compact" />
         <v-select
@@ -289,20 +331,27 @@ onMounted(loadTasks)
         />
       </div>
     </div>
+    <v-alert v-if="executionError" type="error" variant="tonal" class="mx-5 mb-3">{{ executionError }} <v-btn size="small" variant="text" @click="loadExecutions">重试</v-btn></v-alert>
     <v-table>
       <thead><tr><th>任务</th><th>状态</th><th>处理结果</th><th>开始时间</th><th>耗时</th><th></th></tr></thead>
       <tbody>
-        <tr v-if="!filteredExecutions.length"><td colspan="6" class="text-center py-10 text-medium-emphasis">没有符合条件的执行记录</td></tr>
-        <tr v-for="execution in filteredExecutions" v-else :key="execution.id">
+        <tr v-if="executionLoading"><td colspan="6"><v-progress-linear indeterminate color="primary" /></td></tr>
+        <tr v-else-if="!executions.length && !executionError"><td colspan="6" class="text-center py-10 text-medium-emphasis">没有符合条件的执行记录</td></tr>
+        <tr v-for="execution in executions" v-else :key="execution.id">
           <td><b>{{ executionTaskName(execution) }}</b><small>第 {{ execution.attempt }} 次尝试</small></td>
           <td><StatusPill v-bind="executionStatus(execution.status)" /></td>
           <td>{{ execution.processedCount }} 项<small v-if="execution.releasedBytes">释放 {{ bytes(execution.releasedBytes) }}</small></td>
           <td>{{ new Date(execution.startedAt).toLocaleString('zh-CN') }}</td>
           <td>{{ executionDuration(execution) }}</td>
-          <td class="text-end"><v-btn size="small" variant="text" icon="mdi-text-box-search-outline" :aria-label="`查看 ${executionTaskName(execution)} 执行详情`" @click="executionDetail = execution" /></td>
+          <td class="text-end"><v-btn size="small" variant="text" icon="mdi-text-box-search-outline" :aria-label="`查看 ${executionTaskName(execution)} 执行详情`" @click="openExecutionDetail(execution.id)" /></td>
         </tr>
       </tbody>
     </v-table>
+    <div v-if="!executionError && executionTotalCount > executionPageSize" class="history-pagination">
+      <span>第 {{ executionPage }} / {{ executionPageCount }} 页</span>
+      <v-btn size="small" variant="outlined" :disabled="executionLoading || executionPage <= 1" @click="changeExecutionPage(executionPage - 1)">上一页</v-btn>
+      <v-btn size="small" variant="outlined" :disabled="executionLoading || executionPage >= executionPageCount" @click="changeExecutionPage(executionPage + 1)">下一页</v-btn>
+    </div>
   </v-card>
 
   <v-dialog v-model="editOpen" max-width="560" persistent>
@@ -371,6 +420,7 @@ onMounted(loadTasks)
 .history-head h2 { margin: 0 0 3px; font-size: 16px; }
 .history-head p { margin: 0; color: var(--text-muted); font-size: 12px; }
 .history-filters { display: grid; grid-template-columns: 220px 150px; gap: 10px; }
+.history-pagination { display: flex; align-items: center; justify-content: flex-end; gap: 10px; padding: 14px 20px; color: var(--text-muted); font-size: 12px; }
 .confirm-copy { margin: 0 0 18px; color: var(--text-secondary); }
 .run-summary { display: grid; grid-template-columns: repeat(3, 1fr); margin: 0; overflow: hidden; border: 1px solid var(--border); border-radius: 8px; }
 .run-summary div { padding: 11px 13px; border-right: 1px solid var(--border); }

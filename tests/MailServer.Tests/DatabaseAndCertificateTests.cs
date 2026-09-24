@@ -21,6 +21,70 @@ namespace MailServer.Tests;
 public sealed class DatabaseAndCertificateTests
 {
     [Fact]
+    public async Task TaskExecutionSearchPagesFiltersAndRejectsActiveLease()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-task-search-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Database:Provider"] = "Sqlite",
+                ["ConnectionStrings:MailDatabase"] = $"Data Source={Path.Combine(root, "mailserver.db")}",
+                ["Storage:RootPath"] = Path.Combine(root, "messages"),
+                ["SecurityAssets:RootPath"] = Path.Combine(root, "security")
+            }).Build();
+            var collection = new ServiceCollection();
+            collection.AddLogging();
+            collection.AddSingleton<IConfiguration>(configuration);
+            collection.AddMailServerInfrastructure(configuration);
+            await using var services = collection.BuildServiceProvider();
+            var factory = services.GetRequiredService<IDbContextFactory<MailDbContext>>();
+            var now = DateTimeOffset.UtcNow;
+            var first = new ScheduledTask { Type = "test.first", Name = "First" };
+            var second = new ScheduledTask { Type = "test.second", Name = "Second" };
+            Guid detailId;
+            await using (var db = await factory.CreateDbContextAsync())
+            {
+                await db.Database.MigrateAsync();
+                db.ScheduledTasks.AddRange(first, second);
+                var rows = Enumerable.Range(0, 25).Select(index => new TaskExecution
+                {
+                    ScheduledTaskId = index < 20 ? first.Id : second.Id,
+                    Status = index % 5 == 0 ? TaskExecutionStatus.Failed : TaskExecutionStatus.Succeeded,
+                    StartedAt = now.AddMinutes(-index),
+                    CompletedAt = now.AddMinutes(-index).AddSeconds(1)
+                }).ToArray();
+                detailId = rows[24].Id;
+                db.TaskExecutions.AddRange(rows);
+                db.TaskLeases.Add(new TaskLease { ScheduledTaskId = first.Id, Owner = $"{Environment.MachineName}:{Environment.ProcessId}", ExpiresAt = now.AddMinutes(10) });
+                await db.SaveChangesAsync();
+            }
+
+            var tasks = services.GetRequiredService<TaskExecutionService>();
+            var page1 = await tasks.SearchExecutionsAsync(null, null, null, null, 1, 20, CancellationToken.None);
+            var page2 = await tasks.SearchExecutionsAsync(null, null, null, null, 2, 20, CancellationToken.None);
+            Assert.Equal(25, page1.TotalCount);
+            Assert.Equal(20, page1.Items.Count);
+            Assert.Equal(5, page2.Items.Count);
+            Assert.Equal(detailId, page2.Items[^1].Id);
+            var failed = await tasks.SearchExecutionsAsync(null, TaskExecutionStatus.Failed, null, null, 1, 20, CancellationToken.None);
+            Assert.Equal(5, failed.TotalCount);
+            var secondOnly = await tasks.SearchExecutionsAsync(second.Id, null, now.AddHours(-1), now, 1, 20, CancellationToken.None);
+            Assert.Equal(5, secondOnly.TotalCount);
+            Assert.NotNull(await tasks.GetExecutionAsync(detailId, CancellationToken.None));
+            Assert.Null(await tasks.GetExecutionAsync(Guid.NewGuid(), CancellationToken.None));
+            await Assert.ThrowsAsync<TaskBusyException>(() => tasks.UpdateAsync(first.Id, true, 60, 600, 100, CancellationToken.None));
+            await Assert.ThrowsAsync<TaskBusyException>(() => tasks.RunNowAsync(first.Id, CancellationToken.None));
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task OverviewTrafficUsesStoredMessagesAndDeliveryAttempts()
     {
         var root = Path.Combine(Path.GetTempPath(), $"mailserver-overview-{Guid.NewGuid():N}");

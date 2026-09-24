@@ -1111,6 +1111,20 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
   if (url.pathname === '/session/permissions') return { fullAccess: true, systemPermissions: [], allDomainPermissions: [], domainPermissions: {} } as T
   if (url.pathname === '/permissions/catalog' && method === 'GET') return structuredClone(previewPermissionCatalog) as T
   if (url.pathname === '/tasks' && method === 'GET') return structuredClone(previewTasks) as T
+  if (url.pathname === '/tasks/executions/search' && method === 'GET') {
+    const taskId = url.searchParams.get('taskId')
+    const status = url.searchParams.get('status')
+    const matches = previewTaskExecutions
+      .filter(item => (!taskId || item.scheduledTaskId === taskId) && (!status || item.status === status))
+      .sort((left, right) => right.startedAt.localeCompare(left.startedAt) || right.id.localeCompare(left.id))
+    return page(matches, Number(url.searchParams.get('page') || 1), Number(url.searchParams.get('pageSize') || 20)) as T
+  }
+  const executionMatch = url.pathname.match(/^\/tasks\/executions\/([^/]+)$/)
+  if (executionMatch && method === 'GET') {
+    const execution = previewTaskExecutions.find(item => item.id === executionMatch[1])
+    if (!execution) throw new Error('执行记录不存在')
+    return structuredClone(execution) as T
+  }
   if (url.pathname === '/tasks/executions' && method === 'GET') {
     const take = Math.min(500, Math.max(1, Number(url.searchParams.get('take') || 100)))
     return structuredClone(previewTaskExecutions.slice(0, take)) as T

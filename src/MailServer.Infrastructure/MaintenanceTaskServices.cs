@@ -435,6 +435,11 @@ public sealed class StorageIntegrityTaskHandler(
     }
 }
 
+public sealed class TaskBusyException : Exception
+{
+    public TaskBusyException() : base("Task is already running.") { }
+}
+
 public sealed class TaskExecutionService(
     IDbContextFactory<MailDbContext> factory,
     IEnumerable<IScheduledTaskHandler> handlers,
@@ -469,17 +474,22 @@ public sealed class TaskExecutionService(
         var due = await db.ScheduledTasks.AsNoTracking()
             .Where(x => x.IsEnabled && x.Status != ScheduledTaskStatus.Paused && x.NextRunAt <= clock.UtcNow)
             .OrderBy(x => x.NextRunAt).Take(10).Select(x => x.Id).ToListAsync(cancellationToken);
-        foreach (var id in due) await RunNowAsync(id, cancellationToken);
+        foreach (var id in due)
+        {
+            try { await RunNowAsync(id, cancellationToken); }
+            catch (TaskBusyException) { /* Another worker already owns this task. Continue with the remaining due tasks. */ }
+        }
     }
 
     public async Task<Guid> RunNowAsync(Guid taskId, CancellationToken cancellationToken)
     {
         await using var db = await factory.CreateDbContextAsync(cancellationToken);
         await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
-        var task = await db.ScheduledTasks.SingleAsync(x => x.Id == taskId, cancellationToken);
+        var task = await db.ScheduledTasks.SingleOrDefaultAsync(x => x.Id == taskId, cancellationToken)
+            ?? throw new KeyNotFoundException("Scheduled task not found.");
         var lease = await db.TaskLeases.SingleOrDefaultAsync(x => x.ScheduledTaskId == taskId, cancellationToken);
-        if (lease is not null && lease.ExpiresAt > clock.UtcNow && lease.Owner != Owner)
-            throw new InvalidOperationException("Task is already running.");
+        if (lease is not null && lease.ExpiresAt > clock.UtcNow)
+            throw new TaskBusyException();
         if (lease is null) { lease = new TaskLease { ScheduledTaskId = taskId, Owner = Owner, ExpiresAt = clock.UtcNow }; db.TaskLeases.Add(lease); }
         lease.Owner = Owner; lease.ExpiresAt = clock.UtcNow.AddSeconds(Math.Clamp(task.TimeoutSeconds, 10, 86400));
         task.Status = ScheduledTaskStatus.Running; task.LastRunAt = clock.UtcNow;
@@ -522,10 +532,37 @@ public sealed class TaskExecutionService(
             .OrderByDescending(x => x.StartedAt).Take(Math.Clamp(take, 1, 500)).ToListAsync(cancellationToken);
     }
 
+    public async Task<(IReadOnlyList<TaskExecution> Items, int TotalCount)> SearchExecutionsAsync(
+        Guid? taskId, TaskExecutionStatus? status, DateTimeOffset? from, DateTimeOffset? to,
+        int page, int pageSize, CancellationToken cancellationToken)
+    {
+        await using var db = await factory.CreateDbContextAsync(cancellationToken);
+        var query = db.TaskExecutions.AsNoTracking().AsQueryable();
+        if (taskId is { } id) query = query.Where(x => x.ScheduledTaskId == id);
+        if (status is { } currentStatus) query = query.Where(x => x.Status == currentStatus);
+        if (from is { } start) query = query.Where(x => x.StartedAt >= start);
+        if (to is { } end) query = query.Where(x => x.StartedAt < end);
+        var totalCount = await query.CountAsync(cancellationToken);
+        var items = await query.OrderByDescending(x => x.StartedAt).ThenByDescending(x => x.Id)
+            .Skip((page - 1) * pageSize).Take(pageSize)
+            .ToListAsync(cancellationToken);
+        return (items, totalCount);
+    }
+
+    public async Task<TaskExecution?> GetExecutionAsync(Guid id, CancellationToken cancellationToken)
+    {
+        await using var db = await factory.CreateDbContextAsync(cancellationToken);
+        return await db.TaskExecutions.AsNoTracking().SingleOrDefaultAsync(x => x.Id == id, cancellationToken);
+    }
+
     public async Task UpdateAsync(Guid taskId, bool enabled, int intervalMinutes, int timeoutSeconds, int batchSize, CancellationToken cancellationToken)
     {
         await using var db = await factory.CreateDbContextAsync(cancellationToken);
-        var task = await db.ScheduledTasks.SingleAsync(x => x.Id == taskId, cancellationToken);
+        var task = await db.ScheduledTasks.SingleOrDefaultAsync(x => x.Id == taskId, cancellationToken)
+            ?? throw new KeyNotFoundException("Scheduled task not found.");
+        if (task.Status == ScheduledTaskStatus.Running
+            || await db.TaskLeases.AnyAsync(x => x.ScheduledTaskId == taskId && x.ExpiresAt > clock.UtcNow, cancellationToken))
+            throw new TaskBusyException();
         task.IsEnabled = enabled; task.Status = enabled ? ScheduledTaskStatus.Idle : ScheduledTaskStatus.Paused;
         task.IntervalMinutes = Math.Clamp(intervalMinutes, 1, 525600);
         task.TimeoutSeconds = Math.Clamp(timeoutSeconds, 10, 86400);

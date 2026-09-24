@@ -75,6 +75,10 @@ public interface ITaskExecutionService
 {
     Task<IReadOnlyList<ScheduledTask>> ListTasksAsync(CancellationToken cancellationToken);
     Task<IReadOnlyList<TaskExecution>> ListExecutionsAsync(int take, CancellationToken cancellationToken);
+    Task<(IReadOnlyList<TaskExecution> Items, int TotalCount)> SearchExecutionsAsync(
+        Guid? taskId, TaskExecutionStatus? status, DateTimeOffset? from, DateTimeOffset? to,
+        int page, int pageSize, CancellationToken cancellationToken);
+    Task<TaskExecution?> GetExecutionAsync(Guid id, CancellationToken cancellationToken);
     Task UpdateAsync(Guid taskId, bool enabled, int intervalMinutes, int timeoutSeconds, int batchSize, CancellationToken cancellationToken);
 }
 
