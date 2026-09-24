@@ -150,6 +150,22 @@ app.UseRouting();
 app.UseRateLimiter();
 app.Use(async (context, next) =>
 {
+    await next();
+    if (!context.Request.Path.StartsWithSegments("/api/v1")
+        || context.Response.HasStarted
+        || !string.IsNullOrEmpty(context.Response.ContentType)) return;
+    IResult? problem = context.Response.StatusCode switch
+    {
+        StatusCodes.Status401Unauthorized => AdminApiProblems.Unauthorized(context),
+        StatusCodes.Status403Forbidden => AdminApiProblems.Forbidden(context),
+        _ => null
+    };
+    if (problem is null) return;
+    context.Response.ContentLength = null;
+    await problem.ExecuteAsync(context);
+});
+app.Use(async (context, next) =>
+{
     var authMethods = 0;
     if (context.Request.Headers.Authorization.ToString().StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase)) authMethods++;
     if (context.Request.Headers.ContainsKey("X-Api-Key")) authMethods++;
@@ -267,6 +283,7 @@ app.MapGet("/api/v1/health/live", () => Results.Ok(new { status = "alive" })).Al
 app.MapGet("/api/v1/health/ready", () => Results.Ok(new { status = "ready" })).AllowAnonymous();
 app.MapPost("/api/v1/auth/token", async (
     LoginRequest request,
+    HttpContext http,
     AdminApplicationService administration,
     IConfiguration configuration,
     CancellationToken cancellationToken) =>
@@ -274,7 +291,7 @@ app.MapPost("/api/v1/auth/token", async (
     var admin = await administration.AuthenticateAsync(request.UserName, request.Password, cancellationToken);
     if (admin is null)
     {
-        return Results.Unauthorized();
+        return AdminApiProblems.InvalidCredentials(http);
     }
 
     var now = DateTimeOffset.UtcNow;

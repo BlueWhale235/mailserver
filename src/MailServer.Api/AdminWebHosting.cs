@@ -91,7 +91,7 @@ public static class AdminWebHosting
         {
             await antiforgery.ValidateRequestAsync(context);
             var admin = await administration.AuthenticateAsync(request.UserName, request.Password, context.RequestAborted);
-            if (admin is null) return Results.Unauthorized();
+            if (admin is null) return AdminApiProblems.InvalidCredentials(context);
 
             var startedAt = DateTimeOffset.UtcNow;
             var claims = new[]
