@@ -607,6 +607,7 @@ api.MapGet("/domains/search", async (
 
 api.MapGet("/domains/{id:guid}", async (
     Guid id,
+    HttpContext http,
     AdminApplicationService administration,
     CancellationToken cancellationToken) =>
 {
@@ -614,7 +615,7 @@ api.MapGet("/domains/{id:guid}", async (
     {
         return Results.Ok(await administration.GetDomainAsync(id, cancellationToken));
     }
-    catch (KeyNotFoundException) { return Results.NotFound(); }
+    catch (KeyNotFoundException) { return AdminApiProblems.NotFound(http, "域名不存在或已被删除。"); }
 }).RequireDomainPermission(PermissionCodes.DomainDetail);
 
 api.MapPost("/domains", async (
