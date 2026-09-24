@@ -444,6 +444,7 @@ public sealed class MailDbContext(DbContextOptions<MailDbContext> options) : DbC
             entity.HasIndex(x => x.Category);
             entity.HasIndex(x => x.Status);
             entity.HasIndex(x => x.PluginId);
+            entity.HasIndex(x => new { x.Action, x.Resource, x.RequestId });
             entity.Property(x => x.Actor).HasMaxLength(256);
             entity.Property(x => x.Action).HasMaxLength(128);
             entity.Property(x => x.Resource).HasMaxLength(512);
@@ -490,10 +491,13 @@ public sealed class MailDbContext(DbContextOptions<MailDbContext> options) : DbC
             entity.ToTable("tls_report_deliveries");
             entity.HasKey(x => x.Id);
             entity.HasIndex(x => new { x.CompletedAt, x.NextAttemptAt });
+            entity.HasIndex(x => x.LeaseUntil);
             entity.Property(x => x.PolicyDomain).HasMaxLength(255);
             entity.Property(x => x.ReportUri).HasMaxLength(2048);
             entity.Property(x => x.ReportJson).HasMaxLength(1_048_576);
             entity.Property(x => x.LastError).HasMaxLength(4096);
+            entity.Property(x => x.LastManualRetryKey).HasMaxLength(32);
+            entity.Property(x => x.LeaseOwner).HasMaxLength(128);
         });
     }
 }

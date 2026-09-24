@@ -1000,6 +1000,7 @@ const tlsReportDeliveries: MockTlsReportDelivery[] = [
   { id: '97554ea3-24db-4729-9733-d07bd07f4cee', policyDomain: 'legacy-a.example', reportUri: 'https://reports.legacy-a.example/tls', periodStart: iso(-72 * 60), periodEnd: iso(-48 * 60), status: 'Retrying', attempts: 2, nextAttemptAt: iso(180), lastError: 'HTTP 503 Service Unavailable', reportJson: JSON.stringify({ 'organization-name': 'MailServer', 'report-id': 'preview-legacy-20260916', policies: [] }, null, 2) },
   { id: '8f529738-3a52-4a85-8f69-f1ea21643a67', policyDomain: 'broken-report.example', reportUri: 'https://tls.broken-report.example/ingest', periodStart: iso(-96 * 60), periodEnd: iso(-72 * 60), status: 'Failed', attempts: 5, nextAttemptAt: iso(-40 * 60), lastError: 'Name or service not known', reportJson: JSON.stringify({ 'organization-name': 'MailServer', 'report-id': 'preview-broken-20260915', policies: [] }, null, 2) },
 ]
+const tlsReportRetryKeys = new Map<string, string>()
 
 export function enablePreviewMode() {
   previewMode = true
@@ -2427,10 +2428,15 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
   if (tlsReportRetryMatch && method === 'POST') {
     const report = tlsReportDeliveries.find(item => item.id === tlsReportRetryMatch[1])
     if (!report) throw new Error('TLS 报告不存在')
+    const key = new Headers(init.headers).get('Idempotency-Key')
+    if (!key || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(key)) throw new Error('重试请求缺少有效的 Idempotency-Key')
+    if (tlsReportRetryKeys.get(report.id) === key) return { scheduled: false, replayed: true } as T
     if (report.completedAt) throw new Error('已完成的 TLS 报告不能重试')
+    if (report.status === 'Pending') return { scheduled: false, replayed: false } as T
     report.status = 'Pending'; report.attempts = 0; report.nextAttemptAt = new Date().toISOString(); report.lastError = undefined
-    addPreviewAudit({ content: '重试 TLS 报告投递', category: 'BackgroundTask', status: 'Succeeded', actor: 'preview-admin', action: 'tls-report.retry', resource: `tls-report:${report.id}`, detail: report.policyDomain, remoteAddress: '127.0.0.1', requestId: `req-tls-report-${Date.now()}`, relatedId: report.id, createdAt: new Date().toISOString(), changes: [] })
-    return undefined as T
+    tlsReportRetryKeys.set(report.id, key)
+    addPreviewAudit({ content: '重试 TLS 报告投递', category: 'BackgroundTask', status: 'Succeeded', actor: 'preview-admin', action: 'tls-report.retry', resource: `tls-report:${report.id}`, detail: report.policyDomain, remoteAddress: '127.0.0.1', requestId: key.replaceAll('-', ''), relatedId: report.id, createdAt: new Date().toISOString(), changes: [] })
+    return { scheduled: true, replayed: false } as T
   }
 
   throw new Error(`预览数据尚未覆盖接口：${method} ${url.pathname}`)

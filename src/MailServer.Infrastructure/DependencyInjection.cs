@@ -144,7 +144,9 @@ public static class DependencyInjection
         }
 
         var applied = (await db.Database.GetAppliedMigrationsAsync(cancellationToken)).ToArray();
-        if (applied.Any(migration => !migration.EndsWith("_InitialMailServer2", StringComparison.Ordinal)))
+        var known = db.Database.GetMigrations().ToHashSet(StringComparer.Ordinal);
+        if (!applied.Any(migration => migration.EndsWith("_InitialMailServer2", StringComparison.Ordinal))
+            || applied.Any(migration => !known.Contains(migration)))
         {
             throw new InvalidOperationException(
                 "This database belongs to a pre-2.0 migration chain and cannot be upgraded in place. Back it up, create an empty database, then run 'mailserver db update'.");

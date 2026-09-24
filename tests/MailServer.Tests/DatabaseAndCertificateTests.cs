@@ -9,6 +9,8 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 using MimeKit;
 using Xunit;
 
@@ -139,12 +141,88 @@ public sealed class DatabaseAndCertificateTests
                 Assert.DoesNotContain("mail body", attempt.SessionSummary);
                 Assert.True(System.Text.Encoding.UTF8.GetByteCount(attempt.SessionSummary!) <= DeliverySessionSummary.MaximumBytes);
             }
+            var report = new TlsReportDelivery
+            {
+                PolicyDomain = "example.net",
+                ReportUri = "mailto:tlsrpt@example.net",
+                PeriodStart = DateTimeOffset.UtcNow.AddDays(-2),
+                PeriodEnd = DateTimeOffset.UtcNow.AddDays(-1),
+                ReportJson = "{}",
+                Attempts = 5,
+                LastError = "temporary failure",
+                NextAttemptAt = DateTimeOffset.UtcNow.AddHours(-1)
+            };
+            await using (var db = await factory.CreateDbContextAsync())
+            {
+                db.TlsReportDeliveries.Add(report);
+                await db.SaveChangesAsync();
+            }
+            var retryKey = Guid.NewGuid().ToString();
+            Assert.True((await administration.RetryTlsReportDeliveryAsync(report.Id, retryKey, "test", CancellationToken.None)).Scheduled);
+            Assert.True((await administration.RetryTlsReportDeliveryAsync(report.Id, retryKey, "test", CancellationToken.None)).Replayed);
+            Assert.False((await administration.RetryTlsReportDeliveryAsync(report.Id, Guid.NewGuid().ToString(), "test", CancellationToken.None)).Scheduled);
+            await Assert.ThrowsAsync<FormatException>(() => administration.RetryTlsReportDeliveryAsync(report.Id, "invalid", "test", CancellationToken.None));
+            await using (var db = await factory.CreateDbContextAsync())
+            {
+                var saved = await db.TlsReportDeliveries.SingleAsync(x => x.Id == report.Id);
+                Assert.Equal(0, saved.Attempts);
+                Assert.Null(saved.LastError);
+                Assert.Equal(retryKey.Replace("-", ""), saved.LastManualRetryKey);
+                Assert.Equal(1, await db.AuditRecords.CountAsync(x => x.Action == "tls-report.retry" && x.Resource == $"tls-report:{report.Id}"));
+                saved.LeaseOwner = "test-worker";
+                saved.LeaseUntil = DateTimeOffset.UtcNow.AddMinutes(5);
+                await db.SaveChangesAsync();
+            }
+            await Assert.ThrowsAsync<InvalidOperationException>(() => administration.RetryTlsReportDeliveryAsync(report.Id, Guid.NewGuid().ToString(), "test", CancellationToken.None));
+            await using (var db = await factory.CreateDbContextAsync())
+            {
+                var saved = await db.TlsReportDeliveries.SingleAsync(x => x.Id == report.Id);
+                saved.LeaseOwner = null;
+                saved.LeaseUntil = null;
+                saved.NextAttemptAt = DateTimeOffset.UtcNow.AddMinutes(-1);
+                await db.SaveChangesAsync();
+            }
+            var inbound = new BlockingReportInbound();
+            TlsReportBackgroundService Worker() => new(
+                factory, null!, inbound,
+                Options.Create(new TransportSecurityOptions { ReportContactInfo = "postmaster@example.net" }),
+                NullLogger<TlsReportBackgroundService>.Instance);
+            var firstWorker = Worker().DeliverReportsAsync(CancellationToken.None);
+            await inbound.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await Worker().DeliverReportsAsync(CancellationToken.None);
+            Assert.Equal(1, inbound.AcceptCount);
+            inbound.Release.SetResult();
+            await firstWorker;
+            await using (var db = await factory.CreateDbContextAsync())
+            {
+                var delivered = await db.TlsReportDeliveries.SingleAsync(x => x.Id == report.Id);
+                Assert.NotNull(delivered.CompletedAt);
+                Assert.Null(delivered.LeaseOwner);
+                Assert.Null(delivered.LeaseUntil);
+            }
             await services.VerifyMailDatabaseAsync();
         }
         finally
         {
             SqliteConnection.ClearAllPools();
             Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private sealed class BlockingReportInbound : IInboundMessageService
+    {
+        public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public int AcceptCount { get; private set; }
+
+        public Task<bool> IsLocalRecipientAsync(string address, CancellationToken cancellationToken) => Task.FromResult(false);
+
+        public async Task<InboundAcceptance> AcceptAsync(InboundEnvelope envelope, Stream content, CancellationToken cancellationToken)
+        {
+            AcceptCount++;
+            Entered.TrySetResult();
+            await Release.Task.WaitAsync(cancellationToken);
+            return new InboundAcceptance(Guid.NewGuid(), new string('a', 64), 0, 1);
         }
     }
 

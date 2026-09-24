@@ -77,15 +77,28 @@ public sealed class TlsReportBackgroundService(
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         var now = DateTimeOffset.UtcNow;
-        var reports = await db.TlsReportDeliveries
-            .Where(x => x.CompletedAt == null && x.NextAttemptAt <= now && x.Attempts < 5)
+        var reportIds = await db.TlsReportDeliveries.AsNoTracking()
+            .Where(x => x.CompletedAt == null && x.NextAttemptAt <= now && x.Attempts < 5
+                && (x.LeaseUntil == null || x.LeaseUntil <= now))
             .OrderBy(x => x.NextAttemptAt)
             .ThenBy(x => x.PeriodStart)
             .ThenBy(x => x.Id)
             .Take(50)
+            .Select(x => x.Id)
             .ToListAsync(cancellationToken);
-        foreach (var report in reports)
+        foreach (var reportId in reportIds)
         {
+            var claimOwner = Guid.NewGuid().ToString("N");
+            var claimedAt = DateTimeOffset.UtcNow;
+            var claimed = await db.TlsReportDeliveries
+                .Where(x => x.Id == reportId && x.CompletedAt == null && x.NextAttemptAt <= claimedAt
+                    && x.Attempts < 5 && (x.LeaseUntil == null || x.LeaseUntil <= claimedAt))
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(x => x.LeaseOwner, claimOwner)
+                    .SetProperty(x => x.LeaseUntil, claimedAt.AddMinutes(15)), cancellationToken);
+            if (claimed == 0) continue;
+            var report = await db.TlsReportDeliveries.AsNoTracking()
+                .SingleAsync(x => x.Id == reportId, cancellationToken);
             try
             {
                 if (report.ReportUri.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
@@ -99,17 +112,27 @@ public sealed class TlsReportBackgroundService(
                 {
                     await QueueMailReportAsync(report, cancellationToken);
                 }
-                report.CompletedAt = now;
-                report.LastError = null;
+                await db.TlsReportDeliveries
+                    .Where(x => x.Id == reportId && x.LeaseOwner == claimOwner)
+                    .ExecuteUpdateAsync(setters => setters
+                        .SetProperty(x => x.CompletedAt, DateTimeOffset.UtcNow)
+                        .SetProperty(x => x.LastError, (string?)null)
+                        .SetProperty(x => x.LeaseOwner, (string?)null)
+                        .SetProperty(x => x.LeaseUntil, (DateTimeOffset?)null), cancellationToken);
             }
             catch (Exception exception) when (exception is not OperationCanceledException)
             {
-                report.Attempts++;
-                report.LastError = exception.Message;
-                report.NextAttemptAt = now.AddHours(Math.Pow(2, report.Attempts));
+                var attempts = report.Attempts + 1;
+                await db.TlsReportDeliveries
+                    .Where(x => x.Id == reportId && x.LeaseOwner == claimOwner)
+                    .ExecuteUpdateAsync(setters => setters
+                        .SetProperty(x => x.Attempts, attempts)
+                        .SetProperty(x => x.LastError, exception.Message.Length <= 4096 ? exception.Message : exception.Message[..4096])
+                        .SetProperty(x => x.NextAttemptAt, DateTimeOffset.UtcNow.AddHours(Math.Pow(2, attempts)))
+                        .SetProperty(x => x.LeaseOwner, (string?)null)
+                        .SetProperty(x => x.LeaseUntil, (DateTimeOffset?)null), cancellationToken);
             }
         }
-        await db.SaveChangesAsync(cancellationToken);
     }
 
     private async Task QueueMailReportAsync(TlsReportDelivery report, CancellationToken cancellationToken)

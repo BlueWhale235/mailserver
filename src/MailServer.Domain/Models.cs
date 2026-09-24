@@ -241,6 +241,9 @@ public sealed class TlsReportDelivery
     public DateTimeOffset NextAttemptAt { get; set; }
     public DateTimeOffset? CompletedAt { get; set; }
     public string? LastError { get; set; }
+    public string? LastManualRetryKey { get; set; }
+    public string? LeaseOwner { get; set; }
+    public DateTimeOffset? LeaseUntil { get; set; }
 }
 
 /// <summary>

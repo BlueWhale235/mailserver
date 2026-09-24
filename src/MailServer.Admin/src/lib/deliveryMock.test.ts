@@ -61,14 +61,19 @@ describe('delivery preview contract', () => {
     expect(new Set([...first.items, ...second.items].map(item => item.id)).size).toBe(4)
     expect(first.items[0]).not.toHaveProperty('reportJson')
     const failed = all.items.find(item => item.status === 'Failed')!
-    await mockApi(`/delivery/tls-reports/${failed.id}/retry`, { method: 'POST' })
+    const key = '7d563ddc-8561-4dfb-97cb-6dc28fed1bce'
+    const request = { method: 'POST', headers: { 'Idempotency-Key': key } }
+    await expect(mockApi(`/delivery/tls-reports/${failed.id}/retry`, { method: 'POST' })).rejects.toThrow('Idempotency-Key')
+    expect(await mockApi(`/delivery/tls-reports/${failed.id}/retry`, request)).toEqual({ scheduled: true, replayed: false })
+    expect(await mockApi(`/delivery/tls-reports/${failed.id}/retry`, request)).toEqual({ scheduled: false, replayed: true })
+    expect(await mockApi(`/delivery/tls-reports/${failed.id}/retry`, { method: 'POST', headers: { 'Idempotency-Key': crypto.randomUUID() } })).toEqual({ scheduled: false, replayed: false })
     const updated = await mockApi<TlsReportDeliveryDetail>(`/delivery/tls-reports/${failed.id}`)
     expect(updated.status).toBe('Pending')
     expect(updated.attempts).toBe(0)
     expect(updated.lastError).toBeUndefined()
     expect(() => JSON.parse(updated.reportJson)).not.toThrow()
     const completed = all.items.find(item => item.status === 'Completed')!
-    await expect(mockApi(`/delivery/tls-reports/${completed.id}/retry`, { method: 'POST' })).rejects.toThrow('已完成')
-    await expect(mockApi('/delivery/tls-reports/missing/retry', { method: 'POST' })).rejects.toThrow('不存在')
+    await expect(mockApi(`/delivery/tls-reports/${completed.id}/retry`, request)).rejects.toThrow('已完成')
+    await expect(mockApi('/delivery/tls-reports/missing/retry', request)).rejects.toThrow('不存在')
   })
 })

@@ -1765,11 +1765,13 @@ api.MapPost("/delivery/tls-reports/{id:guid}/retry", async (
 {
     try
     {
-        await administration.RetryTlsReportDeliveryAsync(id, Actor(http), cancellationToken);
-        return Results.Accepted();
+        var result = await administration.RetryTlsReportDeliveryAsync(
+            id, http.Request.Headers["Idempotency-Key"].ToString(), Actor(http), cancellationToken);
+        return result.Scheduled ? Results.Accepted(value: result) : Results.Ok(result);
     }
     catch (KeyNotFoundException) { return Results.NotFound(); }
-    catch (InvalidOperationException exception) { return Results.Conflict(new { error = exception.Message }); }
+    catch (FormatException exception) { return Results.Problem(statusCode: 400, title: "TLS 报告重试请求无效", detail: exception.Message, type: "https://mailserver.local/problems/invalid-idempotency-key", extensions: new Dictionary<string, object?> { ["traceId"] = http.TraceIdentifier }); }
+    catch (InvalidOperationException exception) { return Results.Problem(statusCode: 409, title: "TLS 报告当前不可重试", detail: exception.Message, type: "https://mailserver.local/problems/tls-report-retry-conflict", extensions: new Dictionary<string, object?> { ["traceId"] = http.TraceIdentifier }); }
 }).RequirePermission(PermissionCodes.QueueRetry);
 
 api.MapGet("/domains/{domainId:guid}/queue", async (

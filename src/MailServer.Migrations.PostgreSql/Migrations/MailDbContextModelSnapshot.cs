@@ -176,6 +176,8 @@ namespace MailServer.Migrations.PostgreSql.Migrations
 
                     b.HasIndex("Status");
 
+                    b.HasIndex("Action", "Resource", "RequestId");
+
                     b.ToTable("audit_records", (string)null);
                 });
 
@@ -1264,7 +1266,6 @@ namespace MailServer.Migrations.PostgreSql.Migrations
                     b.Property<int>("IntervalMinutes")
                         .HasColumnType("integer");
 
-
                     b.Property<bool>("IsEnabled")
                         .HasColumnType("boolean");
 
@@ -1588,6 +1589,17 @@ namespace MailServer.Migrations.PostgreSql.Migrations
                         .HasMaxLength(4096)
                         .HasColumnType("character varying(4096)");
 
+                    b.Property<string>("LastManualRetryKey")
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<string>("LeaseOwner")
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
+
+                    b.Property<DateTimeOffset?>("LeaseUntil")
+                        .HasColumnType("timestamp with time zone");
+
                     b.Property<DateTimeOffset>("NextAttemptAt")
                         .HasColumnType("timestamp with time zone");
 
@@ -1613,6 +1625,8 @@ namespace MailServer.Migrations.PostgreSql.Migrations
                         .HasColumnType("character varying(2048)");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("LeaseUntil");
 
                     b.HasIndex("CompletedAt", "NextAttemptAt");
 

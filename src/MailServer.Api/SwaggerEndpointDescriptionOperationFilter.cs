@@ -225,7 +225,7 @@ public sealed class SwaggerEndpointDescriptionOperationFilter : IOperationFilter
                 "返回指定 TLS-RPT 聚合报告的投递状态和 JSON 正文。"),
             ["POST /api/v1/delivery/tls-reports/{id}/retry"] = new(
                 "重试 TLS 报告投递",
-                "将尚未完成的 TLS-RPT 报告重新安排为立即投递。"),
+                "为等待重试或重试耗尽的 TLS-RPT 报告安排立即投递。需要 UUID Idempotency-Key；重复请求不会再次变更投递或写审计。正在发送或已完成时返回 409。"),
             ["GET /api/v1/domains/{domainId}/queue"] = new(
                 "查询域名投递队列",
                 "按域名、关键字、状态和分页参数查询投递任务。"),
@@ -271,6 +271,17 @@ public sealed class SwaggerEndpointDescriptionOperationFilter : IOperationFilter
     public void Apply(OpenApiOperation operation, OperationFilterContext context)
     {
         var key = GetOperationKey(context);
+        if (key == "POST /api/v1/delivery/tls-reports/{id}/retry")
+        {
+            operation.Parameters ??= [];
+            operation.Parameters.Add(new OpenApiParameter
+            {
+                Name = "Idempotency-Key",
+                In = ParameterLocation.Header,
+                Required = true,
+                Description = "本次手动重试的 UUID。网络重发时复用同一值。"
+            });
+        }
         if (Descriptions.TryGetValue(key, out var text))
         {
             operation.Summary = text.Summary;

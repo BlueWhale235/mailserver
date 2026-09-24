@@ -173,6 +173,8 @@ namespace MailServer.Migrations.MySql.Migrations
 
                     b.HasIndex("Status");
 
+                    b.HasIndex("Action", "Resource", "RequestId");
+
                     b.ToTable("audit_records", (string)null);
                 });
 
@@ -1261,7 +1263,6 @@ namespace MailServer.Migrations.MySql.Migrations
                     b.Property<int>("IntervalMinutes")
                         .HasColumnType("int");
 
-
                     b.Property<bool>("IsEnabled")
                         .HasColumnType("tinyint(1)");
 
@@ -1585,6 +1586,17 @@ namespace MailServer.Migrations.MySql.Migrations
                         .HasMaxLength(4096)
                         .HasColumnType("varchar(4096)");
 
+                    b.Property<string>("LastManualRetryKey")
+                        .HasMaxLength(32)
+                        .HasColumnType("varchar(32)");
+
+                    b.Property<string>("LeaseOwner")
+                        .HasMaxLength(128)
+                        .HasColumnType("varchar(128)");
+
+                    b.Property<DateTimeOffset?>("LeaseUntil")
+                        .HasColumnType("datetime");
+
                     b.Property<DateTimeOffset>("NextAttemptAt")
                         .HasColumnType("datetime");
 
@@ -1610,6 +1622,8 @@ namespace MailServer.Migrations.MySql.Migrations
                         .HasColumnType("varchar(2048)");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("LeaseUntil");
 
                     b.HasIndex("CompletedAt", "NextAttemptAt");
 

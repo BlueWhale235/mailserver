@@ -166,6 +166,7 @@ public sealed record TlsReportDeliveryDetail(
     DateTimeOffset? CompletedAt,
     string? LastError,
     string ReportJson);
+public sealed record TlsReportRetryResult(bool Scheduled, bool Replayed);
 public sealed record CreatedApiKey(Guid Id, string Value, DateTimeOffset? ExpiresAt);
 public sealed record AdminUserView(
     Guid Id,
@@ -1757,21 +1758,67 @@ public sealed class AdminApplicationService(
             report.ReportJson);
     }
 
-    public async Task RetryTlsReportDeliveryAsync(
+    public async Task<TlsReportRetryResult> RetryTlsReportDeliveryAsync(
         Guid id,
+        string? idempotencyKey,
         string actor,
         CancellationToken cancellationToken)
     {
+        if (!Guid.TryParse(idempotencyKey, out var key))
+            throw new FormatException("TLS report retry requires a UUID Idempotency-Key header.");
+        var normalizedKey = key.ToString("N");
+        var resource = $"tls-report:{id}";
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
-        var report = await db.TlsReportDeliveries.SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
+        if (await db.AuditRecords.AsNoTracking().AnyAsync(x => x.Action == "tls-report.retry"
+            && x.Resource == resource && x.RequestId == normalizedKey, cancellationToken))
+            return new TlsReportRetryResult(false, true);
+
+        var now = DateTimeOffset.UtcNow;
+        if (!db.Database.IsRelational())
+        {
+            var report = await db.TlsReportDeliveries.SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
+                ?? throw new KeyNotFoundException("TLS report delivery not found.");
+            if (report.LastManualRetryKey == normalizedKey) return new TlsReportRetryResult(false, true);
+            if (report.CompletedAt is not null || report.LeaseUntil > now)
+                throw new InvalidOperationException("Completed or actively sending TLS reports cannot be retried.");
+            if (report.Attempts == 0 || report.Attempts < 5 && report.NextAttemptAt <= now)
+                return new TlsReportRetryResult(false, false);
+            report.Attempts = 0;
+            report.NextAttemptAt = now;
+            report.LastError = null;
+            report.LastManualRetryKey = normalizedKey;
+            AddAudit(db, actor, "tls-report.retry", resource, report.PolicyDomain, normalizedKey);
+            await db.SaveChangesAsync(cancellationToken);
+            return new TlsReportRetryResult(true, false);
+        }
+
+        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+        var changed = await db.TlsReportDeliveries
+            .Where(x => x.Id == id && x.CompletedAt == null
+                && (x.LeaseUntil == null || x.LeaseUntil <= now)
+                && x.LastManualRetryKey != normalizedKey
+                && (x.Attempts >= 5 || x.Attempts > 0 && x.NextAttemptAt > now))
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(x => x.Attempts, 0)
+                .SetProperty(x => x.NextAttemptAt, now)
+                .SetProperty(x => x.LastError, (string?)null)
+                .SetProperty(x => x.LastManualRetryKey, normalizedKey), cancellationToken);
+        var current = await db.TlsReportDeliveries.AsNoTracking()
+            .Where(x => x.Id == id)
+            .Select(x => new { x.PolicyDomain, x.CompletedAt, x.LeaseUntil, x.LastManualRetryKey })
+            .SingleOrDefaultAsync(cancellationToken)
             ?? throw new KeyNotFoundException("TLS report delivery not found.");
-        if (report.CompletedAt is not null)
-            throw new InvalidOperationException("Completed TLS reports cannot be retried.");
-        report.Attempts = 0;
-        report.NextAttemptAt = DateTimeOffset.UtcNow;
-        report.LastError = null;
-        AddAudit(db, actor, "tls-report.retry", $"tls-report:{id}", report.PolicyDomain);
+        if (changed == 0)
+        {
+            if (current.LastManualRetryKey == normalizedKey) return new TlsReportRetryResult(false, true);
+            if (current.CompletedAt is not null || current.LeaseUntil > now)
+                throw new InvalidOperationException("Completed or actively sending TLS reports cannot be retried.");
+            return new TlsReportRetryResult(false, false);
+        }
+        AddAudit(db, actor, "tls-report.retry", resource, current.PolicyDomain, normalizedKey);
         await db.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+        return new TlsReportRetryResult(true, false);
     }
 
     private static TlsReportDeliveryStatus GetTlsReportStatus(TlsReportDelivery report) =>
@@ -2360,13 +2407,15 @@ public sealed class AdminApplicationService(
         string actor,
         string action,
         string resource,
-        string? detail) =>
+        string? detail,
+        string? requestId = null) =>
         db.AuditRecords.Add(new AuditRecord
         {
             Actor = string.IsNullOrWhiteSpace(actor) ? "unknown" : actor,
             Action = action,
             Resource = resource,
-            Detail = detail
+            Detail = detail,
+            RequestId = requestId
         });
 
     private static void AddPermissionGrants(

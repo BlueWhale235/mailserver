@@ -16,6 +16,8 @@ const pageSize = 20
 const totalCount = ref(0)
 const loading = ref(false)
 const actionId = ref('')
+const retryTarget = ref<TlsReportDelivery | null>(null)
+const retryKey = ref('')
 const error = ref('')
 const notice = ref('')
 const detailOpen = ref(false)
@@ -74,14 +76,28 @@ async function openDetail(report: TlsReportDelivery) {
   finally { if (version === detailVersion) detailLoading.value = false }
 }
 
-async function retry(report: TlsReportDelivery) {
-  if (!canManage.value || report.status === 'Completed' || actionId.value) return
+function retry(report: TlsReportDelivery) {
+  if (!canManage.value || !['Failed', 'Retrying'].includes(report.status) || actionId.value) return
+  error.value = ''
+  notice.value = ''
+  retryTarget.value = report
+  retryKey.value = globalThis.crypto.randomUUID()
+}
+
+async function confirmRetry() {
+  const report = retryTarget.value
+  if (!report || actionId.value) return
   actionId.value = report.id
   error.value = ''
   notice.value = ''
   try {
-    await api(`/delivery/tls-reports/${report.id}/retry`, { method: 'POST' })
-    notice.value = `已安排重新发送 ${report.policyDomain} 的 TLS 报告`
+    const result = await api<{ scheduled: boolean; replayed: boolean }>(`/delivery/tls-reports/${report.id}/retry`, {
+      method: 'POST', headers: { 'Idempotency-Key': retryKey.value },
+    })
+    notice.value = result.scheduled
+      ? `已安排重新发送 ${report.policyDomain} 的 TLS 报告`
+      : result.replayed ? '这次重试请求已处理，无需重复提交' : '该报告已经安排投递'
+    retryTarget.value = null
     await load()
   } catch (cause) { error.value = cause instanceof Error ? cause.message : 'TLS 报告重试失败' }
   finally { actionId.value = '' }
@@ -138,13 +154,22 @@ onBeforeUnmount(() => { ++loadVersion; ++detailVersion; globalThis.clearTimeout(
             <td><StatusPill v-bind="tlsReportStatusPresentation(report.status)" /><small v-if="report.lastError" class="text-error">{{ report.lastError }}</small></td>
             <td>{{ report.attempts }} / 5</td>
             <td>{{ report.status === 'Failed' ? '等待管理员处理' : formatDate(report.completedAt || report.nextAttemptAt) }}<small>{{ report.completedAt ? '已完成' : report.status === 'Failed' ? '自动重试已停止' : '下一次尝试' }}</small></td>
-            <td class="text-no-wrap"><v-btn size="small" variant="text" prepend-icon="mdi-code-json" @click="openDetail(report)">详情</v-btn><v-btn v-if="canManage && report.status !== 'Completed'" icon="mdi-refresh" size="small" variant="text" aria-label="重试 TLS 报告" :loading="actionId === report.id" @click="retry(report)" /></td>
+            <td class="text-no-wrap"><v-btn size="small" variant="text" prepend-icon="mdi-code-json" @click="openDetail(report)">详情</v-btn><v-btn v-if="canManage && ['Failed', 'Retrying'].includes(report.status)" icon="mdi-refresh" size="small" variant="text" aria-label="重试 TLS 报告" :loading="actionId === report.id" @click="retry(report)" /></td>
           </tr>
         </tbody>
       </v-table>
     </div>
     <div class="table-footer"><span>第 {{ page }} / {{ pageCount }} 页</span><v-pagination v-model="page" :length="pageCount" density="compact" /></div>
   </section>
+
+  <v-dialog :model-value="!!retryTarget" max-width="500" persistent>
+    <v-card>
+      <v-card-title>确认重试 TLS 报告</v-card-title>
+      <v-card-text>将重新安排向 {{ retryTarget?.reportUri }} 发送 {{ retryTarget?.policyDomain }} 的 TLS 聚合报告。</v-card-text>
+      <v-alert v-if="error" type="error" variant="tonal" class="mx-4 mb-2">{{ error }}</v-alert>
+      <v-card-actions><v-spacer /><v-btn variant="text" :disabled="!!actionId" @click="retryTarget = null">取消</v-btn><v-btn color="primary" :loading="!!actionId" @click="confirmRetry">确认重试</v-btn></v-card-actions>
+    </v-card>
+  </v-dialog>
 
   <v-dialog v-model="detailOpen" max-width="980" scrollable>
     <v-card class="tls-detail-dialog">

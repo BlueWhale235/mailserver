@@ -171,6 +171,8 @@ namespace MailServer.Migrations.Sqlite.Migrations
 
                     b.HasIndex("Status");
 
+                    b.HasIndex("Action", "Resource", "RequestId");
+
                     b.ToTable("audit_records", (string)null);
                 });
 
@@ -1259,7 +1261,6 @@ namespace MailServer.Migrations.Sqlite.Migrations
                     b.Property<int>("IntervalMinutes")
                         .HasColumnType("INTEGER");
 
-
                     b.Property<bool>("IsEnabled")
                         .HasColumnType("INTEGER");
 
@@ -1583,6 +1584,17 @@ namespace MailServer.Migrations.Sqlite.Migrations
                         .HasMaxLength(4096)
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("LastManualRetryKey")
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("LeaseOwner")
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long?>("LeaseUntil")
+                        .HasColumnType("INTEGER");
+
                     b.Property<long>("NextAttemptAt")
                         .HasColumnType("INTEGER");
 
@@ -1608,6 +1620,8 @@ namespace MailServer.Migrations.Sqlite.Migrations
                         .HasColumnType("TEXT");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("LeaseUntil");
 
                     b.HasIndex("CompletedAt", "NextAttemptAt");
 
