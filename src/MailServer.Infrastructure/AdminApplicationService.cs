@@ -26,7 +26,23 @@ public sealed record AdminDashboard(
     int DirectMxUncheckedDomains,
     int ExpiringCertificates,
     int DeliveredLast24Hours,
-    int FailedLast24Hours);
+    int FailedLast24Hours,
+    DateTimeOffset? OldestPendingDeliveryAt,
+    DateTimeOffset GeneratedAt);
+
+public sealed record OverviewTrafficBucket(
+    DateTimeOffset From,
+    DateTimeOffset To,
+    int StoredMessages,
+    int Delivered,
+    int TemporaryFailures,
+    int PermanentFailures);
+
+public sealed record OverviewTraffic(
+    int Days,
+    DateTimeOffset GeneratedAt,
+    long? P95DeliveryMilliseconds,
+    IReadOnlyList<OverviewTrafficBucket> Buckets);
 
 public sealed record AccountView(
     Guid Id,
@@ -327,7 +343,48 @@ public sealed class AdminApplicationService(
             Math.Max(0, activeDomainCount - checkedDomains),
             await db.DomainCertificates.CountAsync(x => x.NotAfter <= now.AddDays(30), cancellationToken),
             await db.DeliveryJobs.CountAsync(x => x.Status == DeliveryStatus.Delivered && x.UpdatedAt >= last24Hours, cancellationToken),
-            await db.DeliveryJobs.CountAsync(x => x.Status == DeliveryStatus.Failed && x.UpdatedAt >= last24Hours, cancellationToken));
+            await db.DeliveryJobs.CountAsync(x => x.Status == DeliveryStatus.Failed && x.UpdatedAt >= last24Hours, cancellationToken),
+            await db.DeliveryJobs.AsNoTracking()
+                .Where(x => x.Status == DeliveryStatus.Pending || x.Status == DeliveryStatus.Deferred)
+                .OrderBy(x => x.CreatedAt)
+                .Select(x => (DateTimeOffset?)x.CreatedAt)
+                .FirstOrDefaultAsync(cancellationToken),
+            now);
+    }
+
+    public async Task<OverviewTraffic> GetOverviewTrafficAsync(int days, CancellationToken cancellationToken)
+    {
+        if (days is not (1 or 7))
+            throw new ArgumentOutOfRangeException(nameof(days), "Traffic range must be 1 or 7 days.");
+
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+        var now = DateTimeOffset.UtcNow;
+        var bucketCount = days == 1 ? 6 : 7;
+        var bucketHours = days == 1 ? 4 : 24;
+        var start = now.AddDays(-days);
+        var buckets = new List<OverviewTrafficBucket>(bucketCount);
+        for (var index = 0; index < bucketCount; index++)
+        {
+            var from = start.AddHours(index * bucketHours);
+            var to = index == bucketCount - 1 ? now : from.AddHours(bucketHours);
+            buckets.Add(new OverviewTrafficBucket(
+                from,
+                to,
+                await db.Messages.CountAsync(x => x.ReceivedAt >= from && x.ReceivedAt < to, cancellationToken),
+                await db.DeliveryAttempts.CountAsync(x => x.CreatedAt >= from && x.CreatedAt < to && x.Succeeded, cancellationToken),
+                await db.DeliveryAttempts.CountAsync(x => x.CreatedAt >= from && x.CreatedAt < to && !x.Succeeded && !x.PermanentFailure, cancellationToken),
+                await db.DeliveryAttempts.CountAsync(x => x.CreatedAt >= from && x.CreatedAt < to && !x.Succeeded && x.PermanentFailure, cancellationToken)));
+        }
+
+        var successful = db.DeliveryAttempts.AsNoTracking()
+            .Where(x => x.CreatedAt >= start && x.CreatedAt < now && x.Succeeded);
+        var count = await successful.CountAsync(cancellationToken);
+        var p95 = count == 0 ? null : (long?)await successful
+            .OrderBy(x => x.DurationMilliseconds)
+            .Skip((int)Math.Ceiling(count * 0.95) - 1)
+            .Select(x => x.DurationMilliseconds)
+            .FirstAsync(cancellationToken);
+        return new OverviewTraffic(days, now, p95, buckets);
     }
 
     public async Task<IReadOnlyList<FirewallRuleView>> GetFirewallRulesAsync(CancellationToken cancellationToken)

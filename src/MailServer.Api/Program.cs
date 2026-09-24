@@ -332,7 +332,19 @@ var api = app.MapGroup("/api/v1").RequireAuthorization("admin");
 api.MapGet("/overview", async (
     AdminApplicationService administration,
     CancellationToken cancellationToken) =>
-    Results.Ok(await administration.GetDashboardAsync(cancellationToken)));
+    Results.Ok(await administration.GetDashboardAsync(cancellationToken)))
+    .RequirePermission(PermissionCodes.DashboardRead);
+
+api.MapGet("/overview/traffic", async (
+    int? days,
+    HttpContext http,
+    AdminApplicationService administration,
+    CancellationToken cancellationToken) =>
+{
+    if (days is not (1 or 7))
+        return AdminApiProblems.Validation(http, "days", "时间范围只能是 1 天或 7 天。");
+    return Results.Ok(await administration.GetOverviewTrafficAsync(days.Value, cancellationToken));
+}).RequirePermission(PermissionCodes.DashboardRead);
 
 api.MapGet("/tasks", async (ITaskExecutionService tasks, CancellationToken cancellationToken) =>
     Results.Ok(await tasks.ListTasksAsync(cancellationToken)))

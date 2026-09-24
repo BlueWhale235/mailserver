@@ -112,12 +112,6 @@ services:
       Storage__RootPath: /data/messages
       Plugins__Path: /app/plugins
       Worker__HostName: ${MAIL_HOSTNAME}
-      Relay__Host: ${RELAY_HOST:-localhost}
-      Relay__Port: ${RELAY_PORT:-25}
-      Relay__Security: ${RELAY_SECURITY:-StartTls}
-      Relay__UseStartTls: ${RELAY_STARTTLS:-true}
-      Relay__UserName: ${RELAY_USERNAME:-}
-      Relay__Password: ${RELAY_PASSWORD:-}
     volumes:
       - message-data:/data/messages
       - ./mailserver.json:/app/mailserver.json:ro

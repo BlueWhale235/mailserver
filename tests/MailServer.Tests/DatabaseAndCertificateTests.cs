@@ -21,6 +21,81 @@ namespace MailServer.Tests;
 public sealed class DatabaseAndCertificateTests
 {
     [Fact]
+    public async Task OverviewTrafficUsesStoredMessagesAndDeliveryAttempts()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-overview-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Database:Provider"] = "Sqlite",
+                ["ConnectionStrings:MailDatabase"] = $"Data Source={Path.Combine(root, "mailserver.db")}",
+                ["Storage:RootPath"] = Path.Combine(root, "messages"),
+                ["SecurityAssets:RootPath"] = Path.Combine(root, "security")
+            }).Build();
+            var collection = new ServiceCollection();
+            collection.AddLogging();
+            collection.AddSingleton<IConfiguration>(configuration);
+            collection.AddMailServerInfrastructure(configuration);
+            await using var services = collection.BuildServiceProvider();
+            var factory = services.GetRequiredService<IDbContextFactory<MailDbContext>>();
+            var now = DateTimeOffset.UtcNow;
+            await using (var db = await factory.CreateDbContextAsync())
+            {
+                await db.Database.MigrateAsync();
+                var message = new StoredMessage
+                {
+                    ContentKey = "overview-test-message",
+                    EnvelopeFrom = "sender@example.test",
+                    Size = 100,
+                    ReceivedAt = now.AddHours(-1)
+                };
+                var oldMessage = new StoredMessage
+                {
+                    ContentKey = "overview-old-message",
+                    EnvelopeFrom = "sender@example.test",
+                    Size = 100,
+                    ReceivedAt = now.AddDays(-8)
+                };
+                var pending = new DeliveryJob
+                {
+                    Message = message,
+                    Sender = "sender@example.test",
+                    Recipient = "recipient@example.test",
+                    CreatedAt = now.AddHours(-2)
+                };
+                db.Messages.AddRange(message, oldMessage);
+                db.DeliveryJobs.Add(pending);
+                db.DeliveryAttempts.AddRange(
+                    new DeliveryAttempt { DeliveryJob = pending, Succeeded = true, DurationMilliseconds = 120, CreatedAt = now.AddMinutes(-30) },
+                    new DeliveryAttempt { DeliveryJob = pending, PermanentFailure = false, DurationMilliseconds = 70, CreatedAt = now.AddMinutes(-20) },
+                    new DeliveryAttempt { DeliveryJob = pending, PermanentFailure = true, DurationMilliseconds = 80, CreatedAt = now.AddMinutes(-10) },
+                    new DeliveryAttempt { DeliveryJob = pending, Succeeded = true, DurationMilliseconds = 900, CreatedAt = now.AddDays(-8) });
+                await db.SaveChangesAsync();
+            }
+
+            var administration = services.GetRequiredService<AdminApplicationService>();
+            var traffic = await administration.GetOverviewTrafficAsync(1, CancellationToken.None);
+            Assert.Equal(1, traffic.Days);
+            Assert.Equal(6, traffic.Buckets.Count);
+            Assert.Equal(1, traffic.Buckets.Sum(bucket => bucket.StoredMessages));
+            Assert.Equal(1, traffic.Buckets.Sum(bucket => bucket.Delivered));
+            Assert.Equal(1, traffic.Buckets.Sum(bucket => bucket.TemporaryFailures));
+            Assert.Equal(1, traffic.Buckets.Sum(bucket => bucket.PermanentFailures));
+            Assert.Equal(120, traffic.P95DeliveryMilliseconds);
+            var dashboard = await administration.GetDashboardAsync(CancellationToken.None);
+            Assert.Equal(now.AddHours(-2), dashboard.OldestPendingDeliveryAt);
+            await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => administration.GetOverviewTrafficAsync(30, CancellationToken.None));
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task PermissionDelegationCannotExceedActorCapabilitiesOrDomainScope()
     {
         var root = Path.Combine(Path.GetTempPath(), $"mailserver-delegation-{Guid.NewGuid():N}");

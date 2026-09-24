@@ -1502,6 +1502,7 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
   }
 
   if (url.pathname === '/overview') {
+    const pending = deliveryJobs.filter(job => job.status === 'Pending' || job.status === 'Deferred')
     return {
       domains: domains.length,
       accounts: domains.reduce((total, domain) => total + domain.accountCount, 0),
@@ -1515,7 +1516,30 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
       expiringCertificates: domains.filter(domain => domain.certificateNotAfter?.startsWith('2026-09')).length,
       deliveredLast24Hours: deliveryJobs.filter(job => job.status === 'Delivered').length,
       failedLast24Hours: deliveryJobs.filter(job => job.status === 'Failed').length,
+      oldestPendingDeliveryAt: pending.map(job => job.createdAt).sort()[0] ?? null,
+      generatedAt: new Date().toISOString(),
     } as T
+  }
+  if (url.pathname === '/overview/traffic') {
+    const days = Number(url.searchParams.get('days')) === 7 ? 7 : 1
+    const now = Date.now()
+    const bucketCount = days === 1 ? 6 : 7
+    const duration = (days === 1 ? 4 : 24) * 60 * 60 * 1000
+    const attempts = Object.values(deliveryAttempts).flat()
+    const buckets = Array.from({ length: bucketCount }, (_, index) => {
+      const from = new Date(now - (bucketCount - index) * duration)
+      const to = new Date(now - (bucketCount - index - 1) * duration)
+      const inRange = (value: string) => new Date(value) >= from && new Date(value) < to
+      const matching = attempts.filter(attempt => inRange(attempt.createdAt))
+      return {
+        from: from.toISOString(), to: to.toISOString(),
+        storedMessages: deliveryJobs.filter(job => inRange(job.createdAt)).length,
+        delivered: matching.filter(attempt => attempt.succeeded).length,
+        temporaryFailures: matching.filter(attempt => !attempt.succeeded && !attempt.permanentFailure).length,
+        permanentFailures: matching.filter(attempt => !attempt.succeeded && attempt.permanentFailure).length,
+      }
+    })
+    return { days, generatedAt: new Date(now).toISOString(), p95DeliveryMilliseconds: 1842, buckets } as T
   }
 
   if (url.pathname === '/permissions/domains/resolve') {

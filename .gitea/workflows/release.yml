@@ -14,7 +14,7 @@ on:
           - linux-x64
           - linux-arm64
       version:
-        description: Version label used in package filenames
+        description: Version label written to each release directory
         required: true
         type: string
         default: manual
@@ -44,6 +44,30 @@ jobs:
           cache: true
           cache-dependency-path: Directory.Packages.props
 
+      - name: Install Node.js
+        uses: https://github.com/actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: src/MailServer.Admin/package-lock.json
+
+      - name: Install locked administration dependencies
+        working-directory: src/MailServer.Admin
+        run: npm ci
+
+      - name: Verify administration UI
+        working-directory: src/MailServer.Admin
+        run: |
+          npm run lint
+          npm test
+          npm run build
+
+      - name: Verify .NET solution
+        run: |
+          dotnet restore MailServer.slnx
+          dotnet build MailServer.slnx --no-restore -p:SkipAdminBuild=true
+          dotnet test tests/MailServer.Tests/MailServer.Tests.csproj --no-restore -p:SkipAdminBuild=true
+
       - name: Select runtimes
         shell: bash
         run: |
@@ -71,26 +95,28 @@ jobs:
           chmod +x scripts/publish-portable.sh
           ./scripts/publish-portable.sh $RUNTIMES
 
-      - name: Create release archives
+      - name: Smoke test release directories
         shell: bash
         run: |
           set -eu
-          mkdir -p builds/release-packages
-
           for RID in $RUNTIMES; do
-            PACKAGE="mailserver-${PACKAGE_VERSION}-${RID}.tar.gz"
-            tar -C builds/publish -czf "builds/release-packages/$PACKAGE" "$RID"
+            printf '%s\n' "$PACKAGE_VERSION" > "builds/publish/$RID/VERSION.txt"
+            test -f "builds/publish/$RID/mailserver.json"
+            test -f "builds/publish/$RID/wwwroot/admin/index.html"
+            test -d "builds/publish/$RID/wwwroot/admin/assets"
+            case "$RID" in
+              win-*) test -f "builds/publish/$RID/mailserver.exe" ;;
+              *) test -x "builds/publish/$RID/mailserver" ;;
+            esac
           done
+          if [ -x builds/publish/linux-x64/mailserver ]; then
+            builds/publish/linux-x64/mailserver help
+          fi
 
-          (
-            cd builds/release-packages
-            sha256sum ./*.tar.gz > SHA256SUMS
-          )
-
-      - name: Upload release packages
+      - name: Upload release directories
         uses: https://github.com/actions/upload-artifact@v3
         with:
-          name: mailserver-${{ gitea.event.inputs.platform }}-release-packages
-          path: builds/release-packages/*
+          name: mailserver-${{ gitea.event.inputs.platform }}-release-directories
+          path: builds/publish/
           if-no-files-found: error
           retention-days: 30
