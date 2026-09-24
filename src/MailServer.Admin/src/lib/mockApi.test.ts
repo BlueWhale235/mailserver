@@ -685,16 +685,16 @@ describe('domain-detail preview API', () => {
     // --- audit + domain queue ---
     const audit = await mockApi<Array<{ id: string; action: string }>>(`/domains/${domainId}/audit`)
     expect(audit.length).toBeGreaterThan(0)
-    const queue = await mockApi<PagedResult<{ id: string; sender: string; recipient: string; status: string }>>(`/domains/${domainId}/queue?scope=Any&page=1&pageSize=20`)
+    const queue = await mockApi<PagedResult<{ id: string; sender: string; recipient: string; status: string; attempts: number }>>(`/domains/${domainId}/queue?scope=Any&page=1&pageSize=20`)
     expect(queue.items.every(job => job.sender.endsWith(`@${domainName}`) || job.recipient.endsWith(`@${domainName}`))).toBe(true)
     if (queue.items.length) {
       const jobId = queue.items[0]!.id
       const rawMessage = await mockApi<{ deliveryJobId: string }>(`/domains/${domainId}/queue/${jobId}/raw`)
       expect(rawMessage.deliveryJobId).toBe(jobId)
       if (queue.items[0]!.status === 'Failed' || queue.items[0]!.status === 'Deferred')
-        await mockApi(`/domains/${domainId}/queue/${jobId}/retry`, { method: 'POST' })
+        await mockApi(`/domains/${domainId}/queue/${jobId}/retry`, { method: 'POST', body: JSON.stringify({ expectedAttempts: queue.items[0]!.attempts }) })
       else
-        await expect(mockApi(`/domains/${domainId}/queue/${jobId}/retry`, { method: 'POST' })).rejects.toThrow('任务状态已变化')
+        await expect(mockApi(`/domains/${domainId}/queue/${jobId}/retry`, { method: 'POST', body: JSON.stringify({ expectedAttempts: queue.items[0]!.attempts }) })).rejects.toThrow('任务状态已变化')
     }
 
     // --- 发信规则：转发 / 拒绝发信分支 ---

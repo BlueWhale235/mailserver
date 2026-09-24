@@ -122,7 +122,9 @@ async function retry(job: DeliveryJob) {
   error.value = ''
   notice.value = ''
   try {
-    await api(queuePath('/' + job.id + '/retry'), { method: 'POST' })
+    await api(queuePath('/' + job.id + '/retry'), {
+      method: 'POST', body: JSON.stringify({ expectedAttempts: job.attempts }),
+    })
     notice.value = `已安排立即重试 ${job.recipient}`
     await load()
     emit('changed')
@@ -138,7 +140,10 @@ async function retrySelected() {
   const jobs = [...retryableSelected.value]
   try {
     const result = await api<DeliveryBatchResult>(queuePath('/batch/retry'), {
-      method: 'POST', body: JSON.stringify({ ids: jobs.map(job => job.id) }),
+      method: 'POST', body: JSON.stringify({
+        ids: jobs.map(job => job.id),
+        expectedAttempts: Object.fromEntries(jobs.map(job => [job.id, job.attempts])),
+      }),
     })
     const failed = result.items.filter(item => item.status !== 'Succeeded')
     notice.value = result.succeeded ? `已安排 ${result.succeeded} 个任务立即重试` : ''

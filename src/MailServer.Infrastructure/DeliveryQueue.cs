@@ -160,7 +160,7 @@ public sealed class DeliveryQueue(
             safeResponse);
     }
 
-    public async Task RetryNowAsync(Guid jobId, CancellationToken cancellationToken)
+    public async Task RetryNowAsync(Guid jobId, CancellationToken cancellationToken, int? expectedAttempts = null)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         var now = DateTimeOffset.UtcNow;
@@ -169,7 +169,8 @@ public sealed class DeliveryQueue(
             // EF InMemory is used by service tests; relational providers use the guarded single-statement transition below.
             var job = await db.DeliveryJobs.SingleOrDefaultAsync(x => x.Id == jobId, cancellationToken)
                 ?? throw new KeyNotFoundException("Delivery job not found.");
-            if (job.Status is not (DeliveryStatus.Failed or DeliveryStatus.Deferred) || job.LeaseOwner is not null)
+            if (job.Status is not (DeliveryStatus.Failed or DeliveryStatus.Deferred) || job.LeaseOwner is not null
+                || expectedAttempts is not null && job.Attempts != expectedAttempts)
                 throw new DeliveryStateConflictException("Only failed or deferred jobs without a worker lease can be retried.");
             job.Status = DeliveryStatus.Pending;
             job.NextAttemptAt = now;
@@ -181,7 +182,8 @@ public sealed class DeliveryQueue(
         var changed = await db.DeliveryJobs
             .Where(x => x.Id == jobId
                 && (x.Status == DeliveryStatus.Failed || x.Status == DeliveryStatus.Deferred)
-                && x.LeaseOwner == null)
+                && x.LeaseOwner == null
+                && (expectedAttempts == null || x.Attempts == expectedAttempts))
             .ExecuteUpdateAsync(setters => setters
                 .SetProperty(x => x.Status, DeliveryStatus.Pending)
                 .SetProperty(x => x.NextAttemptAt, now)

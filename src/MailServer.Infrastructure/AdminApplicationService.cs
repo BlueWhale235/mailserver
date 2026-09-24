@@ -1970,14 +1970,15 @@ public sealed class AdminApplicationService(
         Guid id,
         string actor,
         CancellationToken cancellationToken,
-        Guid? routeDomainId = null)
+        Guid? routeDomainId = null,
+        int? expectedAttempts = null)
     {
         if (routeDomainId is not null)
         {
             await EnsureDeliveryBelongsToDomainAsync(id, routeDomainId.Value, cancellationToken);
         }
 
-        await deliveryQueue.RetryNowAsync(id, cancellationToken);
+        await deliveryQueue.RetryNowAsync(id, cancellationToken, expectedAttempts);
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         AddAudit(db, actor, "queue.retry", $"delivery:{id}", null);
         await db.SaveChangesAsync(cancellationToken);
@@ -2039,18 +2040,23 @@ public sealed class AdminApplicationService(
     }
 
     public async Task<DeliveryBatchResult> BatchRetryDeliveriesAsync(
-        IReadOnlyList<Guid> ids, string actor, CancellationToken cancellationToken, Guid? routeDomainId = null) =>
-        await BatchDeliveriesAsync(ids, actor, "retry", routeDomainId, cancellationToken);
+        IReadOnlyList<Guid> ids, string actor, CancellationToken cancellationToken, Guid? routeDomainId = null,
+        IReadOnlyDictionary<Guid, int>? expectedAttempts = null) =>
+        await BatchDeliveriesAsync(ids, actor, "retry", routeDomainId, cancellationToken, expectedAttempts);
 
     public async Task<DeliveryBatchResult> BatchDeleteDeliveriesAsync(
         IReadOnlyList<Guid> ids, string actor, CancellationToken cancellationToken, Guid? routeDomainId = null) =>
-        await BatchDeliveriesAsync(ids, actor, "delete", routeDomainId, cancellationToken);
+        await BatchDeliveriesAsync(ids, actor, "delete", routeDomainId, cancellationToken, null);
 
     private async Task<DeliveryBatchResult> BatchDeliveriesAsync(
-        IReadOnlyList<Guid> ids, string actor, string operation, Guid? routeDomainId, CancellationToken cancellationToken)
+        IReadOnlyList<Guid> ids, string actor, string operation, Guid? routeDomainId, CancellationToken cancellationToken,
+        IReadOnlyDictionary<Guid, int>? expectedAttempts)
     {
         if (ids is null || ids.Count is < 1 or > 100 || ids.Any(x => x == Guid.Empty) || ids.Distinct().Count() != ids.Count)
             throw new ArgumentException("Provide 1 to 100 distinct, nonempty delivery IDs.", nameof(ids));
+        if (expectedAttempts is not null && (expectedAttempts.Count != ids.Count
+            || ids.Any(id => !expectedAttempts.TryGetValue(id, out var attempts) || attempts < 0)))
+            throw new ArgumentException("Every delivery ID must have a nonnegative expected attempt count.", nameof(expectedAttempts));
 
         var items = new List<DeliveryBatchItemResult>(ids.Count);
         foreach (var id in ids)
@@ -2058,7 +2064,8 @@ public sealed class AdminApplicationService(
             try
             {
                 if (operation == "retry")
-                    await RetryDeliveryAsync(id, actor, cancellationToken, routeDomainId);
+                    await RetryDeliveryAsync(id, actor, cancellationToken, routeDomainId,
+                        expectedAttempts is null ? null : expectedAttempts[id]);
                 else
                     await DeleteDeliveryAsync(id, actor, cancellationToken, routeDomainId);
                 items.Add(new DeliveryBatchItemResult(id, "Succeeded", null));

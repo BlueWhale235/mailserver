@@ -10,11 +10,13 @@ describe('delivery preview contract', () => {
     const failed = jobs.find(job => job.status === 'Failed')!
     const processing = jobs.find(job => job.status === 'Processing')!
     const first = await mockApi<DeliveryBatchResult>('/queues/batch/retry', {
-      method: 'POST', body: JSON.stringify({ ids: [failed.id, processing.id] }),
+      method: 'POST', body: JSON.stringify({ ids: [failed.id, processing.id], expectedAttempts: {
+        [failed.id]: failed.attempts, [processing.id]: processing.attempts,
+      } }),
     })
     expect(first.items.map(item => item.status)).toEqual(['Succeeded', 'Conflict'])
     const repeated = await mockApi<DeliveryBatchResult>('/queues/batch/retry', {
-      method: 'POST', body: JSON.stringify({ ids: [failed.id] }),
+      method: 'POST', body: JSON.stringify({ ids: [failed.id], expectedAttempts: { [failed.id]: failed.attempts } }),
     })
     expect(repeated.items[0]?.status).toBe('Conflict')
     const deletion = await mockApi<DeliveryBatchResult>('/queues/batch/delete', {

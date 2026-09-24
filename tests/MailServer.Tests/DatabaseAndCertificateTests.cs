@@ -84,12 +84,28 @@ public sealed class DatabaseAndCertificateTests
             }
             var administration = services.GetRequiredService<AdminApplicationService>();
             var retry = await administration.BatchRetryDeliveriesAsync(
-                [failedId, leased[0].Id], "test", CancellationToken.None);
+                [failedId, leased[0].Id], "test", CancellationToken.None,
+                expectedAttempts: new Dictionary<Guid, int> { [failedId] = 0, [leased[0].Id] = 1 });
             Assert.Equal(1, retry.Succeeded);
             Assert.Equal("Conflict", retry.Items[1].Status);
             var repeated = await administration.BatchRetryDeliveriesAsync(
-                [failedId], "test", CancellationToken.None);
+                [failedId], "test", CancellationToken.None,
+                expectedAttempts: new Dictionary<Guid, int> { [failedId] = 0 });
             Assert.Equal("Conflict", repeated.Items[0].Status);
+            var retriedLease = await queue.LeaseAsync("test-retry", 1, TimeSpan.FromMinutes(1), CancellationToken.None);
+            Assert.Equal(failedId, Assert.Single(retriedLease).Id);
+            await queue.CompleteAsync(failedId, DeliveryResult.Permanent("550 rejected"), CancellationToken.None);
+            var staleAfterWorker = await administration.BatchRetryDeliveriesAsync(
+                [failedId], "test", CancellationToken.None,
+                expectedAttempts: new Dictionary<Guid, int> { [failedId] = 0 });
+            Assert.Equal("Conflict", staleAfterWorker.Items[0].Status);
+            var freshAfterWorker = await administration.BatchRetryDeliveriesAsync(
+                [failedId], "test", CancellationToken.None,
+                expectedAttempts: new Dictionary<Guid, int> { [failedId] = 1 });
+            Assert.Equal("Succeeded", freshAfterWorker.Items[0].Status);
+            await Assert.ThrowsAsync<ArgumentException>(() => administration.BatchRetryDeliveriesAsync(
+                [failedId], "test", CancellationToken.None,
+                expectedAttempts: new Dictionary<Guid, int>()));
             var deletion = await administration.BatchDeleteDeliveriesAsync(
                 [failedId, leased[0].Id], "test", CancellationToken.None);
             Assert.Equal("Succeeded", deletion.Items[0].Status);

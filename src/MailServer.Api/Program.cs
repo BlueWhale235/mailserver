@@ -1711,13 +1711,17 @@ api.MapGet("/queues/{id:guid}/attempts", async (
 
 api.MapPost("/queues/{id:guid}/retry", async (
     Guid id,
+    DeliveryRetryRequest request,
     HttpContext http,
     AdminApplicationService administration,
     CancellationToken cancellationToken) =>
 {
+    if (request.ExpectedAttempts is null or < 0)
+        return AdminApiProblems.Validation(http, "ExpectedAttempts", "请提供页面读取时的非负投递次数。");
     try
     {
-        await administration.RetryDeliveryAsync(id, Actor(http), cancellationToken);
+        await administration.RetryDeliveryAsync(id, Actor(http), cancellationToken,
+            expectedAttempts: request.ExpectedAttempts);
         return Results.Accepted();
     }
     catch (KeyNotFoundException) { return Results.NotFound(); }
@@ -1727,7 +1731,10 @@ api.MapPost("/queues/{id:guid}/retry", async (
 api.MapPost("/queues/batch/retry", async (
     IdBatchRequest request, HttpContext http, AdminApplicationService administration, CancellationToken cancellationToken) =>
 {
-    try { return Results.Ok(await administration.BatchRetryDeliveriesAsync(request.Ids, Actor(http), cancellationToken)); }
+    if (request.ExpectedAttempts is null)
+        return AdminApiProblems.Validation(http, "ExpectedAttempts", "请提供每个任务的投递次数。");
+    try { return Results.Ok(await administration.BatchRetryDeliveriesAsync(request.Ids, Actor(http), cancellationToken,
+        expectedAttempts: request.ExpectedAttempts)); }
     catch (ArgumentException exception) { return Results.Problem(statusCode: 400, title: "批量投递请求无效", detail: exception.Message, type: "https://mailserver.local/problems/invalid-delivery-batch", extensions: new Dictionary<string, object?> { ["traceId"] = http.TraceIdentifier }); }
 }).RequirePermission(PermissionCodes.QueueRetry);
 
@@ -1836,13 +1843,17 @@ api.MapGet("/domains/{domainId:guid}/queue/{id:guid}/raw", async (
 api.MapPost("/domains/{domainId:guid}/queue/{id:guid}/retry", async (
     Guid domainId,
     Guid id,
+    DeliveryRetryRequest request,
     HttpContext http,
     AdminApplicationService administration,
     CancellationToken cancellationToken) =>
 {
+    if (request.ExpectedAttempts is null or < 0)
+        return AdminApiProblems.Validation(http, "ExpectedAttempts", "请提供页面读取时的非负投递次数。");
     try
     {
-        await administration.RetryDeliveryAsync(id, Actor(http), cancellationToken, domainId);
+        await administration.RetryDeliveryAsync(id, Actor(http), cancellationToken, domainId,
+            request.ExpectedAttempts);
         return Results.Accepted();
     }
     catch (KeyNotFoundException) { return Results.NotFound(); }
@@ -1852,7 +1863,10 @@ api.MapPost("/domains/{domainId:guid}/queue/{id:guid}/retry", async (
 api.MapPost("/domains/{domainId:guid}/queue/batch/retry", async (
     Guid domainId, IdBatchRequest request, HttpContext http, AdminApplicationService administration, CancellationToken cancellationToken) =>
 {
-    try { return Results.Ok(await administration.BatchRetryDeliveriesAsync(request.Ids, Actor(http), cancellationToken, domainId)); }
+    if (request.ExpectedAttempts is null)
+        return AdminApiProblems.Validation(http, "ExpectedAttempts", "请提供每个任务的投递次数。");
+    try { return Results.Ok(await administration.BatchRetryDeliveriesAsync(request.Ids, Actor(http), cancellationToken,
+        domainId, request.ExpectedAttempts)); }
     catch (ArgumentException exception) { return Results.Problem(statusCode: 400, title: "批量投递请求无效", detail: exception.Message, type: "https://mailserver.local/problems/invalid-delivery-batch", extensions: new Dictionary<string, object?> { ["traceId"] = http.TraceIdentifier }); }
 }).RequireDomainPermission(PermissionCodes.DomainManage, "domainId");
 
@@ -2199,7 +2213,8 @@ public sealed record RebindAliasRequest(
     Guid? TargetAccountId,
     string? SourceLocalPart = null,
     MailAliasMode? Mode = null);
-public sealed record IdBatchRequest(Guid[] Ids);
+public sealed record IdBatchRequest(Guid[] Ids, Dictionary<Guid, int>? ExpectedAttempts = null);
+public sealed record DeliveryRetryRequest(int? ExpectedAttempts);
 public sealed record AliasModeBatchRequest(Guid[] Ids, MailAliasMode Mode);
 public sealed record DomainBatchRequest(Guid[] DomainIds);
 public sealed record ReorderRulesRequest(MailRuleDirection Direction, Guid[] RuleIds);

@@ -336,7 +336,7 @@ public interface IDeliveryQueue
 {
     Task<IReadOnlyList<DeliveryJob>> LeaseAsync(string owner, int count, TimeSpan duration, CancellationToken cancellationToken);
     Task CompleteAsync(Guid jobId, DeliveryResult result, CancellationToken cancellationToken);
-    Task RetryNowAsync(Guid jobId, CancellationToken cancellationToken);
+    Task RetryNowAsync(Guid jobId, CancellationToken cancellationToken, int? expectedAttempts = null);
     Task DeleteAsync(Guid jobId, CancellationToken cancellationToken);
 }
 
