@@ -31,6 +31,10 @@ export const adminPages: AdminPageDefinition[] = [
   { routeName: 'domains', path: '/domains', title: '域与邮箱', icon: 'mdi-at', accessAny: [anyDomainAccess('domain.read')], primary: true, searchable: true },
   { routeName: 'domain-create', path: '/domains/new', title: '添加域', icon: 'mdi-at-plus', accessAny: [systemAccess('domain.manage')] },
   { routeName: 'domain-detail', path: '/domains/:id', title: '域详情', icon: 'mdi-at', accessAny: [routeDomainAccess('domain.read')] },
+  { routeName: 'account-domains', path: '/account-domains', title: '账号和别名', icon: 'mdi-account-multiple-outline', accessAny: [anyDomainAccess('domain.account.read'), anyDomainAccess('domain.alias.read')], primary: true, searchable: true },
+  { routeName: 'account-directory', path: '/domains/:id/accounts', title: '账号和别名', icon: 'mdi-account-multiple-outline', accessAny: [routeDomainAccess('domain.account.read'), routeDomainAccess('domain.alias.read')] },
+  { routeName: 'account-create', path: '/domains/:id/accounts/new', title: '新建账号', icon: 'mdi-account-plus-outline', accessAny: [routeDomainAccess('domain.account.manage')] },
+  { routeName: 'account-settings', path: '/domains/:id/accounts/:accountId', title: '账号配置', icon: 'mdi-account-cog-outline', accessAny: [routeDomainAccess('domain.account.read'), routeDomainAccess('domain.alias.read')] },
   { routeName: 'delivery', path: '/delivery', title: '投递', icon: 'mdi-send-outline', accessAny: [systemAccess('queue.read')], primary: true, searchable: true },
   {
     routeName: 'security', path: '/security', title: '邮件安全', icon: 'mdi-shield-check-outline',

@@ -102,10 +102,10 @@ export const useAuthStore = defineStore('auth', () => {
 
 function permissionCandidates(code: string) {
   const canonical = code.trim().toLowerCase()
-  const reads = ['domain.read', 'api-key.read', 'admin.account.read', 'firewall.read', 'queue.read', 'settings.read', 'dns.read', 'task.read', 'domain.quarantine.read']
+  const reads = ['domain.read', 'api-key.read', 'admin.account.read', 'firewall.read', 'queue.read', 'settings.read', 'dns.read', 'task.read', 'domain.quarantine.read', 'domain.account.read', 'domain.alias.read']
   return reads.includes(canonical) ? [canonical, canonical.replace(/\.read$/, '.manage')] : [canonical]
 }
 
 function domainPermissionCandidates(candidates: string[]) {
-  return candidates.flatMap(value => value.startsWith('domain.quarantine.') ? [value, value.replace('domain.quarantine.', 'domain.')] : [value])
+  return candidates.flatMap(value => /^domain\.(quarantine|account|alias)\./.test(value) ? [value, value.replace(/^domain\.(quarantine|account|alias)\./, 'domain.')] : [value])
 }

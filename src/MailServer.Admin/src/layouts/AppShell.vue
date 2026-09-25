@@ -34,7 +34,7 @@ async function changePassword() {
   finally { passwordBusy.value = false }
 }
 const pageOptions = computed(() => searchablePages
-  .filter(page => canAccessPage(page, auth))
+  .filter(page => canAccessPage(page, auth) && (page.routeName !== 'account-domains' || !auth.canAnyDomain('domain.read')))
   .map(page => ({ title: page.title, value: page.path })))
 async function openPage(path: string | null) {
   if (path) await router.push(path)
@@ -42,7 +42,7 @@ async function openPage(path: string | null) {
 }
 
 const items = computed(() => primaryPages
-  .filter(page => canAccessPage(page, auth))
+  .filter(page => canAccessPage(page, auth) && (page.routeName !== 'account-domains' || !auth.canAnyDomain('domain.read')))
   .map(page => ({ title: page.title, icon: page.icon, to: page.path })))
 
 const active = computed(() => (route.path === '/' ? '/' : `/${route.path.split('/')[1]}`))

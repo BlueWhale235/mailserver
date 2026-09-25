@@ -3,6 +3,7 @@ import { ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import LoginTopology from '../components/LoginTopology.vue'
 import { isPreviewMode } from '../lib/mockApi'
+import { firstAccessiblePath } from '../lib/pageAccess'
 import { useAuthStore } from '../stores/auth'
 
 const auth = useAuthStore()
@@ -45,7 +46,7 @@ async function submit() {
       && !redirect.startsWith('//')
       && !redirect.startsWith('/login')
       ? redirect
-      : '/'
+      : firstAccessiblePath(auth)
     await router.replace(safeRedirect)
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : '登录失败，请检查账号和密码'

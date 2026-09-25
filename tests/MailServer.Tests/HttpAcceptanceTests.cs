@@ -328,6 +328,79 @@ public sealed class HttpAcceptanceTests
         Assert.DoesNotContain(AcceptanceHost.Password, await export.Content.ReadAsStringAsync());
     }
 
+    [Fact]
+    public async Task AccountDirectorySearchPermissionsRebindingAndPersistence()
+    {
+        await using var host = await AcceptanceHost.StartAsync();
+        var domain = await host.JsonAsync(HttpMethod.Post, "/api/v1/domains", new { name = "directory.invalid" }, 201);
+        var id = domain.GetProperty("id").GetGuid();
+        var root = $"/api/v1/domains/{id}";
+        var account = await host.JsonAsync(HttpMethod.Post, root + "/accounts", new { localPart = "owner", password = AcceptanceHost.Password, quotaBytes = 1073741824L }, 201);
+        var accountId = account.GetProperty("id").GetGuid();
+        Guid secondId;
+        await using (var db = await host.Factory.CreateDbContextAsync())
+        {
+            var second = new MailAccount { DomainId = id, LocalPart = "second", PasswordHash = "unused" };
+            secondId = second.Id;
+            db.Accounts.Add(second);
+            for (var i = 0; i < 24; i++) db.Accounts.Add(new MailAccount { DomainId = id, LocalPart = $"paging{i:00}", PasswordHash = "unused" });
+            db.Aliases.Add(new MailAlias { DomainId = id, SourceLocalPart = "orphan", TargetAccountId = null });
+            await db.SaveChangesAsync();
+        }
+        var first = await host.JsonAsync(HttpMethod.Post, root + "/aliases", new { sourceLocalPart = "sales-one", targetAccountId = accountId, mode = "SendReceive" }, 201);
+        await host.JsonAsync(HttpMethod.Post, root + "/aliases", new { sourceLocalPart = "sales-two", targetAccountId = accountId, mode = "ReceiveOnly" }, 201);
+        var result = await host.JsonAsync(HttpMethod.Get, root + "/account-directory/search?query=sales&page=1&pageSize=5");
+        Assert.Equal(1, result.GetProperty("totalCount").GetInt32());
+        Assert.Equal(2, result.GetProperty("items")[0].GetProperty("matchedAliasCount").GetInt32());
+        Assert.Equal(accountId, result.GetProperty("items")[0].GetProperty("id").GetGuid());
+        var next = await host.JsonAsync(HttpMethod.Get, root + "/account-directory/search?page=2&pageSize=20");
+        Assert.Equal(26, next.GetProperty("totalCount").GetInt32());
+        Assert.Equal(6, next.GetProperty("items").GetArrayLength());
+        var late = await host.JsonAsync(HttpMethod.Get, root + "/account-directory/search?query=paging23");
+        Assert.Equal(1, late.GetProperty("totalCount").GetInt32());
+        var pending = await host.JsonAsync(HttpMethod.Get, root + "/account-directory/aliases?pending=true");
+        Assert.Equal(1, pending.GetProperty("totalCount").GetInt32());
+        var orphanId = pending.GetProperty("items")[0].GetProperty("id").GetGuid();
+        await host.JsonAsync(HttpMethod.Put, root + $"/aliases/{orphanId}", new { targetAccountId = secondId, mode = "ReceiveOnly" });
+        pending = await host.JsonAsync(HttpMethod.Get, root + "/account-directory/aliases?pending=true");
+        Assert.Equal(0, pending.GetProperty("totalCount").GetInt32());
+        await host.JsonAsync(HttpMethod.Put, root + $"/aliases/{first.GetProperty("id").GetGuid()}", new { targetAccountId = secondId });
+        var related = await host.JsonAsync(HttpMethod.Get, root + $"/account-directory/aliases?accountId={accountId}");
+        Assert.Equal(1, related.GetProperty("totalCount").GetInt32());
+        await host.JsonAsync(HttpMethod.Get, root + $"/account-directory/accounts/{Guid.NewGuid()}", expected: 404);
+        var other = await host.JsonAsync(HttpMethod.Post, "/api/v1/domains", new { name = "boundary.invalid" }, 201);
+        var otherId = other.GetProperty("id").GetGuid();
+        await host.JsonAsync(HttpMethod.Get, $"/api/v1/domains/{otherId}/account-directory/accounts/{accountId}", expected: 404);
+        await host.JsonAsync(HttpMethod.Post, $"/api/v1/domains/{otherId}/aliases", new { sourceLocalPart = "cross", targetAccountId = accountId, mode = "SendReceive" }, 409);
+        foreach (var kind in new[] { "account", "alias" })
+        {
+            await host.JsonAsync(HttpMethod.Post, "/api/v1/admins", new { userName = kind + "-reader", password = AcceptanceHost.Password, isEnabled = true,
+                grants = new[] { new { permissionCode = $"domain.{kind}.read", resourceType = "domain", resourceKey = id.ToString() } } }, 201);
+            using var reader = await host.LoginAsync(kind + "-reader");
+            var visibleDomains = await reader.GetFromJsonAsync<JsonElement>("/api/v1/account-directories");
+            Assert.Equal(1, visibleDomains.GetProperty("totalCount").GetInt32());
+            Assert.Equal(id, visibleDomains.GetProperty("items")[0].GetProperty("id").GetGuid());
+            var search = await reader.GetFromJsonAsync<JsonElement>(root + "/account-directory/search?query=sales");
+            Assert.Equal(kind == "account" ? 0 : 2, search.GetProperty("totalCount").GetInt32());
+            var detail = await reader.GetFromJsonAsync<JsonElement>(root + $"/account-directory/accounts/{accountId}");
+            if (kind == "alias") Assert.Equal(JsonValueKind.Null, detail.GetProperty("quotaBytes").ValueKind);
+            else Assert.Equal(JsonValueKind.Null, detail.GetProperty("aliasCount").ValueKind);
+            using var forbidden = await reader.PatchAsJsonAsync($"/api/v1/accounts/{accountId}", new { isEnabled = false });
+            Assert.Equal(HttpStatusCode.Forbidden, forbidden.StatusCode);
+            using var boundary = await reader.GetAsync($"/api/v1/domains/{otherId}/account-directory/search");
+            Assert.Equal(HttpStatusCode.Forbidden, boundary.StatusCode);
+            using var aliases = await reader.GetAsync(root + "/account-directory/aliases");
+            Assert.Equal(kind == "alias" ? HttpStatusCode.OK : HttpStatusCode.Forbidden, aliases.StatusCode);
+        }
+        await using (var db = await host.Factory.CreateDbContextAsync())
+        {
+            Assert.Equal(secondId, (await db.Aliases.SingleAsync(x => x.Id == orphanId)).TargetAccountId);
+            Assert.True(await db.AuditRecords.AnyAsync(x => x.Action == "alias.update" && x.Resource == "alias:" + orphanId));
+        }
+        var audit = await host.JsonAsync(HttpMethod.Get, "/api/v1/audit?page=1&pageSize=100");
+        Assert.True(audit.GetProperty("totalCount").GetInt32() > 0);
+    }
+
     private sealed class AcceptanceHost : IAsyncDisposable
     {
         public const string Password = "AcceptanceOnly_2026";

@@ -16,6 +16,14 @@ function checker(system: string[] = [], domains: Record<string, string[]> = {}) 
 }
 
 describe('admin page access catalog', () => {
+  it('provides an entry for users with only account or alias permissions', () => {
+    for (const code of ['domain.account.read', 'domain.alias.read']) {
+      const permissions = checker([], { [code]: ['domain-a'] })
+      expect(firstAccessiblePath(permissions)).toBe('/account-domains')
+      expect(canAccessPage(getPageDefinition('account-settings')!, permissions, 'domain-a')).toBe(true)
+      expect(canAccessPage(getPageDefinition('account-settings')!, permissions, 'domain-b')).toBe(false)
+    }
+  })
   it('uses domain scope for the domain list and exact domain scope for a detail route', () => {
     const permissions = checker([], { 'domain.read': ['domain-a'] })
     expect(canAccessPage(getPageDefinition('domains')!, permissions)).toBe(true)

@@ -53,14 +53,18 @@ public static class PermissionCodes
     public const string DomainCertificateDetail = DomainRead;
     public const string DomainCertificateUpdate = DomainManage;
     public const string DomainCertificateDelete = DomainManage;
-    public const string DomainAccountList = DomainRead;
-    public const string DomainAccountCreate = DomainManage;
-    public const string DomainAccountUpdate = DomainManage;
-    public const string DomainAccountPassword = DomainManage;
-    public const string DomainAliasList = DomainRead;
-    public const string DomainAliasCreate = DomainManage;
-    public const string DomainAliasUpdate = DomainManage;
-    public const string DomainAliasDelete = DomainManage;
+    public const string DomainAccountRead = "domain.account.read";
+    public const string DomainAccountManage = "domain.account.manage";
+    public const string DomainAliasRead = "domain.alias.read";
+    public const string DomainAliasManage = "domain.alias.manage";
+    public const string DomainAccountList = DomainAccountRead;
+    public const string DomainAccountCreate = DomainAccountManage;
+    public const string DomainAccountUpdate = DomainAccountManage;
+    public const string DomainAccountPassword = DomainAccountManage;
+    public const string DomainAliasList = DomainAliasRead;
+    public const string DomainAliasCreate = DomainAliasManage;
+    public const string DomainAliasUpdate = DomainAliasManage;
+    public const string DomainAliasDelete = DomainAliasManage;
     public const string DomainRuleList = DomainRead;
     public const string DomainRuleCreate = DomainManage;
     public const string DomainRuleUpdate = DomainManage;
@@ -88,13 +92,14 @@ public static class PermissionCodes
         DomainRead,
         DomainManage,
         DomainQuarantineRead,
-        DomainQuarantineManage
+        DomainQuarantineManage, DomainAccountRead, DomainAccountManage, DomainAliasRead, DomainAliasManage
     };
 
     private static readonly IReadOnlyDictionary<string, string> ReadToManageMap =
         new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
-            [DomainRead] = DomainManage,
+            [DomainAccountRead] = DomainAccountManage,
+            [DomainAliasRead] = DomainAliasManage,
             [ApiKeyRead] = ApiKeyManage,
             [AdminAccountRead] = AdminAccountManage,
             [FirewallRead] = FirewallManage,
@@ -189,12 +194,7 @@ public sealed class PermissionSnapshot
     public bool HasAnyDomainPermission(string code)
     {
         if (FullAccess) return true;
-        var canonical = code.Trim().ToLowerInvariant();
-        var management = PermissionCodes.ManagementPermissionFor(canonical);
-        return AllDomainPermissions.Contains(canonical)
-               || DomainPermissions.ContainsKey(canonical)
-               || (management is not null
-                   && (AllDomainPermissions.Contains(management) || DomainPermissions.ContainsKey(management)));
+        return HasAllDomains(code) || DomainPermissions.Values.SelectMany(ids => ids).Distinct().Any(id => Has(code, id));
     }
 
     public bool HasAllDomains(string code)
@@ -207,10 +207,10 @@ public sealed class PermissionSnapshot
             return true;
         return canonical switch
         {
-            PermissionCodes.DomainQuarantineRead =>
+            PermissionCodes.DomainQuarantineRead or PermissionCodes.DomainAccountRead or PermissionCodes.DomainAliasRead =>
                 AllDomainPermissions.Contains(PermissionCodes.DomainRead)
                 || AllDomainPermissions.Contains(PermissionCodes.DomainManage),
-            PermissionCodes.DomainQuarantineManage =>
+            PermissionCodes.DomainQuarantineManage or PermissionCodes.DomainAccountManage or PermissionCodes.DomainAliasManage =>
                 AllDomainPermissions.Contains(PermissionCodes.DomainManage),
             _ => false
         };
@@ -225,8 +225,8 @@ public sealed class PermissionSnapshot
         var implied = code switch
         {
             // 隔离区权限可由更宽的域读/管权限隐含，方便旧角色平滑使用新增隔离功能。
-            PermissionCodes.DomainQuarantineRead => PermissionCodes.DomainRead,
-            PermissionCodes.DomainQuarantineManage => PermissionCodes.DomainManage,
+            PermissionCodes.DomainQuarantineRead or PermissionCodes.DomainAccountRead or PermissionCodes.DomainAliasRead => PermissionCodes.DomainRead,
+            PermissionCodes.DomainQuarantineManage or PermissionCodes.DomainAccountManage or PermissionCodes.DomainAliasManage => PermissionCodes.DomainManage,
             _ => null
         };
         return implied is not null
@@ -261,6 +261,10 @@ public sealed class PermissionService(IDbContextFactory<MailDbContext> dbFactory
         [
             Item(PermissionCodes.DomainRead, "域名只读", "查看授权范围内的域名、账号、别名、规则、DNS、证书、投递队列和日志。", domainScope: true),
             Item(PermissionCodes.DomainManage, "域名管理", "创建域名，管理授权范围内的域名配置、账号、别名、规则、DNS、证书、配额和投递队列。", domainScope: true),
+            Item(PermissionCodes.DomainAccountRead, "账号只读", "查看账号状态与容量。", domainScope: true),
+            Item(PermissionCodes.DomainAccountManage, "账号管理", "创建账号、修改状态容量和密码。", domainScope: true),
+            Item(PermissionCodes.DomainAliasRead, "别名只读", "查看别名及其目标账号地址。", domainScope: true),
+            Item(PermissionCodes.DomainAliasManage, "别名管理", "创建、修改、转移与删除别名。", domainScope: true),
             Item(PermissionCodes.DomainQuarantineRead, "审核与隔离只读", "查看授权域名下的隔离邮件、审核状态和原始邮件内容。", domainScope: true),
             Item(PermissionCodes.DomainQuarantineManage, "审核与隔离管理", "释放或删除授权域名下的隔离邮件。", domainScope: true)
         ]),
@@ -363,14 +367,14 @@ public sealed class PermissionService(IDbContextFactory<MailDbContext> dbFactory
             result.UnionWith(managementIds);
         }
 
-        if (canonical == PermissionCodes.DomainQuarantineRead)
+        if (canonical is PermissionCodes.DomainQuarantineRead or PermissionCodes.DomainAccountRead or PermissionCodes.DomainAliasRead)
         {
             if (snapshot.DomainPermissions.TryGetValue(PermissionCodes.DomainRead, out var readIds))
                 result.UnionWith(readIds);
             if (snapshot.DomainPermissions.TryGetValue(PermissionCodes.DomainManage, out var manageIds))
                 result.UnionWith(manageIds);
         }
-        else if (canonical == PermissionCodes.DomainQuarantineManage
+        else if ((canonical is PermissionCodes.DomainQuarantineManage or PermissionCodes.DomainAccountManage or PermissionCodes.DomainAliasManage)
                  && snapshot.DomainPermissions.TryGetValue(PermissionCodes.DomainManage, out var manageIds))
         {
             result.UnionWith(manageIds);

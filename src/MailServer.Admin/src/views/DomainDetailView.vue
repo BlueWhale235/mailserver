@@ -1283,6 +1283,10 @@ function aliasModeLabel(mode: AliasMode) {
 }
 
 function requestTab(value: unknown) {
+  if (value === "accounts" || value === "aliases") {
+    void router.push({ name: "account-directory", params: { id: domainId.value } });
+    return;
+  }
   const next = normalizeTab(value);
   if (next === tab.value) return;
   if (currentEditorDirty.value || currentEditorSaving.value) {
@@ -1555,8 +1559,7 @@ onMounted(() => {
 
     <v-tabs :model-value="tab" class="detail-tabs" color="primary" show-arrows @update:model-value="requestTab">
       <v-tab value="overview">概览</v-tab>
-      <v-tab value="accounts">邮箱账号</v-tab>
-      <v-tab value="aliases">别名</v-tab>
+      <v-tab value="accounts">账号和别名</v-tab>
       <v-tab value="rules">收发信规则</v-tab>
       <v-tab v-if="can('domain.quarantine.read', domainId)" value="quarantine"
         >隔离审核</v-tab

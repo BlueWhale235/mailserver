@@ -49,3 +49,20 @@ describe('page authorization guard', () => {
     expect(router.currentRoute.value.query.target).toBe('域详情')
   })
 })
+
+
+describe('account directory routes', () => {
+  it('matches configuration and creation before the domain catch-all', () => {
+    expect(router.resolve('/domains/domain-a/accounts/new').name).toBe('account-create')
+    expect(router.resolve('/domains/domain-a/accounts/account-a').name).toBe('account-settings')
+  })
+  it('redirects legacy aliases while preserving search and page', async () => {
+    const auth = useAuthStore()
+    auth.initialized = true
+    auth.session = { id: 'admin', userName: 'admin' }
+    auth.permissions.fullAccess = true
+    await router.push('/domains/domain-a/aliases?query=sales&page=2')
+    expect(router.currentRoute.value.name).toBe('account-directory')
+    expect(router.currentRoute.value.query).toEqual({ query: 'sales', page: '2' })
+  })
+})

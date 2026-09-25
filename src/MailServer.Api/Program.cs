@@ -960,6 +960,8 @@ api.MapGet("/domains/{id:guid}/health", async (
     catch (KeyNotFoundException) { return Results.NotFound(); }
 }).RequireDomainPermission(PermissionCodes.DomainDetail);
 
+api.MapAccountDirectory();
+
 api.MapGet("/domains/{id:guid}/accounts", async (
     Guid id,
     AdminApplicationService administration,
@@ -1145,6 +1147,8 @@ api.MapPost("/domains/{id:guid}/accounts", async (
     AdminApplicationService administration,
     CancellationToken cancellationToken) =>
 {
+    if (string.IsNullOrWhiteSpace(request.Password) || request.Password.Length < 12)
+        return AccountDirectoryEndpoints.Invalid(http, "password", "密码至少需要 12 个字符。");
     try
     {
         var account = await administration.CreateDomainAccountAsync(
@@ -1156,9 +1160,9 @@ api.MapPost("/domains/{id:guid}/accounts", async (
             cancellationToken);
         return Results.Created($"/api/v1/domains/{id}/accounts/{account.Id}", account);
     }
-    catch (KeyNotFoundException) { return Results.NotFound(); }
-    catch (FormatException exception) { return Results.BadRequest(new { error = exception.Message }); }
-    catch (InvalidOperationException exception) { return Results.Conflict(new { error = exception.Message }); }
+    catch (KeyNotFoundException) { return AccountDirectoryEndpoints.Problem(http, 404, "对象不存在。"); }
+    catch (FormatException exception) { return AccountDirectoryEndpoints.Invalid(http, "localPart", exception.Message); }
+    catch (InvalidOperationException exception) { return AccountDirectoryEndpoints.Problem(http, 409, exception.Message); }
 }).RequireDomainPermission(PermissionCodes.DomainAccountCreate);
 
 api.MapGet("/domains/{id:guid}/aliases", async (
@@ -1232,11 +1236,9 @@ api.MapPost("/domains/{id:guid}/aliases", async (
             cancellationToken);
         return Results.Created($"/api/v1/domains/{id}/aliases/{alias.Id}", alias);
     }
-    catch (KeyNotFoundException) { return Results.NotFound(); }
-    catch (Exception exception) when (exception is FormatException or InvalidOperationException)
-    {
-        return Results.BadRequest(new { error = exception.Message });
-    }
+    catch (KeyNotFoundException) { return AccountDirectoryEndpoints.Problem(http, 404, "对象不存在。"); }
+    catch (FormatException exception) { return AccountDirectoryEndpoints.Invalid(http, "sourceLocalPart", exception.Message); }
+    catch (InvalidOperationException exception) { return AccountDirectoryEndpoints.Problem(http, 409, exception.Message); }
 }).RequireDomainPermission(PermissionCodes.DomainAliasCreate);
 
 api.MapPut("/domains/{id:guid}/aliases/{aliasId:guid}", async (
@@ -1245,12 +1247,13 @@ api.MapPut("/domains/{id:guid}/aliases/{aliasId:guid}", async (
     RebindAliasRequest request,
     HttpContext http,
     AdminApplicationService administration,
+    IDbContextFactory<MailDbContext> factory,
     CancellationToken cancellationToken) =>
 {
     try
     {
-        var aliases = await administration.GetDomainAliasesAsync(id, cancellationToken);
-        if (aliases.All(x => x.Id != aliasId)) return Results.NotFound();
+        await using var db = await factory.CreateDbContextAsync(cancellationToken);
+        if (!await db.Aliases.AnyAsync(x => x.DomainId == id && x.Id == aliasId, cancellationToken)) return AccountDirectoryEndpoints.Problem(http, 404, "对象不存在。");
         return Results.Ok(await administration.UpdateAliasAsync(
             aliasId,
             request.SourceLocalPart,
@@ -1259,9 +1262,9 @@ api.MapPut("/domains/{id:guid}/aliases/{aliasId:guid}", async (
             Actor(http),
             cancellationToken));
     }
-    catch (KeyNotFoundException) { return Results.NotFound(); }
-    catch (FormatException exception) { return Results.BadRequest(new { error = exception.Message }); }
-    catch (InvalidOperationException exception) { return Results.Conflict(new { error = exception.Message }); }
+    catch (KeyNotFoundException) { return AccountDirectoryEndpoints.Problem(http, 404, "对象不存在。"); }
+    catch (FormatException exception) { return AccountDirectoryEndpoints.Invalid(http, "sourceLocalPart", exception.Message); }
+    catch (InvalidOperationException exception) { return AccountDirectoryEndpoints.Problem(http, 409, exception.Message); }
 }).RequireDomainPermission(PermissionCodes.DomainAliasUpdate);
 
 api.MapGet("/domains/{id:guid}/rules", async (
@@ -1484,8 +1487,8 @@ api.MapPost("/accounts/{id:guid}/password", async (
         await administration.SetAccountPasswordAsync(id, request.Password, Actor(http), cancellationToken);
         return Results.NoContent();
     }
-    catch (KeyNotFoundException) { return Results.NotFound(); }
-    catch (FormatException exception) { return Results.BadRequest(new { error = exception.Message }); }
+    catch (KeyNotFoundException) { return AccountDirectoryEndpoints.Problem(http, 404, "对象不存在。"); }
+    catch (FormatException exception) { return AccountDirectoryEndpoints.Invalid(http, "password", exception.Message); }
 }).RequireAccountDomainPermission(PermissionCodes.DomainAccountPassword);
 
 api.MapPatch("/accounts/{id:guid}", async (
@@ -1500,9 +1503,9 @@ api.MapPatch("/accounts/{id:guid}", async (
         await administration.UpdateAccountAsync(id, request.IsEnabled, request.QuotaBytes, Actor(http), cancellationToken);
         return Results.NoContent();
     }
-    catch (KeyNotFoundException) { return Results.NotFound(); }
-    catch (ArgumentOutOfRangeException exception) { return Results.BadRequest(new { error = exception.Message }); }
-    catch (InvalidOperationException exception) { return Results.BadRequest(new { error = exception.Message }); }
+    catch (KeyNotFoundException) { return AccountDirectoryEndpoints.Problem(http, 404, "对象不存在。"); }
+    catch (ArgumentOutOfRangeException exception) { return AccountDirectoryEndpoints.Invalid(http, "quotaBytes", exception.Message); }
+    catch (InvalidOperationException exception) { return AccountDirectoryEndpoints.Invalid(http, "quotaBytes", exception.Message); }
 }).RequireAccountDomainPermission(PermissionCodes.DomainAccountUpdate);
 
 api.MapDelete("/accounts/{id:guid}", async (
@@ -1516,8 +1519,8 @@ api.MapDelete("/accounts/{id:guid}", async (
         await administration.DeleteAccountAsync(id, Actor(http), cancellationToken);
         return Results.NoContent();
     }
-    catch (KeyNotFoundException) { return Results.NotFound(); }
-    catch (InvalidOperationException exception) { return Results.Conflict(new { error = exception.Message }); }
+    catch (KeyNotFoundException) { return AccountDirectoryEndpoints.Problem(http, 404, "对象不存在。"); }
+    catch (InvalidOperationException exception) { return AccountDirectoryEndpoints.Problem(http, 409, exception.Message); }
 }).RequireAccountDomainPermission(PermissionCodes.DomainAccountUpdate);
 
 api.MapGet("/aliases", async (
@@ -1562,7 +1565,7 @@ api.MapDelete("/aliases/{id:guid}", async (
         await administration.DeleteAliasAsync(id, Actor(http), cancellationToken);
         return Results.NoContent();
     }
-    catch (KeyNotFoundException) { return Results.NotFound(); }
+    catch (KeyNotFoundException) { return AccountDirectoryEndpoints.Problem(http, 404, "对象不存在。"); }
 }).RequireAliasDomainPermission(PermissionCodes.DomainAliasDelete);
 
 api.MapGet("/permissions/catalog", (PermissionService permissions) =>

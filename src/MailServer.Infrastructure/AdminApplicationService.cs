@@ -1041,7 +1041,7 @@ public sealed class AdminApplicationService(
         CancellationToken cancellationToken)
     {
         if (!TrySplitAddress(address, out var localPart, out var domainName))
-            throw new FormatException("Invalid email address.");
+            throw new FormatException("邮箱地址格式无效。");
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
         var domain = await db.Domains.SingleOrDefaultAsync(x => x.Name == domainName, cancellationToken)
@@ -1086,10 +1086,10 @@ public sealed class AdminApplicationService(
         {
             if (quotaBytes <= 0) throw new ArgumentOutOfRangeException(nameof(quotaBytes));
             if (quotaBytes.Value > account.Domain.QuotaBytes)
-                throw new InvalidOperationException("Account quota cannot exceed the domain quota.");
+                throw new InvalidOperationException("账号配额不能超过邮件域配额。");
             var usedBytes = account.UsedBytes;
             if (quotaBytes.Value < usedBytes)
-                throw new InvalidOperationException("Account quota cannot be lower than the currently used capacity.");
+                throw new InvalidOperationException("账号配额不能小于当前已用容量。");
             account.QuotaBytes = quotaBytes.Value;
         }
         AddAudit(db, actor, "account.update", $"account:{id}", null);
@@ -1105,7 +1105,7 @@ public sealed class AdminApplicationService(
         await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
         var account = await db.Accounts.Include(x => x.Domain).SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
             ?? throw new KeyNotFoundException("Account not found.");
-        if (account.IsEnabled) throw new InvalidOperationException("Disable the account before deletion.");
+        if (account.IsEnabled) throw new InvalidOperationException("请先停用账号，再执行软删除。");
         var now = DateTimeOffset.UtcNow;
         var purgeAfter = now.AddDays(Math.Clamp(configuration.GetValue("Maintenance:SoftDeleteRetentionDays", 30), 1, 3650));
         account.DeletedAt = now; account.DeletedBy = actor; account.PurgeAfter = purgeAfter;
@@ -1184,7 +1184,7 @@ public sealed class AdminApplicationService(
             .Where(x => x.DomainId == domainId && ids.Contains(x.Id))
             .ToListAsync(cancellationToken);
         if (accounts.Count != ids.Length) throw new KeyNotFoundException("One or more accounts were not found in this domain.");
-        if (accounts.Any(x => x.IsEnabled)) throw new InvalidOperationException("Disable all selected accounts before deletion.");
+        if (accounts.Any(x => x.IsEnabled)) throw new InvalidOperationException("请先停用全部所选账号，再执行软删除。");
 
         var now = DateTimeOffset.UtcNow;
         var purgeAfter = now.AddDays(Math.Clamp(configuration.GetValue("Maintenance:SoftDeleteRetentionDays", 30), 1, 3650));
@@ -1431,17 +1431,17 @@ public sealed class AdminApplicationService(
         if (await db.Aliases.AnyAsync(
                 x => x.Id != alias.Id && x.DomainId == alias.DomainId && x.SourceLocalPart == normalizedLocalPart,
                 cancellationToken))
-            throw new InvalidOperationException("Alias already exists.");
+            throw new InvalidOperationException("别名地址已存在。");
         if (await db.Accounts.AnyAsync(
                 x => x.DomainId == alias.DomainId && x.LocalPart == normalizedLocalPart,
                 cancellationToken))
-            throw new InvalidOperationException("An account already uses this address.");
+            throw new InvalidOperationException("该地址已被邮箱账号使用。");
         var requestedMode = mode ?? alias.Mode;
         var requestedTargetId = targetAccountId ?? alias.TargetAccountId;
         if (requestedTargetId is null)
         {
             if (requestedMode != MailAliasMode.Disabled)
-                throw new InvalidOperationException("Enabled aliases require a target account.");
+                throw new InvalidOperationException("启用别名必须绑定目标账号。");
             alias.SourceLocalPart = normalizedLocalPart;
             alias.Mode = MailAliasMode.Disabled;
             alias.IsEnabled = false;
@@ -1452,11 +1452,11 @@ public sealed class AdminApplicationService(
         }
         var target = await db.Accounts.Include(x => x.Domain)
             .SingleOrDefaultAsync(x => x.Id == requestedTargetId.Value, cancellationToken)
-            ?? throw new KeyNotFoundException("Target account not found.");
+            ?? throw new KeyNotFoundException("目标账号不存在。");
         if (target.DomainId != alias.DomainId)
-            throw new InvalidOperationException("Alias and target account must belong to the same domain.");
+            throw new InvalidOperationException("别名与目标账号必须属于同一邮件域。");
         if (!target.IsEnabled && requestedMode != MailAliasMode.Disabled)
-            throw new InvalidOperationException("Target account is disabled.");
+            throw new InvalidOperationException("目标账号已停用，请选择启用的账号。");
         alias.SourceLocalPart = normalizedLocalPart;
         alias.TargetAccountId = target.Id;
         alias.DestinationAddress = $"{target.LocalPart}@{target.Domain.Name}";
@@ -2634,11 +2634,11 @@ public sealed class AdminApplicationService(
         if (await db.Accounts.AnyAsync(
                 x => x.DomainId == domain.Id && x.LocalPart == localPart,
                 cancellationToken))
-            throw new InvalidOperationException("Account already exists.");
+            throw new InvalidOperationException("账号地址已存在。");
         if (await db.Aliases.AnyAsync(
                 x => x.DomainId == domain.Id && x.SourceLocalPart == localPart,
                 cancellationToken))
-            throw new InvalidOperationException("An alias already uses this address.");
+            throw new InvalidOperationException("该地址已被邮箱别名使用。");
 
         var account = new MailAccount
         {
@@ -2650,7 +2650,7 @@ public sealed class AdminApplicationService(
         if (account.QuotaBytes <= 0)
             throw new ArgumentOutOfRangeException(nameof(quotaBytes), "Account quota must be greater than zero.");
         if (account.QuotaBytes > domain.QuotaBytes)
-            throw new InvalidOperationException("Account quota cannot exceed the domain quota.");
+            throw new InvalidOperationException("账号配额不能超过邮件域配额。");
         db.Accounts.Add(account);
         foreach (var folder in mailboxSettings.DefaultFolders)
         {
@@ -2682,18 +2682,18 @@ public sealed class AdminApplicationService(
         if (await db.Aliases.AnyAsync(
                 x => x.DomainId == domain.Id && x.SourceLocalPart == localPart,
                 cancellationToken))
-            throw new InvalidOperationException("Alias already exists.");
+            throw new InvalidOperationException("别名地址已存在。");
         if (await db.Accounts.AnyAsync(
                 x => x.DomainId == domain.Id && x.LocalPart == localPart,
                 cancellationToken))
-            throw new InvalidOperationException("An account already uses this address.");
+            throw new InvalidOperationException("该地址已被邮箱账号使用。");
         var target = await db.Accounts.Include(x => x.Domain)
             .SingleOrDefaultAsync(x => x.Id == targetAccountId, cancellationToken)
-            ?? throw new KeyNotFoundException("Target account not found.");
+            ?? throw new KeyNotFoundException("目标账号不存在。");
         if (target.DomainId != domain.Id)
-            throw new InvalidOperationException("Alias and target account must belong to the same domain.");
+            throw new InvalidOperationException("别名与目标账号必须属于同一邮件域。");
         if (!target.IsEnabled && mode != MailAliasMode.Disabled)
-            throw new InvalidOperationException("Target account is disabled.");
+            throw new InvalidOperationException("目标账号已停用，请选择启用的账号。");
         var targetAddress = $"{target.LocalPart}@{target.Domain.Name}";
         var alias = new MailAlias
         {
@@ -2886,12 +2886,12 @@ public sealed class AdminApplicationService(
         {
             if (!TrySplitAddress(trimmed, out var localPart, out var suppliedDomain)
                 || !string.Equals(suppliedDomain, domainName, StringComparison.OrdinalIgnoreCase))
-                throw new FormatException("Invalid email address.");
+                throw new FormatException("邮箱地址格式无效。");
             return localPart;
         }
 
         if (!TrySplitAddress($"{trimmed}@{domainName}", out var normalizedLocalPart, out _))
-            throw new FormatException("Invalid email address.");
+            throw new FormatException("邮箱地址格式无效。");
         return normalizedLocalPart;
     }
 
@@ -2914,7 +2914,7 @@ public sealed class AdminApplicationService(
     private static void ValidatePassword(string password)
     {
         if (string.IsNullOrWhiteSpace(password) || password.Length < 12)
-            throw new FormatException("Password must be at least 12 characters.");
+            throw new FormatException("密码至少需要 12 个字符。");
     }
 
     private static string? NullIfWhiteSpace(string? value) =>

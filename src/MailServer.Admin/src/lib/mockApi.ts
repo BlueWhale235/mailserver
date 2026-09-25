@@ -48,7 +48,7 @@ interface MockDomainAlias {
   targetAddress: string | null
   isEnabled: boolean
   legacyDestinationAddress: string | null
-  mode: 'SendReceive' | 'ReceiveOnly'
+  mode: 'SendReceive' | 'ReceiveOnly' | 'Disabled'
   canReceive: boolean
   canSend: boolean
 }
@@ -312,6 +312,10 @@ const previewPermissionCatalog = [
     { code: 'admin.account.manage', name: '管理员管理', description: '创建、编辑、授权和删除后台管理员账号。', groupKey: 'access', supportsDomainScope: false },
   ] },
   { key: 'domains', name: '域与邮箱', permissions: [
+    { code: 'domain.account.read', name: '账号只读', description: '查看账号状态与容量。', groupKey: 'domains', supportsDomainScope: true },
+    { code: 'domain.account.manage', name: '账号管理', description: '创建账号、修改状态容量和密码。', groupKey: 'domains', supportsDomainScope: true },
+    { code: 'domain.alias.read', name: '别名只读', description: '查看别名及其目标账号地址。', groupKey: 'domains', supportsDomainScope: true },
+    { code: 'domain.alias.manage', name: '别名管理', description: '创建、修改、转移与删除别名。', groupKey: 'domains', supportsDomainScope: true },
     { code: 'domain.read', name: '域名只读', description: '查看授权范围内的域名、邮箱和投递信息。', groupKey: 'domains', supportsDomainScope: true },
     { code: 'domain.manage', name: '域名管理', description: '管理授权范围内的域名配置、邮箱、规则与证书。', groupKey: 'domains', supportsDomainScope: true },
     { code: 'domain.quarantine.read', name: '审核与隔离只读', description: '查看授权域的隔离邮件与审核状态。', groupKey: 'domains', supportsDomainScope: true },
@@ -1677,6 +1681,43 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
     } as T
   }
 
+  if (url.pathname === '/account-directories' && method === 'GET') return page(domains.filter(row => row.name.includes(url.searchParams.get('query') || '')).map(({ id, name }) => ({ id, name })), Number(url.searchParams.get('page') || 1), 20) as T
+
+  const directoryMatch = url.pathname.match(/^\/domains\/([^/]+)\/account-directory(?:\/(.*))?$/)
+  if (directoryMatch && method === 'GET') {
+    const domain = domains.find(row => row.id === directoryMatch[1])
+    if (!domain) throw new Error('邮件域不存在')
+    const accounts = domainAccounts[domain.id] ?? [], aliases = domainAliases[domain.id] ?? []
+    const query = (url.searchParams.get('query') ?? '').trim().toLowerCase()
+    const currentPage = Number(url.searchParams.get('page') || 1), size = Number(url.searchParams.get('pageSize') || 20)
+    const resource = directoryMatch[2] ?? ''
+    if (!resource) return { domainName: domain.name, canReadDomain: true, canReadAccounts: true, canReadAliases: true, canManageAccounts: true, canManageAliases: true } as T
+    if (resource === 'targets') return page(accounts.filter(row => row.isEnabled && row.address.toLowerCase().includes(query)).map(({ id, address }) => ({ id, address })), currentPage, 20) as T
+    if (resource === 'aliases') {
+      const accountId = url.searchParams.get('accountId'), pending = url.searchParams.get('pending') === 'true'
+      const rows = aliases.filter(row => (!accountId || row.targetAccountId === accountId) && (!pending || !accounts.some(account => account.id === row.targetAccountId)) && row.source.toLowerCase().includes(query)).map(row => {
+        const target = accounts.find(account => account.id === row.targetAccountId)
+        const unavailableReason = !target ? '目标账号不存在或已删除' : !target.isEnabled ? '所属账号已停用' : !row.isEnabled || row.mode === 'Disabled' ? '别名已停用' : null
+        return { ...row, targetAddress: target?.address ?? null, unavailableReason, canReceive: !unavailableReason, canSend: !unavailableReason && row.mode === 'SendReceive' }
+      })
+      return page(rows, currentPage, size) as T
+    }
+    const rows = accounts.map(row => {
+      const related = aliases.filter(alias => alias.targetAccountId === row.id)
+      const matched = query ? related.filter(alias => alias.source.toLowerCase().includes(query)).sort((a, b) => a.source.localeCompare(b.source)) : []
+      return { ...row, aliasCount: related.length, matchedAlias: matched[0]?.source ?? null, matchedAliasCount: matched.length }
+    }).sort((a, b) => a.address.localeCompare(b.address))
+    if (resource.startsWith('accounts/')) {
+      const row = rows.find(account => account.id === resource.slice(9))
+      if (!row) throw new Error('邮箱账号不存在')
+      return row as T
+    }
+    if (resource === 'search') {
+      const enabled = url.searchParams.get('isEnabled')
+      return page(rows.filter(row => (!query || row.address.toLowerCase().includes(query) || row.matchedAliasCount > 0) && (enabled === null || row.isEnabled === (enabled === 'true'))), currentPage, size) as T
+    }
+  }
+
   const domainAccountsMatch = url.pathname.match(/^\/domains\/([^/]+)\/accounts\/search$/)
   if (domainAccountsMatch && method === 'GET') {
     const domain = domains.find(candidate => candidate.id === domainAccountsMatch[1])
@@ -1747,7 +1788,7 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
     const source = `${request.sourceLocalPart.trim().toLowerCase()}@${domain.name}`
     const rows = domainAliases[domain.id] ??= []
     if (rows.some(alias => alias.source === source)) throw new Error('邮箱别名已存在')
-    const alias: MockDomainAlias = { id: globalThis.crypto.randomUUID(), source, targetAccountId: account.id, targetAddress: account.address, isEnabled: true, legacyDestinationAddress: null, mode: request.mode, canReceive: true, canSend: request.mode === 'SendReceive' }
+    const alias: MockDomainAlias = { id: globalThis.crypto.randomUUID(), source, targetAccountId: account.id, targetAddress: account.address, isEnabled: request.mode !== 'Disabled', legacyDestinationAddress: null, mode: request.mode, canReceive: request.mode !== 'Disabled', canSend: request.mode === 'SendReceive' }
     rows.unshift(alias)
     account.aliasCount++
     addPreviewAudit({ content: '创建邮箱别名', category: 'Create', status: 'Succeeded', actor: 'preview-admin', action: 'alias.create', resource: `alias:${alias.id}`, detail: `${source} -> ${account.address}`, remoteAddress: '127.0.0.1', requestId: `req-alias-${Date.now()}`, relatedId: domain.id, createdAt: new Date().toISOString(), changes: [] })
@@ -2078,8 +2119,8 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
     if (request.mode) {
       if (request.mode === 'ReceiveOnly' && !alias.targetAccountId) throw new Error('仅收信别名仍需绑定目标邮箱')
       alias.mode = request.mode
-      alias.isEnabled = true
-      alias.canReceive = true
+      alias.isEnabled = request.mode !== 'Disabled'
+      alias.canReceive = request.mode !== 'Disabled'
       alias.canSend = request.mode === 'SendReceive'
     }
     noteDomainAudit('alias.update', 'Update', '更新邮箱别名', 'alias:' + alias.id, alias.source + ' -> ' + (alias.targetAddress ?? '未绑定'), domain.id)
