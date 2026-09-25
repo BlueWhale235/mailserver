@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { onBeforeRouteLeave, onBeforeRouteUpdate, useRoute, useRouter, type RouteLocationNormalized } from "vue-router";
 import PageHeader from "../components/PageHeader.vue";
+import WorkspaceTabs from "../components/WorkspaceTabs.vue";
 import StatusPill from "../components/StatusPill.vue";
 import DomainRuleWorkspace from "../components/DomainRuleWorkspace.vue";
 import DomainCertificateWorkspace from "../components/DomainCertificateWorkspace.vue";
@@ -9,6 +10,7 @@ import DomainDnsWorkspace from "../components/DomainDnsWorkspace.vue";
 import AccountDirectoryView from "./AccountDirectoryView.vue";
 import QueueWorkspace from "./delivery/QueueWorkspace.vue";
 import { validatePublishedDns, type DomainDnsCheck } from "../lib/domainDns";
+import { readDomainDnsCheck, rememberDomainDnsCheck } from "../lib/domainDnsCheckCache";
 import { usePermission } from "../composables/usePermission";
 import { api, jsonBody } from "../lib/api";
 import { downloadQuarantineRaw } from "../lib/quarantine";
@@ -167,6 +169,19 @@ function normalizeTab(value: unknown): TabKey {
 }
 
 const tab = ref<TabKey>(route.name === "account-directory" ? "accounts" : normalizeTab(route.params.tab));
+const workspaceTabs = computed(() => [
+  { value: "overview", label: "概览" },
+  ...(can("domain.account.read", domainId.value) || can("domain.alias.read", domainId.value)
+    ? [{ value: "accounts", label: "账号和别名" }] : []),
+  { value: "rules", label: "收发信规则" },
+  ...(can("domain.quarantine.read", domainId.value)
+    ? [{ value: "quarantine", label: "隔离审核" }] : []),
+  { value: "queue", label: "投递队列" },
+  { value: "audit", label: "域审计" },
+  { value: "dns", label: "DNS 与安全" },
+  { value: "cert", label: "证书与连接" },
+  { value: "quota", label: "配额" },
+]);
 const pendingTab = ref<TabKey | null>(null);
 const leaveDialogOpen = ref(false);
 const dnsDirty = ref(false);
@@ -428,14 +443,14 @@ const quarantineStatusItems = [
   { title: "已删除", value: "Deleted" },
 ];
 
-async function loadPage() {
+async function loadPage(refreshDns = false) {
   loading.value = true;
   error.value = "";
   try {
     const [nextManagement, nextHealth, nextDns] = await Promise.all([
       api<DomainManagement>(`/domains/${domainId.value}`),
       api<DomainHealth>(`/domains/${domainId.value}/health`),
-      api<DomainDnsCheck>(`/domains/${domainId.value}/dns/check`),
+      readDomainDnsCheck(domainId.value, refreshDns),
     ]);
     management.value = nextManagement;
     health.value = nextHealth;
@@ -536,6 +551,7 @@ async function runDnsCheck() {
       `/domains/${domainId.value}/dns/check`,
       { method: "POST" },
     );
+    rememberDomainDnsCheck(domainId.value, dnsCheck.value);
     notice.value = "Direct MX 检查已完成，结果已更新。";
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : "Direct MX 检查失败";
@@ -1485,7 +1501,7 @@ onMounted(() => {
         variant="outlined"
         prepend-icon="mdi-refresh"
         :loading="loading"
-        @click="loadPage"
+        @click="loadPage(true)"
         >刷新</v-btn
       >
       <v-btn
@@ -1561,19 +1577,7 @@ onMounted(() => {
       </div>
     </section>
 
-    <v-tabs :model-value="tab" class="detail-tabs" color="primary" show-arrows @update:model-value="requestTab">
-      <v-tab value="overview">概览</v-tab>
-      <v-tab v-if="can('domain.account.read', domainId) || can('domain.alias.read', domainId)" value="accounts">账号和别名</v-tab>
-      <v-tab value="rules">收发信规则</v-tab>
-      <v-tab v-if="can('domain.quarantine.read', domainId)" value="quarantine"
-        >隔离审核</v-tab
-      >
-      <v-tab value="queue">投递队列</v-tab>
-      <v-tab value="audit">域审计</v-tab>
-      <v-tab value="dns">DNS 与安全</v-tab>
-      <v-tab value="cert">证书与连接</v-tab>
-      <v-tab value="quota">配额</v-tab>
-    </v-tabs>
+    <WorkspaceTabs :model-value="tab" :items="workspaceTabs" label="域详情工作区" @update:model-value="requestTab" />
 
     <section v-if="tab === 'overview'" class="domain-workspace">
       <v-card flat class="panel readiness-panel">
@@ -2995,12 +2999,6 @@ onMounted(() => {
   font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-.detail-tabs {
-  margin-bottom: 18px;
-  background: #fff;
-  border: 1px solid var(--border);
-  border-radius: 8px;
 }
 .domain-workspace {
   display: grid;

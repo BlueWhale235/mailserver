@@ -88,7 +88,7 @@ const Checkbox = defineComponent({
   template: '<button class="qa-checkbox" @click="$emit(\'update:modelValue\', !modelValue)">select</button>',
 })
 const Tabs = defineComponent({
-  name: 'VTabs',
+  name: 'WorkspaceTabs',
   props: ['modelValue'],
   emits: ['update:modelValue'],
   template: '<div><button class="qa-tab-overview" @click="$emit(\'update:modelValue\', \'overview\')">overview</button><button class="qa-tab-quota" @click="$emit(\'update:modelValue\', \'quota\')">quota</button><slot /></div>',
@@ -105,7 +105,7 @@ function mountView(tab = 'aliases') {
         VTooltip: Tooltip, VAlert: SlotWrapper, VList: true,
         VCard: SlotWrapper, VCardTitle: SlotWrapper, VCardText: SlotWrapper, VCardActions: SlotWrapper,
         VTable: SlotWrapper, VDialog: Dialog, VBtn: Button, VCheckboxBtn: Checkbox,
-        VTabs: Tabs, VTab: SlotWrapper, VPagination: Pagination,
+        WorkspaceTabs: Tabs, VPagination: Pagination,
         VTextField: TextField, VSelect: SlotWrapper, VSwitch: SlotWrapper, VTextarea: SlotWrapper,
       },
     },

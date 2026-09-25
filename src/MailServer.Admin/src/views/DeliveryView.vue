@@ -3,6 +3,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api } from '../lib/api'
 import PageHeader from '../components/PageHeader.vue'
+import WorkspaceTabs from '../components/WorkspaceTabs.vue'
 import QueueWorkspace from './delivery/QueueWorkspace.vue'
 import DirectMxDiagnostic from './delivery/DirectMxDiagnostic.vue'
 import TlsReportsWorkspace from './delivery/TlsReportsWorkspace.vue'
@@ -79,11 +80,7 @@ onMounted(loadSummary)
     <div><span class="icon-green"><v-icon>mdi-check-decagram-outline</v-icon></span><p>24h 已投递<strong>{{ summary?.deliveredLast24Hours ?? '—' }}</strong><small>平均尝试 {{ summary ? `${Math.round(summary.averageAttemptMillisecondsLast24Hours)} ms` : '—' }}</small></p></div>
   </section>
 
-  <nav class="delivery-nav" aria-label="投递中心工作区">
-    <button v-for="item in tabItems" :key="item.value" type="button" :class="{ active: tab === item.value }" @click="tab = item.value as DeliveryTab">
-      <span>{{ item.label }}</span><small v-if="item.count !== undefined">{{ item.count.toLocaleString('zh-CN') }}<em v-if="item.hint"> {{ item.hint }}</em></small>
-    </button>
-  </nav>
+  <WorkspaceTabs :model-value="tab" :items="tabItems" label="投递中心工作区" @update:model-value="value => tab = value as DeliveryTab" />
 
   <QueueWorkspace v-if="tab === 'queue' || tab === 'history' || tab === 'bounces'" :key="tab" :mode="tab" :refresh-key="refreshKey" @changed="changed" />
   <DirectMxDiagnostic v-else-if="tab === 'diagnostic'" :refresh-key="refreshKey" />
@@ -92,12 +89,4 @@ onMounted(loadSummary)
 
 <style scoped>
 .delivery-command-summary { margin-bottom: 18px; }
-.delivery-nav { display: flex; align-items: stretch; gap: 2px; margin-bottom: 14px; padding: 4px; border: 1px solid var(--border); border-radius: 10px; background: #fff; box-shadow: var(--shadow-card); overflow-x: auto; }
-.delivery-nav button { min-width: 126px; display: flex; align-items: center; justify-content: center; gap: 8px; border: 0; border-radius: 7px; padding: 10px 13px; background: transparent; color: var(--text-secondary); cursor: pointer; font: 600 12px/1.2 var(--font-family); white-space: nowrap; transition: color .15s ease, background .15s ease; }
-.delivery-nav button:hover { background: #f7f9fc; color: var(--text); }
-.delivery-nav button.active { background: var(--color-primary-soft); color: var(--color-primary-strong); }
-.delivery-nav small { min-width: 22px; padding: 2px 6px; border-radius: 999px; background: #eef1f5; color: var(--text-secondary); font-size: 10px; font-variant-numeric: tabular-nums; }
-.delivery-nav button.active small { background: #dceaff; color: var(--color-primary-strong); }
-.delivery-nav em { font-style: normal; opacity: .72; }
-@media (max-width: 1100px) { .delivery-nav { justify-content: flex-start; } }
 </style>
