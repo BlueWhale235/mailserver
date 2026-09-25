@@ -102,8 +102,7 @@ public sealed class DirectMxTransport(
                     domain, mxHost, policyType, policyString, resultType, failureReason, cancellationToken);
         var profile = await OutboundDeliveryProfile.ResolveAsync(dbFactory, job, cancellationToken);
         var stsPolicy = await transportSecurity.ResolveMtaStsAsync(domain, cancellationToken);
-        DeliveryResult? lastResult = null;
-        foreach (var host in hosts)
+        return await DeliverAcrossMxAsync(hosts, async host =>
         {
             // DANE 只有在 MX 查询具备可信 DNSSEC 结果时才启用；否则优先使用 MTA-STS 策略。
             var danePolicy = mxDnssecAuthenticated
@@ -123,10 +122,10 @@ public sealed class DirectMxTransport(
                     "MX host does not match the MTA-STS policy.");
                 if (stsPolicy.Mode == "enforce")
                 {
-                    lastResult = DeliveryResult.Temporary("MX host does not match the enforced MTA-STS policy.", host, new DeliveryDiagnostic("TLS", DurationMilliseconds: stopwatch.ElapsedMilliseconds, FailureCategory: "mta-sts-policy"));
-                    continue;
+                    return DeliveryResult.Temporary("MX host does not match the enforced MTA-STS policy.", host, new DeliveryDiagnostic("TLS", DurationMilliseconds: stopwatch.ElapsedMilliseconds, FailureCategory: "mta-sts-policy"));
                 }
             }
+            IPAddress? remoteAddress = null;
             try
             {
                 await using var messageStream = new MemoryStream(messageBytes, writable: false);
@@ -160,7 +159,7 @@ public sealed class DirectMxTransport(
                     deliverySecurity,
                     profile.HeloName,
                     string.Join(',', profile.SourceAddresses.Select(x => x.ToString())));
-                await OutboundDeliveryProfile.ConnectAsync(
+                remoteAddress = await OutboundDeliveryProfile.ConnectAsync(
                     client,
                     host,
                     DeliveryPort,
@@ -172,6 +171,8 @@ public sealed class DirectMxTransport(
                     MailboxAddress.Parse(job.Sender),
                     [MailboxAddress.Parse(job.Recipient)],
                     cancellationToken);
+                var tlsProtocol = client.IsSecure ? client.SslProtocol.ToString() : null;
+                var tlsCipherSuite = client.IsSecure ? client.SslCipherSuite.ToString() : null;
                 await client.DisconnectAsync(true, cancellationToken);
                 await RecordTlsEventAsync(
                     host,
@@ -188,7 +189,7 @@ public sealed class DirectMxTransport(
                     DeliveryPort,
                     job.Recipient,
                     response);
-                return DeliveryResult.Success(response, $"{host}:{DeliveryPort}", new DeliveryDiagnostic("SMTP", SmtpStatusCode: "250", DurationMilliseconds: stopwatch.ElapsedMilliseconds, SessionSummary: response));
+                return DeliveryResult.Success(response, $"{host}:{DeliveryPort}", new DeliveryDiagnostic("SMTP", RemoteAddress: remoteAddress.ToString(), SmtpStatusCode: "250", TlsProtocol: tlsProtocol, TlsCipherSuite: tlsCipherSuite, DurationMilliseconds: stopwatch.ElapsedMilliseconds, SessionSummary: response));
             }
             catch (SmtpCommandException exception)
             {
@@ -204,10 +205,10 @@ public sealed class DirectMxTransport(
                     job.Recipient);
                 if ((int)exception.StatusCode >= 500)
                 {
-                    return DeliveryResult.Permanent(exception.Message, $"{host}:{DeliveryPort}", new DeliveryDiagnostic("SMTP", SmtpStatusCode: ((int)exception.StatusCode).ToString(), DurationMilliseconds: stopwatch.ElapsedMilliseconds, FailureCategory: "smtp-permanent", SessionSummary: exception.Message));
+                    return DeliveryResult.Permanent(exception.Message, $"{host}:{DeliveryPort}", new DeliveryDiagnostic("SMTP", RemoteAddress: remoteAddress?.ToString(), SmtpStatusCode: ((int)exception.StatusCode).ToString(), DurationMilliseconds: stopwatch.ElapsedMilliseconds, FailureCategory: "smtp-permanent", SessionSummary: exception.Message));
                 }
 
-                lastResult = DeliveryResult.Temporary(exception.Message, $"{host}:{DeliveryPort}", new DeliveryDiagnostic("SMTP", SmtpStatusCode: ((int)exception.StatusCode).ToString(), DurationMilliseconds: stopwatch.ElapsedMilliseconds, FailureCategory: "smtp-temporary", SessionSummary: exception.Message));
+                return DeliveryResult.Temporary(exception.Message, $"{host}:{DeliveryPort}", new DeliveryDiagnostic("SMTP", RemoteAddress: remoteAddress?.ToString(), SmtpStatusCode: ((int)exception.StatusCode).ToString(), DurationMilliseconds: stopwatch.ElapsedMilliseconds, FailureCategory: "smtp-temporary", SessionSummary: exception.Message));
             }
             catch (Exception exception) when (exception is not OperationCanceledException)
             {
@@ -230,11 +231,24 @@ public sealed class DirectMxTransport(
                 var stage = exception is System.Security.Authentication.AuthenticationException
                     || exception is NotSupportedException && exception.Message.Contains("STARTTLS", StringComparison.OrdinalIgnoreCase)
                     ? "TLS" : "CONNECT";
-                lastResult = DeliveryResult.Temporary(exception.Message, $"{host}:{DeliveryPort}", new DeliveryDiagnostic(stage, DurationMilliseconds: stopwatch.ElapsedMilliseconds, FailureCategory: resultType, SessionSummary: exception.Message));
+                return DeliveryResult.Temporary(exception.Message, $"{host}:{DeliveryPort}", new DeliveryDiagnostic(stage, DurationMilliseconds: stopwatch.ElapsedMilliseconds, FailureCategory: resultType, SessionSummary: exception.Message));
             }
-        }
+        }, () => DeliveryResult.Temporary("No MX host accepted the message.", diagnostic: new DeliveryDiagnostic("CONNECT", DurationMilliseconds: stopwatch.ElapsedMilliseconds, FailureCategory: "mx-exhausted")));
+    }
 
-        return lastResult ?? DeliveryResult.Temporary("No MX host accepted the message.", diagnostic: new DeliveryDiagnostic("CONNECT", DurationMilliseconds: stopwatch.ElapsedMilliseconds, FailureCategory: "mx-exhausted"));
+    internal static async Task<DeliveryResult> DeliverAcrossMxAsync(
+        IReadOnlyList<string> hosts,
+        Func<string, Task<DeliveryResult>> deliverToHost,
+        Func<DeliveryResult> noHostsResult)
+    {
+        DeliveryResult? lastResult = null;
+        foreach (var host in hosts)
+        {
+            var result = await deliverToHost(host);
+            if (result.Succeeded || result.PermanentFailure) return result;
+            lastResult = result;
+        }
+        return lastResult ?? noHostsResult();
     }
 
     private static async Task<byte[]> ReadAllAsync(Stream content, CancellationToken cancellationToken)
@@ -277,52 +291,37 @@ internal sealed record OutboundDeliveryProfile(
         return new OutboundDeliveryProfile(heloName, sourceAddresses);
     }
 
-    public static async Task ConnectAsync(
+    public static async Task<IPAddress> ConnectAsync(
         SmtpClient client,
         string host,
         int port,
         SecureSocketOptions options,
         IReadOnlyList<IPAddress> sourceAddresses,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        IReadOnlyList<IPAddress>? resolvedAddresses = null)
     {
-        if (sourceAddresses.Count == 0)
-        {
-            await client.ConnectAsync(host, port, options, cancellationToken);
-            return;
-        }
-
-        var remoteAddresses = await Dns.GetHostAddressesAsync(host, cancellationToken);
+        var remoteAddresses = resolvedAddresses ?? await Dns.GetHostAddressesAsync(host, cancellationToken);
         Exception? lastException = null;
-        foreach (var sourceAddress in sourceAddresses)
+        foreach (var sourceAddress in sourceAddresses.Cast<IPAddress?>().Append(null))
         {
-            foreach (var remoteAddress in remoteAddresses.Where(x => x.AddressFamily == sourceAddress.AddressFamily))
+            foreach (var remoteAddress in remoteAddresses.Where(x => sourceAddress is null || x.AddressFamily == sourceAddress.AddressFamily))
             {
                 var socket = new Socket(remoteAddress.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
                 try
                 {
-                    socket.Bind(new IPEndPoint(sourceAddress, 0));
+                    if (sourceAddress is not null) socket.Bind(new IPEndPoint(sourceAddress, 0));
                     await socket.ConnectAsync(new IPEndPoint(remoteAddress, port), cancellationToken);
                     await client.ConnectAsync(socket, host, port, options, cancellationToken);
-                    return;
+                    return remoteAddress;
                 }
-                catch (Exception exception) when (exception is SocketException or IOException or TimeoutException or InvalidOperationException)
+                catch (Exception exception) when (exception is not OperationCanceledException)
                 {
                     lastException = exception;
                     socket.Dispose();
                 }
             }
         }
-
-        try
-        {
-            await client.ConnectAsync(host, port, options, cancellationToken);
-        }
-        catch (Exception exception) when (
-            lastException is not null &&
-            exception is SocketException or IOException or TimeoutException or InvalidOperationException)
-        {
-            throw new AggregateException("All configured outbound source addresses failed, and the system default connection also failed.", lastException, exception);
-        }
+        throw new IOException($"All IP addresses for MX host {host} failed.", lastException);
     }
 
     private static string? FirstNonEmpty(params string?[] values) =>
