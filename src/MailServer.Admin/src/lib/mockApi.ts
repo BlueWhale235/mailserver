@@ -231,6 +231,9 @@ interface MockRecycleBinItem {
   resourceType: MockCleanupResourceType
   resourceId: string | null
   displayName: string
+  sender?: string | null
+  subject?: string | null
+  receivedAt?: string | null
   estimatedBytes: number
   deletedAt: string
   purgeAfter: string
@@ -574,6 +577,7 @@ let previewRecycle: MockRecycleBinItem[] = [
   {
     queueId: 'cf704ce9-cb1c-49ac-b4ec-01ac06aaf801', resourceType: 'MailboxMessage', resourceId: '60a9ad2c-9c08-4a9a-9a18-a8ebca920101',
     displayName: 'billing@northwind.cn / Sent / UID 48291', estimatedBytes: 18_874_368,
+    sender: 'orders@example.net', subject: '九月订单确认', receivedAt: '2026-09-17T08:20:00Z',
     deletedAt: '2026-09-17T08:24:00Z', purgeAfter: '2026-09-19T08:24:00Z', status: 'Pending',
   },
   {
@@ -1505,11 +1509,29 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
     const page = Math.max(1, Number(url.searchParams.get('page') ?? 1))
     const pageSize = Math.min(100, Math.max(1, Number(url.searchParams.get('pageSize') ?? 20)))
     const matches = previewRecycle.filter(item =>
-      (!search || `${item.displayName} ${item.queueId} ${item.resourceId ?? ''}`.toLowerCase().includes(search))
+      (!search || `${item.displayName} ${item.sender ?? ''} ${item.queueId} ${item.resourceId ?? ''}`.toLowerCase().includes(search))
       && (!type || item.resourceType === type) && (!status || item.status === status))
     return { items: structuredClone(matches.slice((page - 1) * pageSize, page * pageSize)), page, pageSize, totalCount: matches.length } as T
   }
   if (url.pathname === '/recycle-bin' && method === 'GET') return structuredClone(previewRecycle) as T
+  if (url.pathname === '/recycle-bin/batch/purge' && method === 'POST') {
+    const input = JSON.parse(String(init.body ?? '{}')) as { ids?: string[] }
+    if (!input.ids?.length || input.ids.length > 100 || new Set(input.ids).size !== input.ids.length) throw new Error('请选择 1 至 100 个不同的回收站对象')
+    const results: Array<{ id: string; status: string; error: string | null }> = []
+    for (const id of input.ids) {
+      const item = previewRecycle.find(candidate => candidate.queueId === id)
+      if (!item) { results.push({ id, status: 'notFound', error: '对象不存在。' }); continue }
+      previewRecycle = previewRecycle.filter(candidate => candidate.queueId !== id)
+      addPreviewAudit({
+        content: '永久清理回收站对象', category: 'Delete', status: 'Succeeded', actor: 'preview-admin',
+        action: 'recycle.purge', resource: `cleanup:${id}`, detail: `${item.resourceType}: ${item.displayName}`,
+        remoteAddress: '127.0.0.1', requestId: `req-recycle-${Date.now()}`,
+        relatedId: item.resourceId ?? undefined, createdAt: new Date().toISOString(), changes: [],
+      })
+      results.push({ id, status: 'deleted', error: null })
+    }
+    return { results } as T
+  }
   const recycleMatch = url.pathname.match(/^\/recycle-bin\/([^/]+)(\/restore)?$/)
   if (recycleMatch) {
     const queueId = recycleMatch[1]!

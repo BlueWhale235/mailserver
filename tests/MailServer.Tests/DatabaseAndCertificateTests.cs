@@ -3,6 +3,7 @@ using System.Security.Authentication;
 using System.Net.Security;
 using System.Security.Cryptography.X509Certificates;
 using System.Security.Claims;
+using System.Text;
 using MailServer.Api;
 using MailServer.Domain;
 using MailServer.Infrastructure;
@@ -61,7 +62,8 @@ public sealed class DatabaseAndCertificateTests
                         Mailbox = inbox,
                         Message = new StoredMessage
                         {
-                            ContentKey = new string((char)('a' + uid), 64), EnvelopeFrom = "", Size = 12
+                            ContentKey = new string((char)('a' + uid), 64),
+                            EnvelopeFrom = uid == 1 ? "sender@example.net" : "", Size = 12
                         },
                         Uid = uid
                     });
@@ -73,6 +75,11 @@ public sealed class DatabaseAndCertificateTests
                 accountId = account.Id;
             }
 
+            var contentDirectory = Path.Combine(root, "messages", "bb", "bb");
+            Directory.CreateDirectory(contentDirectory);
+            await File.WriteAllTextAsync(Path.Combine(contentDirectory, $"{new string('b', 64)}.eml"),
+                $"From: sender@example.net\r\nSubject: =?utf-8?B?{Convert.ToBase64String(Encoding.UTF8.GetBytes("测试主题"))}?=\r\nDate: Thu, 17 Sep 2026 08:20:00 +0000\r\n\r\nBody");
+
             var mailbox = services.GetRequiredService<IMailboxService>();
             var recycle = services.GetRequiredService<IRecycleBinService>();
             await mailbox.CopyAsync(inboxId, "1", true, "Trash", true, CancellationToken.None);
@@ -80,6 +87,9 @@ public sealed class DatabaseAndCertificateTests
                 null, null, null, null, 1, 20, CancellationToken.None);
             Assert.Single(moved.Items);
             Assert.Contains("Trash", moved.Items[0].DisplayName);
+            Assert.Equal("sender@example.net", moved.Items[0].Sender);
+            Assert.Equal("测试主题", moved.Items[0].Subject);
+            Assert.NotNull(moved.Items[0].ReceivedAt);
             await recycle.RestoreAsync(moved.Items[0].QueueId, "admin", CancellationToken.None);
 
             await mailbox.StoreFlagsAsync(inboxId, "2", true, "+", ["\\Deleted"], CancellationToken.None);

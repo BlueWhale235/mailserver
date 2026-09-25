@@ -9,7 +9,8 @@ public sealed record ScheduledTaskRunResult(int ProcessedCount, long ReleasedByt
 /// 回收站展示项，代表一个等待恢复或到期清理的软删除资源。
 /// </summary>
 public sealed record RecycleBinItem(Guid QueueId, CleanupResourceType ResourceType, Guid? ResourceId,
-    string DisplayName, long EstimatedBytes, DateTimeOffset DeletedAt, DateTimeOffset PurgeAfter, CleanupQueueStatus Status);
+    string DisplayName, long EstimatedBytes, DateTimeOffset DeletedAt, DateTimeOffset PurgeAfter, CleanupQueueStatus Status,
+    string? Sender = null, string? Subject = null, DateTimeOffset? ReceivedAt = null);
 
 
 /// <summary>

@@ -7,6 +7,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using MimeKit;
 
 namespace MailServer.Infrastructure;
 
@@ -146,7 +147,8 @@ public sealed class CleanupQueueService(
                             || mailbox.Account.Domain.Name.Contains(term))))
                 || (x.ResourceType == CleanupResourceType.MailboxMessage && db.MailboxMessages.IgnoreQueryFilters()
                     .Any(message => message.Id == x.ResourceId
-                        && (message.Mailbox.Name.Contains(term) || message.Mailbox.Account.LocalPart.Contains(term)
+                        && (message.Message.EnvelopeFrom.Contains(term)
+                            || message.Mailbox.Name.Contains(term) || message.Mailbox.Account.LocalPart.Contains(term)
                             || message.Mailbox.Account.Domain.Name.Contains(term)))));
         }
         var totalCount = await query.CountAsync(cancellationToken);
@@ -155,7 +157,7 @@ public sealed class CleanupQueueService(
         return (await MapRowsAsync(db, rows, cancellationToken), totalCount);
     }
 
-    private static async Task<IReadOnlyList<RecycleBinItem>> MapRowsAsync(
+    private async Task<IReadOnlyList<RecycleBinItem>> MapRowsAsync(
         MailDbContext db, IReadOnlyList<CleanupQueueItem> rows, CancellationToken cancellationToken)
     {
         var resourceIds = rows.Where(x => x.ResourceId.HasValue).Select(x => x.ResourceId!.Value).Distinct().ToArray();
@@ -174,11 +176,30 @@ public sealed class CleanupQueueService(
                 .Where(x => resourceIds.Contains(x.Id))
                 .ToListAsync(cancellationToken))
             .ToDictionary(x => x.Id, x => $"{x.Account.LocalPart}@{x.Account.Domain.Name} / {x.Name}");
-        var messageNames = (await db.MailboxMessages.IgnoreQueryFilters().AsNoTracking()
+        var messageDetails = (await db.MailboxMessages.IgnoreQueryFilters().AsNoTracking()
                 .Include(x => x.Mailbox).ThenInclude(x => x.Account).ThenInclude(x => x.Domain)
+                .Include(x => x.Message)
                 .Where(x => resourceIds.Contains(x.Id))
                 .ToListAsync(cancellationToken))
-            .ToDictionary(x => x.Id, x => $"{x.Mailbox.Account.LocalPart}@{x.Mailbox.Account.Domain.Name} / {x.Mailbox.Name} / UID {x.Uid}");
+            .ToDictionary(x => x.Id);
+        var subjects = new Dictionary<Guid, string>();
+        var senders = new Dictionary<Guid, string>();
+        foreach (var message in messageDetails.Values)
+        {
+            var envelopeSender = CleanLabel(message.Message.EnvelopeFrom, "（未知发件人）", 120);
+            try
+            {
+                await using var content = await contentStore.OpenReadAsync(message.Message.ContentKey, cancellationToken);
+                var headers = await new MimeParser(content).ParseHeadersAsync(cancellationToken);
+                subjects[message.Id] = CleanLabel(headers[HeaderId.Subject], "（无主题）", 120);
+                senders[message.Id] = CleanLabel(headers[HeaderId.From], envelopeSender, 120);
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                subjects[message.Id] = "（主题不可读取）";
+                senders[message.Id] = envelopeSender;
+            }
+        }
 
         string DisplayName(CleanupQueueItem item)
         {
@@ -188,13 +209,29 @@ public sealed class CleanupQueueService(
                 CleanupResourceType.Domain when domainNames.TryGetValue(id, out var name) => name,
                 CleanupResourceType.Account when accountNames.TryGetValue(id, out var name) => name,
                 CleanupResourceType.Mailbox when mailboxNames.TryGetValue(id, out var name) => name,
-                CleanupResourceType.MailboxMessage when messageNames.TryGetValue(id, out var name) => name,
+                CleanupResourceType.MailboxMessage when messageDetails.TryGetValue(id, out var message) =>
+                    $"{message.Mailbox.Account.LocalPart}@{message.Mailbox.Account.Domain.Name} / {message.Mailbox.Name} / UID {message.Uid}",
                 _ => item.ContentKey ?? id.ToString()
             };
         }
 
-        return rows.Select(x => new RecycleBinItem(x.Id, x.ResourceType, x.ResourceId,
-            DisplayName(x), x.EstimatedBytes, x.CreatedAt, x.PurgeAfter, x.Status)).ToArray();
+        return rows.Select(x =>
+        {
+            var message = x.ResourceType == CleanupResourceType.MailboxMessage && x.ResourceId is { } id
+                ? messageDetails.GetValueOrDefault(id) : null;
+            return new RecycleBinItem(x.Id, x.ResourceType, x.ResourceId,
+                DisplayName(x), x.EstimatedBytes, x.CreatedAt, x.PurgeAfter, x.Status,
+                message is null ? null : senders[message.Id],
+                message is null ? null : subjects[message.Id], message?.Message.ReceivedAt);
+        }).ToArray();
+    }
+
+    private static string CleanLabel(string? value, string fallback, int limit)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return fallback;
+        var cleaned = string.Join(' ', value.Split(['\r', '\n', '\t'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+        if (string.IsNullOrWhiteSpace(cleaned)) return fallback;
+        return cleaned.Length <= limit ? cleaned : cleaned[..limit] + "…";
     }
 
     public async Task RestoreAsync(Guid queueId, string actor, CancellationToken cancellationToken)

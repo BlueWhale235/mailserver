@@ -475,6 +475,33 @@ api.MapDelete("/recycle-bin/{id:guid}", async (Guid id, HttpContext http, IRecyc
     catch (KeyNotFoundException) { return AdminApiProblems.NotFound(http, "未找到该回收站对象。"); }
     catch (RecycleBinConflictException exception) { return AdminApiProblems.Conflict(http, exception.Message); }
 }).RequirePermission(PermissionCodes.TaskManage);
+api.MapPost("/recycle-bin/batch/purge", async (
+    IdBatchRequest request, HttpContext http, IRecycleBinService recycle, ILoggerFactory loggerFactory,
+    CancellationToken cancellationToken) =>
+{
+    if (request.Ids is not { Length: > 0 and <= 100 }
+        || request.Ids.Any(id => id == Guid.Empty)
+        || request.Ids.Distinct().Count() != request.Ids.Length)
+        return AdminApiProblems.Validation(http, "ids", "请选择 1 至 100 个不同的回收站对象。");
+    var logger = loggerFactory.CreateLogger("RecycleBinBatchPurge");
+    var results = new List<object>(request.Ids.Length);
+    foreach (var id in request.Ids)
+    {
+        try
+        {
+            await recycle.PurgeAsync(id, Actor(http), cancellationToken);
+            results.Add(new { id, status = "deleted", error = (string?)null });
+        }
+        catch (KeyNotFoundException) { results.Add(new { id, status = "notFound", error = "对象不存在。" }); }
+        catch (RecycleBinConflictException exception) { results.Add(new { id, status = "conflict", error = exception.Message }); }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            logger.LogError(exception, "Failed to purge recycle-bin item {QueueId}", id);
+            results.Add(new { id, status = "failed", error = "清理失败，请查看任务日志。" });
+        }
+    }
+    return Results.Ok(new { results });
+}).RequirePermission(PermissionCodes.TaskManage);
 api.MapGet("/audit", async (
     string? search,
     AuditCategory? category,

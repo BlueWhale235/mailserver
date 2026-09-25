@@ -13,6 +13,9 @@ interface RecycleBinItem {
   resourceType: ResourceType
   resourceId: string | null
   displayName: string
+  sender?: string | null
+  subject?: string | null
+  receivedAt?: string | null
   estimatedBytes: number
   deletedAt: string
   purgeAfter: string
@@ -43,6 +46,8 @@ const search = ref<string | null>('')
 const resourceType = ref<'' | ResourceType>('')
 const status = ref<'' | QueueStatus>('')
 const target = ref<RecycleBinItem | null>(null)
+const selectedIds = ref<string[]>([])
+const bulkPurgeOpen = ref(false)
 const action = ref<'restore' | 'purge'>('restore')
 const confirmation = ref('')
 const dialogError = ref('')
@@ -60,9 +65,13 @@ const failedCount = computed(() => items.value.filter(item => item.status === 'F
 const urgentCount = computed(() => items.value.filter(item => new Date(item.purgeAfter).getTime() - Date.now() <= 72 * 60 * 60 * 1000).length)
 const activeFilterCount = computed(() => Number(Boolean(appliedFilters.value.search)) + Number(Boolean(appliedFilters.value.resourceType)) + Number(Boolean(appliedFilters.value.status)))
 const canRestoreTarget = computed(() => target.value ? isRestorable(target.value) : false)
+const selectedItems = computed(() => items.value.filter(item => selectedIds.value.includes(item.queueId)))
+const allPageSelected = computed(() => items.value.length > 0 && selectedItems.value.length === items.value.length)
 const canExecute = computed(() => {
-  if (!target.value || actionLoading.value) return false
-  return action.value === 'restore' ? canRestoreTarget.value : confirmation.value === target.value.displayName
+  if (actionLoading.value) return false
+  if (bulkPurgeOpen.value) return selectedItems.value.length > 0 && confirmation.value === '永久清理'
+  if (!target.value) return false
+  return action.value === 'restore' ? canRestoreTarget.value : confirmation.value === displayName(target.value)
 })
 
 async function load() {
@@ -77,6 +86,7 @@ async function load() {
     const result = await api<{ items: RecycleBinItem[]; totalCount: number }>(`/recycle-bin/search?${params}`)
     if (request !== requestVersion) return
     items.value = result.items
+    selectedIds.value = selectedIds.value.filter(id => result.items.some(item => item.queueId === id))
     totalCount.value = result.totalCount
     if (page.value > totalPages.value) {
       page.value = totalPages.value
@@ -85,6 +95,7 @@ async function load() {
   } catch (cause) {
     if (request !== requestVersion) return
     items.value = []
+    selectedIds.value = []
     totalCount.value = 0
     error.value = cause instanceof Error ? cause.message : '回收站加载失败'
   } finally {
@@ -93,6 +104,7 @@ async function load() {
 }
 
 function resetFilters() {
+  selectedIds.value = []
   search.value = ''
   resourceType.value = ''
   status.value = ''
@@ -102,6 +114,7 @@ function resetFilters() {
 }
 
 function applyFilters() {
+  selectedIds.value = []
   appliedFilters.value = { search: search.value?.trim() ?? '', resourceType: resourceType.value, status: status.value }
   page.value = 1
   void load()
@@ -109,6 +122,7 @@ function applyFilters() {
 
 function changePage(next: number) {
   if (next < 1 || next > totalPages.value || next === page.value) return
+  selectedIds.value = []
   page.value = next
   void load()
 }
@@ -121,15 +135,50 @@ function openAction(item: RecycleBinItem, operation: 'restore' | 'purge') {
   dialogError.value = ''
 }
 
+function openBulkPurge() {
+  if (!selectedItems.value.length) return
+  bulkPurgeOpen.value = true
+  confirmation.value = ''
+  dialogError.value = ''
+}
+
+function toggleAllPage() {
+  selectedIds.value = allPageSelected.value ? [] : items.value.map(item => item.queueId)
+}
+
 function closeDialog() {
   if (actionLoading.value) return
   target.value = null
+  bulkPurgeOpen.value = false
   confirmation.value = ''
   dialogError.value = ''
 }
 
 async function execute() {
-  if (!target.value || !canExecute.value) return
+  if (!canExecute.value) return
+  if (bulkPurgeOpen.value) {
+    actionLoading.value = true
+    dialogError.value = ''
+    try {
+      const result = await api<{ results: Array<{ id: string; status: string; error: string | null }> }>('/recycle-bin/batch/purge', {
+        method: 'POST', body: JSON.stringify({ ids: selectedItems.value.map(item => item.queueId) }),
+      })
+      const removed = result.results.filter(item => item.status === 'deleted').length
+      const failed = result.results.filter(item => item.status !== 'deleted')
+      bulkPurgeOpen.value = false
+      confirmation.value = ''
+      notice.value = removed ? `已永久清理 ${removed} 个对象。` : ''
+      await load()
+      selectedIds.value = failed.map(item => item.id).filter(id => items.value.some(item => item.queueId === id))
+      if (failed.length) error.value = `${failed.length} 个对象未清理：${failed.map(item => item.error ?? item.status).join('；')}`
+    } catch (cause) {
+      dialogError.value = cause instanceof Error ? cause.message : '批量清理失败，请稍后重试'
+    } finally {
+      actionLoading.value = false
+    }
+    return
+  }
+  if (!target.value) return
   actionLoading.value = true
   dialogError.value = ''
   const currentTarget = target.value
@@ -138,8 +187,8 @@ async function execute() {
       method: action.value === 'restore' ? 'POST' : 'DELETE',
     })
     notice.value = action.value === 'restore'
-      ? `“${currentTarget.displayName}”已恢复。`
-      : `“${currentTarget.displayName}”已永久清理。`
+      ? `“${displayName(currentTarget)}”已恢复。`
+      : `“${displayName(currentTarget)}”已永久清理。`
     target.value = null
     await load()
   } catch (cause) {
@@ -180,6 +229,11 @@ function statusView(value: QueueStatus) {
 
 function formatDate(value: string) {
   return new Date(value).toLocaleString('zh-CN', { hour12: false })
+}
+
+function displayName(item: RecycleBinItem) {
+  if (item.resourceType !== 'MailboxMessage' || !item.receivedAt) return item.displayName
+  return `${item.sender || '（未知发件人）'} · ${item.subject || '（无主题）'} · ${formatDate(item.receivedAt)}`
 }
 
 function formatBytes(value: number) {
@@ -237,7 +291,7 @@ onMounted(load)
         <v-text-field
           v-model="search"
           label="搜索回收站"
-          placeholder="对象名称或 ID"
+          placeholder="账号、文件夹或 ID"
           prepend-inner-icon="mdi-magnify"
           clearable
           hide-details
@@ -248,6 +302,7 @@ onMounted(load)
       </div>
       <div class="recycle-filter-meta">
         <span>{{ activeFilterCount ? `已应用 ${activeFilterCount} 项筛选 · 共 ${totalCount} 个对象` : `共 ${totalCount} 个对象` }}</span>
+        <v-btn v-if="can('task.manage')" color="error" variant="tonal" size="small" :disabled="!selectedItems.length || loading || actionLoading" @click="openBulkPurge">永久清理已选 {{ selectedItems.length }} 项</v-btn>
         <v-btn variant="text" size="small" :disabled="!activeFilterCount && !filtersChanged" @click="resetFilters">重置筛选</v-btn>
         <v-btn color="primary" size="small" :disabled="!filtersChanged" @click="applyFilters">应用筛选</v-btn>
       </div>
@@ -255,21 +310,22 @@ onMounted(load)
 
     <v-table class="recycle-table">
       <thead>
-        <tr><th>对象</th><th>类型</th><th>状态</th><th>预计占用</th><th>删除时间</th><th>计划清理</th><th class="text-end">操作</th></tr>
+        <tr><th v-if="can('task.manage')"><v-checkbox-btn :model-value="allPageSelected" :indeterminate="selectedItems.length > 0 && !allPageSelected" :disabled="!items.length || loading" aria-label="选择当前页全部对象" @click="toggleAllPage" /></th><th>对象</th><th>类型</th><th>状态</th><th>预计占用</th><th>删除时间</th><th>计划清理</th><th class="text-end">操作</th></tr>
       </thead>
       <tbody>
-        <tr v-if="loading"><td colspan="7"><v-progress-linear indeterminate color="primary" /></td></tr>
+        <tr v-if="loading"><td :colspan="can('task.manage') ? 8 : 7"><v-progress-linear indeterminate color="primary" /></td></tr>
         <tr v-else-if="!items.length && !error">
-          <td colspan="7" class="recycle-empty">
+          <td :colspan="can('task.manage') ? 8 : 7" class="recycle-empty">
             <v-icon size="34">mdi-delete-clock-outline</v-icon>
             <b>{{ activeFilterCount ? '没有符合筛选条件的对象' : '回收站为空' }}</b>
             <span>{{ activeFilterCount ? '调整搜索或筛选条件后重试' : '被软删除的域、账号、邮箱和邮件会显示在这里' }}</span>
           </td>
         </tr>
         <tr v-for="item in items" v-else :key="item.queueId">
+          <td v-if="can('task.manage')"><v-checkbox-btn v-model="selectedIds" :value="item.queueId" :aria-label="`选择 ${displayName(item)}`" :disabled="loading || actionLoading" /></td>
           <td class="object-cell">
-            <b>{{ item.displayName }}</b>
-            <small>队列 {{ shortId(item.queueId) }}<template v-if="item.resourceId"> · 资源 {{ shortId(item.resourceId) }}</template></small>
+            <b :title="displayName(item)">{{ displayName(item) }}</b>
+            <small>{{ item.resourceType === 'MailboxMessage' ? `${item.displayName} · ` : '' }}队列 {{ shortId(item.queueId) }}<template v-if="item.resourceId"> · 资源 {{ shortId(item.resourceId) }}</template></small>
           </td>
           <td><span class="resource-type"><v-icon size="17">{{ typeView(item.resourceType).icon }}</v-icon>{{ typeView(item.resourceType).label }}</span></td>
           <td><StatusPill v-bind="statusView(item.status)" /></td>
@@ -286,8 +342,8 @@ onMounted(load)
                 variant="text"
                 prepend-icon="mdi-restore"
                 :disabled="loading || !isRestorable(item)"
-                :title="isRestorable(item) ? `恢复 ${item.displayName}` : restoreUnavailableReason(item)"
-                :aria-label="isRestorable(item) ? `恢复 ${item.displayName}` : `${item.displayName} 不支持恢复`"
+                :title="isRestorable(item) ? `恢复 ${displayName(item)}` : restoreUnavailableReason(item)"
+                :aria-label="isRestorable(item) ? `恢复 ${displayName(item)}` : `${displayName(item)} 不支持恢复`"
                 @click="openAction(item, 'restore')"
               >恢复</v-btn>
               <v-btn
@@ -296,7 +352,7 @@ onMounted(load)
                 variant="text"
                 prepend-icon="mdi-delete-forever-outline"
                 :disabled="loading"
-                :aria-label="`永久清理 ${item.displayName}`"
+                :aria-label="`永久清理 ${displayName(item)}`"
                 @click="openAction(item, 'purge')"
               >永久清理</v-btn>
             </template>
@@ -312,24 +368,24 @@ onMounted(load)
     </div>
   </v-card>
 
-  <v-dialog :model-value="Boolean(target)" max-width="600" :persistent="actionLoading" @update:model-value="value => { if (!value) closeDialog() }">
-    <v-card v-if="target">
+  <v-dialog :model-value="Boolean(target) || bulkPurgeOpen" max-width="600" :persistent="actionLoading" @update:model-value="value => { if (!value) closeDialog() }">
+    <v-card v-if="target || bulkPurgeOpen">
       <v-card-title class="dialog-title">
-        <span class="dialog-icon" :class="action">
-          <v-icon>{{ action === 'restore' ? 'mdi-restore' : 'mdi-delete-forever-outline' }}</v-icon>
+        <span class="dialog-icon" :class="bulkPurgeOpen ? 'purge' : action">
+          <v-icon>{{ !bulkPurgeOpen && action === 'restore' ? 'mdi-restore' : 'mdi-delete-forever-outline' }}</v-icon>
         </span>
-        <span>{{ action === 'restore' ? '恢复回收站对象' : '永久清理对象' }}</span>
+        <span>{{ bulkPurgeOpen ? `永久清理已选 ${selectedItems.length} 项` : action === 'restore' ? '恢复回收站对象' : '永久清理对象' }}</span>
       </v-card-title>
       <v-card-text>
         <v-alert v-if="dialogError" type="error" variant="tonal" density="compact" class="mb-4">{{ dialogError }}</v-alert>
 
-        <div class="dialog-object">
+        <div v-if="target" class="dialog-object">
           <span>{{ typeView(target.resourceType).label }}</span>
-          <strong>{{ target.displayName }}</strong>
+          <strong>{{ displayName(target) }}</strong>
           <small>预计占用 {{ formatBytes(target.estimatedBytes) }} · 计划于 {{ formatDate(target.purgeAfter) }} 清理</small>
         </div>
 
-        <template v-if="action === 'restore'">
+        <template v-if="!bulkPurgeOpen && action === 'restore' && target">
           <p class="dialog-copy">{{ target.resourceType === 'MailboxMessage' && target.displayName.includes(' / Trash / ')
             ? 'Trash 中的邮件将恢复到所属账号的收件箱。'
             : '恢复后，对象会重新出现在原有位置。关联对象的恢复范围由资源类型决定。' }}</p>
@@ -339,12 +395,12 @@ onMounted(load)
           <v-alert type="error" variant="tonal" density="compact" class="mb-4">
             此操作无法撤销，并会跳过剩余保留期。关联的数据库记录和邮件内容可能被永久释放。
           </v-alert>
-          <label class="confirmation-label" for="purge-confirmation">输入对象名称以确认</label>
-          <code class="confirmation-value">{{ target.displayName }}</code>
+          <label class="confirmation-label" for="purge-confirmation">{{ bulkPurgeOpen ? '输入“永久清理”以确认' : '输入对象名称以确认' }}</label>
+          <code class="confirmation-value">{{ bulkPurgeOpen ? '永久清理' : target ? displayName(target) : '' }}</code>
           <v-text-field
             id="purge-confirmation"
             v-model="confirmation"
-            label="对象名称"
+            :label="bulkPurgeOpen ? '永久清理' : '对象名称'"
             autocomplete="off"
             :disabled="actionLoading"
             autofocus
@@ -356,12 +412,12 @@ onMounted(load)
       <v-card-actions class="dialog-actions">
         <v-btn :disabled="actionLoading" @click="closeDialog">取消</v-btn>
         <v-btn
-          :color="action === 'restore' ? 'primary' : 'error'"
-          :prepend-icon="action === 'restore' ? 'mdi-restore' : 'mdi-delete-forever-outline'"
+          :color="!bulkPurgeOpen && action === 'restore' ? 'primary' : 'error'"
+          :prepend-icon="!bulkPurgeOpen && action === 'restore' ? 'mdi-restore' : 'mdi-delete-forever-outline'"
           :disabled="!canExecute"
           :loading="actionLoading"
           @click="execute"
-        >{{ action === 'restore' ? '确认恢复' : '确认永久清理' }}</v-btn>
+        >{{ !bulkPurgeOpen && action === 'restore' ? '确认恢复' : '确认永久清理' }}</v-btn>
       </v-card-actions>
     </v-card>
   </v-dialog>

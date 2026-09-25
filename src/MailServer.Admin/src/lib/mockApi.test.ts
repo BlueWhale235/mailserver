@@ -381,6 +381,9 @@ describe('recycle-bin preview API', () => {
     expect(initial.some(item => item.status === 'Failed')).toBe(true)
     expect(initial.some(item => item.resourceType === 'ContentFile' && item.resourceId === null)).toBe(true)
     expect(initial.every(item => item.estimatedBytes >= 0)).toBe(true)
+    expect(initial.find(item => item.resourceType === 'MailboxMessage')).toMatchObject({
+      sender: 'orders@example.net', subject: '九月订单确认',
+    })
 
     const contentFile = initial.find(item => item.resourceType === 'ContentFile')!
     await expect(mockApi(`/recycle-bin/${contentFile.queueId}/restore`, { method: 'POST' }))
@@ -394,6 +397,14 @@ describe('recycle-bin preview API', () => {
     await mockApi(`/recycle-bin/${contentFile.queueId}`, { method: 'DELETE' })
     const afterPurge = await mockApi<RecycleBinItem[]>('/recycle-bin')
     expect(afterPurge.some(item => item.queueId === contentFile.queueId)).toBe(false)
+
+    const batchIds = afterPurge.filter(item => item.resourceType === 'MailboxMessage' || item.resourceType === 'Mailbox').map(item => item.queueId)
+    const batch = await mockApi<{ results: Array<{ id: string; status: string }> }>('/recycle-bin/batch/purge', {
+      method: 'POST', body: JSON.stringify({ ids: [...batchIds, 'missing-id'] }),
+    })
+    expect(batch.results.filter(item => item.status === 'deleted')).toHaveLength(batchIds.length)
+    expect(batch.results.find(item => item.id === 'missing-id')?.status).toBe('notFound')
+    expect((await mockApi<RecycleBinItem[]>('/recycle-bin')).some(item => batchIds.includes(item.queueId))).toBe(false)
 
     const restoreAudits = await mockApi<PagedResult<AuditRecord>>('/audit?search=recycle.restore&page=1&pageSize=20')
     const purgeAudits = await mockApi<PagedResult<AuditRecord>>('/audit?search=recycle.purge&page=1&pageSize=20')

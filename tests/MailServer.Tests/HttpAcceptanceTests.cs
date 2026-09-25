@@ -309,6 +309,60 @@ public sealed class HttpAcceptanceTests
     }
 
     [Fact]
+    public async Task RecycleBinBatchPurgeReturnsPerItemResultsAndAuditsOverHttp()
+    {
+        await using var host = await AcceptanceHost.StartAsync();
+        var domain = new MailDomain { Name = "recycle-batch.invalid", UsedBytes = 42 };
+        var account = new MailAccount { Domain = domain, LocalPart = "recipient", PasswordHash = "unused", UsedBytes = 42 };
+        var mailbox = new Mailbox { Account = account, Name = "Trash" };
+        var message = new MailboxMessage
+        {
+            Mailbox = mailbox, Uid = 1,
+            Message = new StoredMessage { ContentKey = new string('f', 64), EnvelopeFrom = "sender@example.net", Size = 42 }
+        };
+        var pending = new CleanupQueueItem
+        {
+            ResourceType = CleanupResourceType.MailboxMessage, ResourceId = message.Id,
+            AccountId = account.Id, DomainId = domain.Id, PurgeAfter = DateTimeOffset.UtcNow.AddDays(30)
+        };
+        var processing = new CleanupQueueItem
+        {
+            ResourceType = CleanupResourceType.ContentFile, ContentKey = "processing-content",
+            Status = CleanupQueueStatus.Processing, PurgeAfter = DateTimeOffset.UtcNow.AddDays(30)
+        };
+        await using (var db = await host.Factory.CreateDbContextAsync())
+        {
+            db.MailboxMessages.Add(message);
+            db.CleanupQueue.AddRange(pending, processing);
+            await db.SaveChangesAsync();
+        }
+        var list = await host.JsonAsync(HttpMethod.Get, "/api/v1/recycle-bin/search?resourceType=MailboxMessage");
+        Assert.Equal("sender@example.net", list.GetProperty("items")[0].GetProperty("sender").GetString());
+        Assert.Equal("（主题不可读取）", list.GetProperty("items")[0].GetProperty("subject").GetString());
+        using (var anonymous = await host.Anonymous.PostAsJsonAsync("/api/v1/recycle-bin/batch/purge", new { ids = new[] { pending.Id } }))
+            await AcceptanceHost.AssertProblemAsync(anonymous, 401);
+        await host.JsonAsync(HttpMethod.Post, "/api/v1/admins", new
+        {
+            userName = "recycle-reader", password = AcceptanceHost.Password, isEnabled = true,
+            grants = new[] { new { permissionCode = "task.read" } }
+        }, 201);
+        using (var reader = await host.LoginAsync("recycle-reader"))
+        using (var forbidden = await reader.PostAsJsonAsync("/api/v1/recycle-bin/batch/purge", new { ids = new[] { pending.Id } }))
+            await AcceptanceHost.AssertProblemAsync(forbidden, 403);
+        using (var invalid = await host.Admin.PostAsJsonAsync("/api/v1/recycle-bin/batch/purge", new { ids = new[] { pending.Id, pending.Id } }))
+            await AcceptanceHost.AssertProblemAsync(invalid, 400);
+        var result = await host.JsonAsync(HttpMethod.Post, "/api/v1/recycle-bin/batch/purge",
+            new { ids = new[] { pending.Id, processing.Id, Guid.NewGuid() } });
+        Assert.Equal("deleted", result.GetProperty("results")[0].GetProperty("status").GetString());
+        Assert.Equal("conflict", result.GetProperty("results")[1].GetProperty("status").GetString());
+        Assert.Equal("notFound", result.GetProperty("results")[2].GetProperty("status").GetString());
+        await using var verified = await host.Factory.CreateDbContextAsync();
+        Assert.Equal(CleanupQueueStatus.Completed, (await verified.CleanupQueue.SingleAsync(x => x.Id == pending.Id)).Status);
+        Assert.Equal(CleanupQueueStatus.Processing, (await verified.CleanupQueue.SingleAsync(x => x.Id == processing.Id)).Status);
+        Assert.True(await verified.AuditRecords.AnyAsync(x => x.Action == "recycle.purge" && x.Actor == "acceptance-admin"));
+    }
+
+    [Fact]
     public async Task QueueHttpRejectsActiveLeaseAndReturnsPerItemBatchResults()
     {
         await using var host = await AcceptanceHost.StartAsync();
