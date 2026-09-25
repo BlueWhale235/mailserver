@@ -10,12 +10,14 @@ import {
   fetchDomainDns,
   generateDomainDkim,
   mtaStsModeOptions,
+  prepareDomainDnsSettings,
   saveDomainDns,
   spfAllPolicyOptions,
   splitList,
   type DomainDnsCheck,
   type DomainDnsConfiguration,
   type DomainDnsSettingsModel,
+  validateDomainDnsSettings,
 } from '../lib/domainDns'
 
 const route = useRoute()
@@ -126,19 +128,7 @@ const dkimRecord = computed(() => {
   return `${selector}._domainkey.${props.domainName} TXT "v=DKIM1; k=rsa; p=${key}"`
 })
 
-const formError = computed(() => {
-  const value = settings.value
-  if (!value) return ''
-  if (!['-all', '~all', '?all', '+all'].includes(value.spfAllPolicy)) return 'SPF all 策略无效。'
-  if (!['none', 'quarantine', 'reject'].includes(value.dmarcPolicy)) return 'DMARC 策略无效。'
-  if (value.dmarcSubdomainPolicy && !['none', 'quarantine', 'reject'].includes(value.dmarcSubdomainPolicy)) return 'DMARC 子域策略无效。'
-  if (!Number.isInteger(value.dmarcPercentage) || value.dmarcPercentage < 0 || value.dmarcPercentage > 100) return 'DMARC 百分比必须是 0 到 100 的整数。'
-  if (!/^[A-Za-z0-9]{1,32}$/.test(value.mtaStsPolicyId)) return 'MTA-STS 策略 ID 只能是 1-32 位字母或数字。'
-  if (!Number.isInteger(value.mtaStsMaxAgeSeconds) || value.mtaStsMaxAgeSeconds < 0 || value.mtaStsMaxAgeSeconds > 31_557_600) return 'MTA-STS max_age 必须在 0 到 31557600 秒之间。'
-  if (value.mtaStsMode !== 'none' && splitList(value.mtaStsMxPatterns).length === 0) return '启用 MTA-STS 后必须填写至少一个 MX 模式。'
-  if (value.daneEnabled && splitList(value.daneTlsaRecords).length === 0) return '启用 DANE 后必须填写至少一条 TLSA 记录。'
-  return ''
-})
+const formError = computed(() => settings.value ? validateDomainDnsSettings(settings.value) : '')
 const canSave = computed(() => props.canManage && !saving.value && !loading.value && Boolean(settings.value) && !formError.value && dirty.value)
 
 async function load() {
@@ -173,7 +163,7 @@ async function save() {
   error.value = ''
   notice.value = ''
   try {
-    const config = await saveDomainDns(props.domainId, settings.value)
+    const config = await saveDomainDns(props.domainId, prepareDomainDnsSettings(settings.value))
     settings.value = { ...config.settings }
     records.value = config.records
     loadedSignature.value = JSON.stringify(settings.value)
@@ -242,6 +232,7 @@ onMounted(() => {
 <template>
   <section class="dns-settings">
     <v-alert v-if="error" type="error" variant="tonal" closable class="mb-4" @click:close="error = ''">{{ error }}</v-alert>
+    <v-alert v-if="formError" type="warning" variant="tonal" class="mb-4">{{ formError }}</v-alert>
     <v-alert v-if="notice" type="success" variant="tonal" closable class="mb-4" @click:close="notice = ''">{{ notice }}</v-alert>
     <v-alert v-if="!canManage" type="info" variant="tonal" class="mb-4">当前账号只有只读权限，可以查看策略与记录，但不能修改。</v-alert>
 

@@ -111,6 +111,28 @@ export function splitList(value: string | null | undefined): string[] {
     .filter(Boolean)
 }
 
+/** Empty optional DNS fields must not block saving another security section. */
+export function validateDomainDnsSettings(value: DomainDnsSettingsModel): string {
+  if (!['-all', '~all', '?all', '+all'].includes(value.spfAllPolicy)) return 'SPF all 策略无效。'
+  if (!['none', 'quarantine', 'reject'].includes(value.dmarcPolicy)) return 'DMARC 策略无效。'
+  if (value.dmarcSubdomainPolicy && !['none', 'quarantine', 'reject'].includes(value.dmarcSubdomainPolicy)) return 'DMARC 子域策略无效。'
+  if (!Number.isInteger(value.dmarcPercentage) || value.dmarcPercentage < 0 || value.dmarcPercentage > 100) return 'DMARC 百分比必须是 0 到 100 的整数。'
+  if (value.mtaStsMode !== 'none' && !/^[A-Za-z0-9]{1,32}$/.test(value.mtaStsPolicyId)) return '启用 MTA-STS 时，策略 ID 只能是 1-32 位字母或数字。'
+  if (value.mtaStsMode !== 'none' && (!Number.isInteger(value.mtaStsMaxAgeSeconds) || value.mtaStsMaxAgeSeconds < 0 || value.mtaStsMaxAgeSeconds > 31_557_600)) return 'MTA-STS max_age 必须是 0 到 31557600 秒的整数。'
+  if (value.mtaStsMode !== 'none' && splitList(value.mtaStsMxPatterns).length === 0) return '启用 MTA-STS 后必须填写至少一个 MX 模式。'
+  if (value.daneEnabled && splitList(value.daneTlsaRecords).length === 0) return '启用 DANE 后必须填写至少一条 TLSA 记录。'
+  return ''
+}
+
+export function prepareDomainDnsSettings(value: DomainDnsSettingsModel): DomainDnsSettingsModel {
+  const input = { ...value }
+  if (input.mtaStsMode === 'none') {
+    if (!/^[A-Za-z0-9]{1,32}$/.test(input.mtaStsPolicyId)) input.mtaStsPolicyId = '1'
+    if (!Number.isInteger(input.mtaStsMaxAgeSeconds) || input.mtaStsMaxAgeSeconds < 0 || input.mtaStsMaxAgeSeconds > 31_557_600) input.mtaStsMaxAgeSeconds = 604_800
+  }
+  return input
+}
+
 export function dkimPublicRecord(domainName: string, selector: string, publicKey: string): string {
   return `${selector}._domainkey.${domainName} TXT "v=DKIM1; k=rsa; p=${publicKey}"`
 }

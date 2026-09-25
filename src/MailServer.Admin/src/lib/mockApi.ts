@@ -846,10 +846,11 @@ function validatePreviewDnsSettings(input: Record<string, unknown>): string {
   if (input.dmarcSubdomainPolicy && !['none', 'quarantine', 'reject'].includes(String(input.dmarcSubdomainPolicy))) return 'DMARC 子域策略无效。'
   const percentage = Number(input.dmarcPercentage)
   if (!Number.isInteger(percentage) || percentage < 0 || percentage > 100) return 'DMARC 百分比必须是 0 到 100 的整数。'
-  if (!/^[A-Za-z0-9]{1,32}$/.test(String(input.mtaStsPolicyId))) return 'MTA-STS 策略 ID 只能是 1-32 位字母或数字。'
+  if (input.mtaStsMode !== 'none' && !/^[A-Za-z0-9]{1,32}$/.test(String(input.mtaStsPolicyId))) return 'MTA-STS 策略 ID 只能是 1-32 位字母或数字。'
   const maxAge = Number(input.mtaStsMaxAgeSeconds)
-  if (!Number.isInteger(maxAge) || maxAge < 0 || maxAge > 31_557_600) return 'MTA-STS max_age 必须在 0 到 31557600 秒之间。'
+  if (input.mtaStsMode !== 'none' && (!Number.isInteger(maxAge) || maxAge < 0 || maxAge > 31_557_600)) return 'MTA-STS max_age 必须在 0 到 31557600 秒之间。'
   if (input.mtaStsMode !== 'none' && splitPreviewList(input.mtaStsMxPatterns).length === 0) return '启用 MTA-STS 后必须填写至少一个 MX 模式。'
+  if (input.daneEnabled && splitPreviewList(input.daneTlsaRecords).length === 0) return '启用 DANE 后必须填写至少一条 TLSA 记录。'
   return ''
 }
 
@@ -1911,6 +1912,8 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
       tlsReportUris: splitPreviewList(request.tlsReportUris).join('\n'),
       daneTlsaRecords: splitPreviewList(request.daneTlsaRecords).join('\n'),
       dmarcSubdomainPolicy: request.dmarcSubdomainPolicy || null,
+      dmarcFailureOptions: String(request.dmarcFailureOptions || '0').trim() || '0',
+      mtaStsPolicyId: String(request.mtaStsPolicyId || '1').trim() || '1',
       updatedAt: new Date().toISOString(),
     }
     previewDnsSettings[domain.id] = normalized

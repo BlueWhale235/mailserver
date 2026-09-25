@@ -20,6 +20,83 @@ namespace MailServer.Tests;
 public sealed class HttpAcceptanceTests
 {
     [Fact]
+    public async Task DomainDnsSettingsCanBeSavedFromGetResponse()
+    {
+        await using var host = await AcceptanceHost.StartAsync();
+        var domain = await host.JsonAsync(HttpMethod.Post, "/api/v1/domains", new { name = "dns-save.invalid" }, 201);
+        var domainId = domain.GetProperty("id").GetGuid();
+        var path = $"/api/v1/domains/{domainId}/dns";
+        var configuration = await host.JsonAsync(HttpMethod.Get, path);
+        var settings = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(
+            configuration.GetProperty("settings").GetRawText())!;
+        settings["spfIpv4"] = JsonSerializer.SerializeToElement("203.0.113.25");
+
+        var saved = await host.JsonAsync(HttpMethod.Put, path, settings);
+        Assert.Equal("203.0.113.25", saved.GetProperty("settings").GetProperty("spfIpv4").GetString());
+        Assert.Contains("ip4:203.0.113.25", saved.GetProperty("records")[0].GetProperty("value").GetString());
+
+        await using var db = await host.Factory.CreateDbContextAsync();
+        Assert.Equal("203.0.113.25", (await db.DomainDnsSettings.SingleAsync(x => x.DomainId == domainId)).SpfIpv4);
+        Assert.True(await db.AuditRecords.AnyAsync(x => x.Action == "domain.dns.update" && x.Actor == "acceptance-admin"));
+
+        settings["spfIpv4"] = JsonSerializer.SerializeToElement<string?>(null);
+        using var invalid = await host.Admin.PutAsJsonAsync(path, settings);
+        var problem = await AcceptanceHost.AssertProblemAsync(invalid, 400);
+        Assert.True(problem.GetProperty("errors").TryGetProperty("spfIpv4", out _));
+        Assert.False(problem.GetProperty("errors").TryGetProperty("domain", out _));
+    }
+
+    [Fact]
+    public async Task DomainDnsOptionalFieldsAndConditionalRequirementsWorkOverHttp()
+    {
+        await using var host = await AcceptanceHost.StartAsync();
+        var domain = await host.JsonAsync(HttpMethod.Post, "/api/v1/domains", new { name = "dns-optional.invalid" }, 201);
+        var domainId = domain.GetProperty("id").GetGuid();
+        var path = $"/api/v1/domains/{domainId}/dns";
+        var configuration = await host.JsonAsync(HttpMethod.Get, path);
+        var settings = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(
+            configuration.GetProperty("settings").GetRawText())!;
+        foreach (var field in new[]
+        {
+            "spfIpv4", "spfIpv6", "spfIncludes", "spfCustomMechanisms",
+            "dmarcAggregateReportUris", "dmarcForensicReportUris", "dmarcFailureOptions",
+            "mtaStsPolicyId", "mtaStsMxPatterns", "tlsReportUris", "daneTlsaRecords"
+        }) settings[field] = JsonSerializer.SerializeToElement("");
+        settings["dmarcPolicy"] = JsonSerializer.SerializeToElement("quarantine");
+        settings["mtaStsMode"] = JsonSerializer.SerializeToElement("none");
+        settings["mtaStsMaxAgeSeconds"] = JsonSerializer.SerializeToElement(-1);
+
+        var saved = await host.JsonAsync(HttpMethod.Put, path, settings);
+        Assert.Equal("0", saved.GetProperty("settings").GetProperty("dmarcFailureOptions").GetString());
+        Assert.Equal("1", saved.GetProperty("settings").GetProperty("mtaStsPolicyId").GetString());
+        Assert.Equal(604_800, saved.GetProperty("settings").GetProperty("mtaStsMaxAgeSeconds").GetInt32());
+        Assert.Contains("fo=0", saved.GetProperty("records")[1].GetProperty("value").GetString());
+
+        settings["tlsReportUris"] = JsonSerializer.SerializeToElement("mailto:reports@dns-optional.invalid");
+        saved = await host.JsonAsync(HttpMethod.Put, path, settings);
+        Assert.Contains(saved.GetProperty("records").EnumerateArray(), item =>
+            item.GetProperty("name").GetString() == "_smtp._tls.dns-optional.invalid");
+
+        settings["mtaStsMode"] = JsonSerializer.SerializeToElement("testing");
+        settings["mtaStsMaxAgeSeconds"] = JsonSerializer.SerializeToElement(604_800);
+        using (var missingMx = await host.Admin.PutAsJsonAsync(path, settings))
+            Assert.Equal(HttpStatusCode.BadRequest, missingMx.StatusCode);
+        settings["mtaStsPolicyId"] = JsonSerializer.SerializeToElement("20260925");
+        settings["mtaStsMxPatterns"] = JsonSerializer.SerializeToElement("mail.dns-optional.invalid");
+        saved = await host.JsonAsync(HttpMethod.Put, path, settings);
+        Assert.Equal("testing", saved.GetProperty("settings").GetProperty("mtaStsMode").GetString());
+
+        settings["daneEnabled"] = JsonSerializer.SerializeToElement(true);
+        using (var missingTlsa = await host.Admin.PutAsJsonAsync(path, settings))
+            Assert.Equal(HttpStatusCode.BadRequest, missingTlsa.StatusCode);
+        settings["daneEnabled"] = JsonSerializer.SerializeToElement(false);
+        await host.JsonAsync(HttpMethod.Put, path, settings);
+
+        await using var db = await host.Factory.CreateDbContextAsync();
+        Assert.True(await db.AuditRecords.CountAsync(x => x.Action == "domain.dns.update" && x.Actor == "acceptance-admin") >= 4);
+    }
+
+    [Fact]
     public async Task EveryOpenApiProtectedOperationRejectsAnonymousRequests()
     {
         await using var host = await AcceptanceHost.StartAsync();

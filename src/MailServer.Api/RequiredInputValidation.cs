@@ -2,6 +2,7 @@ using System.Collections;
 using System.Collections.Concurrent;
 using System.Reflection;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace MailServer.Api;
 
@@ -48,7 +49,8 @@ public static class RequiredInputValidation
         {
             var nullability = new NullabilityInfoContext();
             return type.GetProperties(BindingFlags.Public | BindingFlags.Instance)
-                .Where(property => property.CanRead && property.GetIndexParameters().Length == 0)
+                .Where(property => property.CanRead && property.GetIndexParameters().Length == 0
+                    && property.GetCustomAttribute<JsonIgnoreAttribute>()?.Condition != JsonIgnoreCondition.Always)
                 .Select(property => (property, nullability.Create(property).ReadState == NullabilityState.NotNull))
                 .ToArray();
         });

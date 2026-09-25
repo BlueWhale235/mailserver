@@ -75,10 +75,16 @@ public sealed class DomainDnsService(
         settings.DmarcForensicReportUris = NormalizeList(input.DmarcForensicReportUris);
         settings.DmarcDkimAlignment = input.DmarcDkimAlignment.Trim().ToLowerInvariant();
         settings.DmarcSpfAlignment = input.DmarcSpfAlignment.Trim().ToLowerInvariant();
-        settings.DmarcFailureOptions = input.DmarcFailureOptions.Trim();
+        settings.DmarcFailureOptions = string.IsNullOrWhiteSpace(input.DmarcFailureOptions)
+            ? "0" : input.DmarcFailureOptions.Trim();
         settings.MtaStsMode = input.MtaStsMode.Trim().ToLowerInvariant();
-        settings.MtaStsPolicyId = input.MtaStsPolicyId.Trim();
-        settings.MtaStsMaxAgeSeconds = input.MtaStsMaxAgeSeconds;
+        settings.MtaStsPolicyId = input.MtaStsMode == "none"
+            && (input.MtaStsPolicyId.Length is < 1 or > 32
+                || !input.MtaStsPolicyId.All(char.IsAsciiLetterOrDigit))
+            ? "1" : input.MtaStsPolicyId.Trim();
+        settings.MtaStsMaxAgeSeconds = input.MtaStsMode == "none"
+            && input.MtaStsMaxAgeSeconds is < 0 or > 31_557_600
+            ? 604_800 : input.MtaStsMaxAgeSeconds;
         settings.MtaStsMxPatterns = NormalizeList(input.MtaStsMxPatterns);
         settings.TlsReportUris = NormalizeList(input.TlsReportUris);
         settings.DaneEnabled = input.DaneEnabled;
@@ -358,13 +364,16 @@ public sealed class DomainDnsService(
             throw new FormatException("DMARC alignment must be r or s.");
         if (settings.MtaStsMode is not ("none" or "testing" or "enforce"))
             throw new FormatException("MTA-STS mode must be none, testing, or enforce.");
-        if (settings.MtaStsPolicyId.Length is < 1 or > 32
-            || !settings.MtaStsPolicyId.All(char.IsAsciiLetterOrDigit))
+        if (settings.MtaStsMode != "none"
+            && (settings.MtaStsPolicyId.Length is < 1 or > 32
+                || !settings.MtaStsPolicyId.All(char.IsAsciiLetterOrDigit)))
             throw new FormatException("MTA-STS policy id must contain 1-32 ASCII letters or digits.");
-        if (settings.MtaStsMaxAgeSeconds is < 0 or > 31_557_600)
+        if (settings.MtaStsMode != "none" && settings.MtaStsMaxAgeSeconds is < 0 or > 31_557_600)
             throw new FormatException("MTA-STS max_age must be between 0 and 31557600.");
         if (settings.MtaStsMode != "none" && SplitList(settings.MtaStsMxPatterns).Length == 0)
             throw new FormatException("MTA-STS requires at least one MX pattern.");
+        if (settings.DaneEnabled && SplitList(settings.DaneTlsaRecords).Length == 0)
+            throw new FormatException("DANE requires at least one TLSA record.");
     }
 
     private static bool IsValidSelector(string selector) =>
