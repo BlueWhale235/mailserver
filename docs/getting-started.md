@@ -57,6 +57,7 @@ mailserver run worker
 ## CLI
 
 ```text
+mailserver --version
 mailserver init
 mailserver doctor
 mailserver config validate

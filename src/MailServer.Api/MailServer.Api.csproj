@@ -25,10 +25,11 @@
       <_Parameter1>MailServer.Tests</_Parameter1>
     </AssemblyAttribute>
   </ItemGroup>
-  <Target Name="BuildAdminSpa" BeforeTargets="AssignTargetPaths" Condition="'$(DesignTimeBuild)' != 'true' and '$(SkipAdminBuild)' != 'true'">
-    <Exec WorkingDirectory="../MailServer.Admin" Command="npm ci" Condition="!Exists('../MailServer.Admin/node_modules') and Exists('../MailServer.Admin/package-lock.json')" />
-    <Exec WorkingDirectory="../MailServer.Admin" Command="npm install" Condition="!Exists('../MailServer.Admin/node_modules') and !Exists('../MailServer.Admin/package-lock.json')" />
-    <Exec WorkingDirectory="../MailServer.Admin" Command="npm run build" />
+  <Target Name="BuildAdminSpa" BeforeTargets="AssignTargetPaths" Condition="'$(DesignTimeBuild)' != 'true'">
+    <Exec WorkingDirectory="../MailServer.Admin" Command="npm ci" Condition="'$(SkipAdminBuild)' != 'true' and !Exists('../MailServer.Admin/node_modules') and Exists('../MailServer.Admin/package-lock.json')" />
+    <Exec WorkingDirectory="../MailServer.Admin" Command="npm install" Condition="'$(SkipAdminBuild)' != 'true' and !Exists('../MailServer.Admin/node_modules') and !Exists('../MailServer.Admin/package-lock.json')" />
+    <Exec WorkingDirectory="../MailServer.Admin" Command="npm run build" Condition="'$(SkipAdminBuild)' != 'true'" />
+    <Error Condition="!Exists('../MailServer.Admin/dist/index.html')" Text="Build the Vue administration UI before building MailServer.Api with SkipAdminBuild=true." />
     <ItemGroup>
       <AdminSpaResource Include="..\MailServer.Admin\dist\**\*" />
       <EmbeddedResource Include="@(AdminSpaResource)">

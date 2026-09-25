@@ -35,6 +35,14 @@ internal static class MailServerCli
         {
             // 命令解析保持轻量，具体校验放到各命令处理器中，便于输出面向运维人员的错误。
             var parsed = CliArguments.Parse(args);
+            if ((args.Length == 1 && args[0] == "--version")
+                || (parsed.Positionals.Count == 1 && parsed.Positionals[0] == "version"))
+            {
+                Console.WriteLine(typeof(MailServerCli).Assembly
+                    .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
+                    ?? typeof(MailServerCli).Assembly.GetName().Version?.ToString() ?? "unknown");
+                return 0;
+            }
             if (parsed.Positionals.Count == 0 || parsed.Positionals[0] is "help" or "--help" or "-h")
             {
                 PrintHelp();
@@ -656,6 +664,7 @@ internal static class MailServerCli
             """
             MailServer portable CLI
 
+              mailserver --version
               mailserver init [--provider Sqlite|PostgreSql|MySql] [--config path]
               mailserver doctor [--config path] [--domain example.com] [--selector dkim-selector]
               mailserver config validate

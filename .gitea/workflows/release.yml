@@ -102,8 +102,7 @@ jobs:
           for RID in $RUNTIMES; do
             printf '%s\n' "$PACKAGE_VERSION" > "builds/publish/$RID/VERSION.txt"
             test -f "builds/publish/$RID/mailserver.json"
-            test -f "builds/publish/$RID/wwwroot/admin/index.html"
-            test -d "builds/publish/$RID/wwwroot/admin/assets"
+            test ! -e "builds/publish/$RID/wwwroot/admin/index.html"
             case "$RID" in
               win-*) test -f "builds/publish/$RID/mailserver.exe" ;;
               *) test -x "builds/publish/$RID/mailserver" ;;

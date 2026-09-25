@@ -32,70 +32,42 @@ docker compose --profile mysql up --build -d api smtp imap worker
 
 数据库类型、连接字符串、后台端口、邮件端口和 PEM 路径均可用环境变量覆盖。
 
-## 单文件发布
+## GitHub Actions 构建 Linux 单文件
 
-Visual Studio 中，“生成解决方案”用于开发编译和调试，不等同于部署打包。需要部署时请右键 `MailServer.Cli` 项目，选择“发布”，再选择发布配置：
+将仓库放在 GitHub 后，`.github/workflows/release-linux.yml` 可由以下方式触发：
 
-- `win-x64-single-file`：Windows x64 自包含单文件包，主要可执行文件是 `mailserver.exe`。
-- `win-x64-folder`：Windows x64 自包含文件夹包，包含 `mailserver.exe` 和所需 DLL。
-- `linux-x64`：Linux x64 自包含单文件包，主要可执行文件是 `mailserver`。
+1. 在 Actions 中手动运行 **Build Linux binary**，输入 `v2.0.0` 这样的版本号。
+2. 推送 `vMAJOR.MINOR.PATCH` 标签；预发布版本也可带 `-rc.1` 后缀。
 
-发布目录会同时包含 `mailserver.json`、`.env`、README、证书目录、插件目录、安全资源目录和日志目录。Vue 管理后台的 HTML、JS、CSS、字体已经嵌入 `mailserver` 可执行文件，发布时不需要另外复制 `dist` 或 `wwwroot/admin`。启动时程序会把内嵌资源释放到可执行文件旁的 `wwwroot/admin`，因此运行目录需要写权限。
-
-Windows：
-
-```powershell
-./scripts/publish-portable.ps1
-```
-
-Linux/macOS：
-
-```bash
-./scripts/publish-portable.sh
-```
-
-默认只发布当前操作系统与 CPU 架构，以减少磁盘使用。需要一次生成全部目标时：
-
-```powershell
-./scripts/publish-portable.ps1 -Runtime win-x64,linux-x64,linux-arm64
-```
-
-输出位置：
-
-- `builds/publish/win-x64`
-- `builds/publish/linux-x64`
-- `builds/publish/linux-arm64`
-
-发布所需的大型 RID 中间文件会写入系统临时目录，并在完成后删除；`builds` 中只保留最终单文件。
-
-如果只需要部署文件、不需要保留增量构建缓存：
-
-```powershell
-./scripts/publish-portable.ps1 -RemoveBuildCache
-```
-
-执行后 `builds` 通常只剩约 120 MiB 的当前平台单文件；下次编译会重新生成 `bin/obj`。
-
-产物为 self-contained 单文件 CLI，不要求目标机器预装 .NET。
-
-发布包是纯运行部署包，不包含 `src`、Dockerfile、Compose 文件、解决方案文件或构建脚本。典型结构如下：
+工作流先安装 Node.js 24 与 .NET SDK 10.0.301，运行前端 Lint、测试、构建和后端测试，再调用 `scripts/build-linux-release.sh`。构建失败不会上传文件。成功后 Actions 的 artifact 名称包含版本号，内含：
 
 ```text
-mailserver(.exe)
-mailserver.json
-mailserver.example.json
-.env
-.env.example
-README.md
-certificates/
-plugins/
-security-assets/
-wwwroot/
+mailserver      # Linux x64 自包含单文件，含 Vue 管理后台
+VERSION.txt     # 版本、架构、源码提交号及工作区状态
+SHA256SUMS      # 二进制校验值
 ```
 
-`wwwroot/admin` 在首次启动时由二进制生成。部署后可直接检查 `/admin/`、深层路由和 `/admin/assets/...`；不必单独部署前端文件。
+该工作流上传构建产物供下载，不会自动创建 GitHub Release 或部署服务器。当前仓库的 `origin` 是 Gitea；GitHub Actions 需将同一源码推送到 GitHub 仓库后才能运行。现有 Gitea 发布流程仍位于 `.gitea/workflows/release.yml`。
 
-Linux 自包含发布不需要预装 .NET，但仍使用系统的 glibc、OpenSSL 和 ICU。Ubuntu 26.04 WSL2 实测需安装 `libicu78`；其它发行版安装对应的 ICU 运行库即可。
+## 本地构建与版本
+
+Linux 构建机需 Bash、Node.js 24、.NET SDK 10.0.301 和网络可访问的 npm／NuGet 包源。在仓库根目录运行：
+
+```bash
+bash scripts/build-linux-release.sh v2.0.0
+```
+
+脚本只接受 `vMAJOR.MINOR.PATCH[-预发布后缀]`，将 `2.0.0` 写入程序集版本；`mailserver --version` 会输出相同版本。生成目录为 `builds/releases/v2.0.0/linux-x64/`。如果该版本目录已存在，脚本会拒绝覆盖。`SHA256SUMS` 可在该目录用 `sha256sum -c SHA256SUMS` 验证。不生成 `tar.gz`。建议从干净的 Git 提交构建；若存在本地未提交修改，`VERSION.txt` 会标记 `Source state: modified`。
+
+普通便携发布仍可使用 `scripts/publish-portable.sh` 或 Windows 上的 `scripts/publish-portable.ps1`；它们输出到 `builds/publish/<运行时>/`，不会给程序集指定发布版本。版本化 Linux 产物以 `scripts/build-linux-release.sh` 为准。
+
+## 运行版本化单文件
+
+把 `mailserver` 放到可写目录，赋予执行权限并执行 `./mailserver init` 创建独立配置、SQLite 数据库和初始管理员，再用 `./mailserver run all` 启动。首次初始化应设置正式域名、证书与需要的端口；使用 SQLite 时只运行一个 Worker。可用 `./mailserver doctor` 和 `/api/v1/health/ready` 检查状态。
+
+Vue 管理后台的 HTML、JS、CSS 和字体已经嵌入二进制，不需要单独复制 `dist` 或 `wwwroot/admin`。启动时程序会在可执行文件旁释放 `wwwroot/admin`，因此目录需要写权限。上线后检查 `/admin/`、深层路由和 `/admin/assets/...`。
+
+Linux 自包含发布不需要预装 .NET，但仍使用系统的 glibc、OpenSSL 和 ICU。Ubuntu 26.04 WSL2 实测需安装 `libicu78`；其它发行版安装对应的 ICU 运行库。配置、证书、邮件内容和数据库不会嵌入二进制，需要按环境独立保存并备份。
 
 ## 上线前
 
