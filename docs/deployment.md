@@ -40,7 +40,7 @@ Visual Studio 中，“生成解决方案”用于开发编译和调试，不等
 - `win-x64-folder`：Windows x64 自包含文件夹包，包含 `mailserver.exe` 和所需 DLL。
 - `linux-x64`：Linux x64 自包含单文件包，主要可执行文件是 `mailserver`。
 
-发布目录会同时包含 `mailserver.json`、`.env`、README、证书目录、插件目录、安全资源目录、日志目录和后台静态资源目录。
+发布目录会同时包含 `mailserver.json`、`.env`、README、证书目录、插件目录、安全资源目录和日志目录。Vue 管理后台的 HTML、JS、CSS、字体已经嵌入 `mailserver` 可执行文件，发布时不需要另外复制 `dist` 或 `wwwroot/admin`。启动时程序会把内嵌资源释放到可执行文件旁的 `wwwroot/admin`，因此运行目录需要写权限。
 
 Windows：
 
@@ -91,10 +91,11 @@ certificates/
 plugins/
 security-assets/
 wwwroot/
-  admin.css
 ```
 
-`wwwroot/admin.css` 会随包生成，便于查看和后续扩展；当前后台样式仍由程序内嵌资源提供，不依赖物理 `wwwroot` 目录。
+`wwwroot/admin` 在首次启动时由二进制生成。部署后可直接检查 `/admin/`、深层路由和 `/admin/assets/...`；不必单独部署前端文件。
+
+Linux 自包含发布不需要预装 .NET，但仍使用系统的 glibc、OpenSSL 和 ICU。Ubuntu 26.04 WSL2 实测需安装 `libicu78`；其它发行版安装对应的 ICU 运行库即可。
 
 ## 上线前
 

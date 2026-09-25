@@ -7,12 +7,35 @@ using Microsoft.AspNetCore.StaticFiles;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using System.Text.RegularExpressions;
 using Xunit;
 
 namespace MailServer.Tests;
 
 public sealed class AdminSpaHostingTests
 {
+    [Fact]
+    public void ApiAssembly_EmbedsAdminIndexAndReferencedAssets()
+    {
+        const string prefix = "MailServer.Api.StaticWebAssets/wwwroot/";
+        var assembly = typeof(StaticWebAssetExtraction).Assembly;
+        var resources = assembly.GetManifestResourceNames()
+            .Select(name => name.Replace('\\', '/'))
+            .ToHashSet(StringComparer.Ordinal);
+        Assert.Contains(prefix + "admin/index.html", resources);
+
+        using var stream = assembly.GetManifestResourceStream(prefix + "admin/index.html");
+        Assert.NotNull(stream);
+        using var reader = new StreamReader(stream);
+        var html = reader.ReadToEnd();
+        var assets = Regex.Matches(html, "(?:src|href)=[\"'](?<path>/admin/assets/[^\"']+)[\"']")
+            .Select(match => match.Groups["path"].Value)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        Assert.NotEmpty(assets);
+        Assert.All(assets, path => Assert.Contains(prefix + path.TrimStart('/'), resources));
+    }
+
     [Fact]
     public void ValidateAdminBundle_AcceptsCompleteBundle()
     {

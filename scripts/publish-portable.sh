@@ -23,8 +23,7 @@ copy_deployment_assets() {
     echo "The Vue administration bundle was not produced at '$ADMIN_SOURCE/index.html'." >&2
     exit 1
   fi
-  mkdir -p "$TARGET/wwwroot/admin"
-  cp -R "$ADMIN_SOURCE/." "$TARGET/wwwroot/admin/"
+  # The API assembly embeds the SPA and extracts wwwroot/admin at startup.
 }
 
 remove_referenced_host_publish_files() {

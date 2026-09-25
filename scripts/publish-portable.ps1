@@ -35,10 +35,7 @@ function Copy-DeploymentAssets {
     if (-not (Test-Path -LiteralPath $adminIndex -PathType Leaf)) {
         throw "The Vue administration bundle was not produced at '$adminIndex'."
     }
-
-    $adminTarget = Join-Path $Target "wwwroot\admin"
-    New-Item -ItemType Directory -Path $adminTarget -Force | Out-Null
-    Copy-Item -Path (Join-Path $adminSource "*") -Destination $adminTarget -Recurse -Force
+    # The API assembly embeds the SPA; it extracts wwwroot/admin from the executable at startup.
 }
 
 function Remove-ReferencedHostPublishFiles {
