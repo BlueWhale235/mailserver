@@ -330,7 +330,9 @@ onMounted(load)
         </div>
 
         <template v-if="action === 'restore'">
-          <p class="dialog-copy">恢复后，对象会重新出现在原有位置。关联对象的恢复范围由资源类型决定。</p>
+          <p class="dialog-copy">{{ target.resourceType === 'MailboxMessage' && target.displayName.includes(' / Trash / ')
+            ? 'Trash 中的邮件将恢复到所属账号的收件箱。'
+            : '恢复后，对象会重新出现在原有位置。关联对象的恢复范围由资源类型决定。' }}</p>
           <v-alert type="info" variant="tonal" density="compact">该操作会写入审计日志。</v-alert>
         </template>
         <template v-else>

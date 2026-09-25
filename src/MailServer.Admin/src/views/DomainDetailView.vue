@@ -6,6 +6,7 @@ import StatusPill from "../components/StatusPill.vue";
 import DomainRuleWorkspace from "../components/DomainRuleWorkspace.vue";
 import DomainCertificateWorkspace from "../components/DomainCertificateWorkspace.vue";
 import DomainDnsWorkspace from "../components/DomainDnsWorkspace.vue";
+import AccountDirectoryView from "./AccountDirectoryView.vue";
 import QueueWorkspace from "./delivery/QueueWorkspace.vue";
 import { validatePublishedDns, type DomainDnsCheck } from "../lib/domainDns";
 import { usePermission } from "../composables/usePermission";
@@ -165,7 +166,7 @@ function normalizeTab(value: unknown): TabKey {
     : "overview";
 }
 
-const tab = ref<TabKey>(normalizeTab(route.params.tab));
+const tab = ref<TabKey>(route.name === "account-directory" ? "accounts" : normalizeTab(route.params.tab));
 const pendingTab = ref<TabKey | null>(null);
 const leaveDialogOpen = ref(false);
 const dnsDirty = ref(false);
@@ -440,11 +441,9 @@ async function loadPage() {
     health.value = nextHealth;
     dnsCheck.value = nextDns;
     quotaGiB.value = Math.round(nextManagement.domain.quotaBytes / 1024 ** 3);
-    await Promise.all([
-      loadAccounts(),
-      loadAliases(),
-      loadAliasTargetAccounts(),
-    ]);
+    if (route.name !== "account-directory") {
+      await Promise.all([loadAccounts(), loadAliases(), loadAliasTargetAccounts()]);
+    }
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : "域详情加载失败";
   } finally {
@@ -1289,6 +1288,10 @@ function requestTab(value: unknown) {
   }
   const next = normalizeTab(value);
   if (next === tab.value) return;
+  if (route.name === "account-directory") {
+    void router.push({ name: "domain-detail", params: { id: domainId.value, tab: next } });
+    return;
+  }
   if (currentEditorDirty.value || currentEditorSaving.value) {
     pendingTab.value = next;
     leaveDialogOpen.value = true;
@@ -1337,9 +1340,9 @@ onBeforeRouteLeave(guardEditorNavigation);
 onBeforeRouteUpdate(guardEditorNavigation);
 
 watch(
-  () => route.params.tab,
-  (value) => {
-    const next = normalizeTab(value);
+  () => [route.name, route.params.tab],
+  () => {
+    const next = route.name === "account-directory" ? "accounts" : normalizeTab(route.params.tab);
     if (next !== tab.value) tab.value = next;
   },
 );
@@ -1350,6 +1353,7 @@ watch(
     delete query.tab;
     delete query.section;
     const clean = !("tab" in route.query) && !("section" in route.query);
+    if (route.name === "account-directory" && value === "accounts" && clean) return;
     if (String(route.params.tab ?? "") === value && clean) return;
     void router.replace({
       name: "domain-detail",
@@ -1559,7 +1563,7 @@ onMounted(() => {
 
     <v-tabs :model-value="tab" class="detail-tabs" color="primary" show-arrows @update:model-value="requestTab">
       <v-tab value="overview">概览</v-tab>
-      <v-tab value="accounts">账号和别名</v-tab>
+      <v-tab v-if="can('domain.account.read', domainId) || can('domain.alias.read', domainId)" value="accounts">账号和别名</v-tab>
       <v-tab value="rules">收发信规则</v-tab>
       <v-tab v-if="can('domain.quarantine.read', domainId)" value="quarantine"
         >隔离审核</v-tab
@@ -1709,6 +1713,10 @@ onMounted(() => {
           </div>
         </div>
       </v-card>
+    </section>
+
+    <section v-else-if="tab === 'accounts' && route.name === 'account-directory'" class="account-directory-workspace">
+      <AccountDirectoryView embedded />
     </section>
 
     <section v-else-if="tab === 'accounts'" class="tab-panel panel">

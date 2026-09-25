@@ -513,11 +513,21 @@ public sealed partial class MailboxService(
                 .ToArray();
             var now = DateTimeOffset.UtcNow;
             var purgeAfter = now.AddDays(Math.Clamp(maintenance?.Value.SoftDeleteRetentionDays ?? 30, 1, 3650));
-            foreach (var message in messages.Where(x => HasFlag(x.Flags, "\\Deleted")))
+            var deletedMessages = messages.Where(x => HasFlag(x.Flags, "\\Deleted")).ToArray();
+            var deletedIds = deletedMessages.Select(x => x.Id).ToArray();
+            var queued = await db.CleanupQueue
+                .Where(x => x.ResourceType == CleanupResourceType.MailboxMessage
+                    && x.ResourceId.HasValue && deletedIds.Contains(x.ResourceId.Value)
+                    && (x.Status == CleanupQueueStatus.Pending || x.Status == CleanupQueueStatus.Failed))
+                .ToListAsync(cancellationToken);
+            var queuedIds = queued.Where(x => x.ResourceId.HasValue).Select(x => x.ResourceId!.Value).ToHashSet();
+            foreach (var item in queued) item.PurgeAfter = purgeAfter;
+            foreach (var message in deletedMessages)
             {
                 message.DeletedAt = now;
                 message.DeletedBy = "imap";
                 message.PurgeAfter = purgeAfter;
+                if (queuedIds.Contains(message.Id)) continue;
                 db.CleanupQueue.Add(new CleanupQueueItem
                 {
                     ResourceType = CleanupResourceType.MailboxMessage,

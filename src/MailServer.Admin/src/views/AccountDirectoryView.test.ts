@@ -12,9 +12,9 @@ vi.mock('vue-router', () => ({ useRoute: () => route, useRouter: () => navigatio
 vi.mock('../lib/api', () => ({ api: vi.fn(), jsonBody: JSON.stringify }))
 const Slot = defineComponent({ props: ['title'], template: '<section>{{ title }}<slot /></section>' })
 const Field = defineComponent({ props: ['modelValue', 'label', 'disabled', 'readonly'], emits: ['update:modelValue'], template: '<label>{{ label }}<input :aria-label="label" :value="modelValue" :disabled="disabled" :readonly="readonly" @input="$emit(`update:modelValue`, $event.target.value)" /></label>' })
-const Button = defineComponent({ props: ['disabled', 'loading', 'to'], emits: ['click'], template: '<button :disabled="disabled || loading" @click="$emit(`click`)"><slot /></button>' })
+const Button = defineComponent({ props: ['disabled', 'loading', 'to', 'target', 'rel'], emits: ['click'], template: '<button :disabled="disabled || loading" :target="target" :rel="rel" @click="$emit(`click`)"><slot /></button>' })
 const Dialog = defineComponent({ props: ['modelValue'], template: '<aside v-if="modelValue"><slot /></aside>' })
-const stubs = { PageHeader: Slot, VCard: Slot, VCardText: Slot, VCardActions: Slot, VAlert: Slot, VTable: Slot, VChip: Slot, VTextField: Field, VAutocomplete: Field, VSelect: Field, VBtn: Button, VDialog: Dialog, VPagination: true, VCheckboxBtn: true, VSwitch: true, VProgressLinear: true, DirectoryAliases: true }
+const stubs = { PageHeader: Slot, VCard: Slot, VCardText: Slot, VCardActions: Slot, VAlert: Slot, VTable: Slot, VChip: Slot, VIcon: true, VTextField: Field, VAutocomplete: Field, VSelect: Field, VBtn: Button, VDialog: Dialog, VPagination: true, VCheckboxBtn: true, VSwitch: true, VProgressLinear: true, DirectoryAliases: true }
 const context = { domainName: 'test.invalid', canReadAccounts: true, canReadAliases: true, canManageAccounts: true, canManageAliases: true }
 const account = { id: 'account', address: 'owner@test.invalid', isEnabled: true, quotaBytes: 1073741824, usedBytes: 0, aliasCount: 2, matchedAlias: 'sales@test.invalid', matchedAliasCount: 2 }
 const paged = (items: unknown[]) => ({ items, totalCount: items.length, page: 1, pageSize: 20 })
@@ -53,8 +53,11 @@ describe('account and alias directory', () => {
     resolveOld(paged([{ ...account, address: 'stale@test.invalid' }]))
     await flushPromises()
     expect(wrapper.text()).not.toContain('stale@test.invalid')
-    await button(wrapper, '配置').trigger('click')
-    expect(navigation.push).toHaveBeenCalledWith(expect.objectContaining({ name: 'account-settings', query: { query: 'new' } }))
+    const detail = button(wrapper, '详情')
+    expect(detail.attributes('target')).toBeUndefined()
+    expect(detail.attributes('aria-label')).toContain('owner@test.invalid')
+    expect(wrapper.findAllComponents(Button).find(x => x.text() === '详情')?.props('to')).toEqual({ name: 'account-settings', params: { id: 'domain', accountId: 'account' }, query: { query: 'new' } })
+    expect(navigation.push).not.toHaveBeenCalled()
   })
   it('restores URL filters and hides sensitive account controls for alias-only users', async () => {
     route.query = { query: 'sales', enabled: 'false', page: '2' }
@@ -71,13 +74,42 @@ describe('account and alias directory', () => {
     const wrapper = mount(AccountSettingsView)
     await flushPromises()
     expect(wrapper.find('input[aria-label="邮箱地址"]').attributes('readonly')).toBeDefined()
-    await wrapper.find('input[aria-label="容量配额（GiB）"]').setValue('3')
+    await wrapper.find('input[aria-label="总配额（GiB）"]').setValue('3')
     vi.mocked(api).mockRejectedValueOnce(new Error('保存失败'))
     await button(wrapper, '保存账号设置').trigger('click')
     await flushPromises()
     expect(wrapper.text()).toContain('保存失败')
-    expect((wrapper.find('input[aria-label="容量配额（GiB）"]').element as HTMLInputElement).value).toBe('3')
+    expect((wrapper.find('input[aria-label="总配额（GiB）"]').element as HTMLInputElement).value).toBe('3')
     expect(button(wrapper, '保存账号设置').attributes('disabled')).toBeUndefined()
+  })
+  it('keeps the account draft when switching sidebar sections', async () => {
+    route.name = 'account-settings'
+    const wrapper = mount(AccountSettingsView)
+    await flushPromises()
+    await wrapper.find('input[aria-label="总配额（GiB）"]').setValue('3')
+    const sections = wrapper.findAll('.account-nav button')
+    expect(sections.map(x => x.text())).toEqual(expect.arrayContaining([
+      expect.stringContaining('账号设置'),
+      expect.stringContaining('关联别名'),
+      expect.stringContaining('密码设置'),
+      expect.stringContaining('危险操作'),
+    ]))
+    await sections[1]!.trigger('click')
+    expect(sections[1]!.classes()).toContain('active')
+    await sections[0]!.trigger('click')
+    expect((wrapper.find('input[aria-label="总配额（GiB）"]').element as HTMLInputElement).value).toBe('3')
+  })
+  it('limits the sidebar and account overview for alias-only users', async () => {
+    route.name = 'account-settings'
+    vi.mocked(api).mockImplementation(async path => String(path).endsWith('/account-directory')
+      ? { ...context, canReadAccounts: false, canManageAccounts: false } as never
+      : { ...account, isEnabled: null, quotaBytes: null, usedBytes: null } as never)
+    const wrapper = mount(AccountSettingsView)
+    await flushPromises()
+    expect(wrapper.findAll('.account-nav button').map(x => x.text())).toHaveLength(1)
+    expect(wrapper.find('.account-overview').text()).not.toContain('容量使用')
+    expect(wrapper.text()).not.toContain('更新密码')
+    expect(wrapper.text()).not.toContain('软删除账号')
   })
   it('creates an account in the independent page and continues to its configuration', async () => {
     route.name = 'account-create'
@@ -96,13 +128,13 @@ describe('account and alias directory', () => {
     route.name = 'account-settings'
     const wrapper = mount(AccountSettingsView)
     await flushPromises()
-    await wrapper.find('input[aria-label="容量配额（GiB）"]').setValue('3')
+    await wrapper.find('input[aria-label="总配额（GiB）"]').setValue('3')
     const allowed = navigation.update.mock.calls[0]![0]() as Promise<boolean>
     await flushPromises()
     expect(wrapper.text()).toContain('放弃未保存的修改？')
     await button(wrapper, '继续编辑').trigger('click')
     expect(await allowed).toBe(false)
-    expect((wrapper.find('input[aria-label="容量配额（GiB）"]').element as HTMLInputElement).value).toBe('3')
+    expect((wrapper.find('input[aria-label="总配额（GiB）"]').element as HTMLInputElement).value).toBe('3')
   })
   it('requires matching passwords, blocks duplicate submission and clears successful passwords', async () => {
     route.name = 'account-settings'

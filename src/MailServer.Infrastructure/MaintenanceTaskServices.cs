@@ -248,11 +248,39 @@ public sealed class CleanupQueueService(
                 break;
             case CleanupResourceType.MailboxMessage:
                 var message = await db.MailboxMessages.IgnoreQueryFilters().SingleOrDefaultAsync(x => x.Id == id, cancellationToken);
-                if (message?.DeletedAt is null) throw new RecycleBinConflictException("邮件已恢复或被清理，请刷新回收站。");
-                if (!await db.Mailboxes.IgnoreQueryFilters().AnyAsync(x => x.Id == message.MailboxId
-                    && x.DeletedAt == null && x.Account.DeletedAt == null && x.Account.Domain.DeletedAt == null, cancellationToken))
+                if (message is null) throw new RecycleBinConflictException("邮件已恢复或被清理，请刷新回收站。");
+                var sourceMailbox = await db.Mailboxes.IgnoreQueryFilters()
+                    .SingleOrDefaultAsync(x => x.Id == message.MailboxId
+                        && x.DeletedAt == null && x.Account.DeletedAt == null && x.Account.Domain.DeletedAt == null,
+                        cancellationToken);
+                if (sourceMailbox is null)
                     throw new RecycleBinConflictException("所属文件夹、账号或域尚未恢复，请先恢复上级对象。");
+                var inTrash = sourceMailbox.Name.Equals("Trash", StringComparison.OrdinalIgnoreCase);
+                if (message.DeletedAt is null && (!inTrash || message.ScheduledDeleteAt is null))
+                    throw new RecycleBinConflictException("邮件已恢复或被清理，请刷新回收站。");
+                if (inTrash)
+                {
+                    var inbox = await db.Mailboxes.SingleOrDefaultAsync(x => x.AccountId == sourceMailbox.AccountId
+                        && x.Name == "INBOX" && x.DeletedAt == null && x.PendingDeletionJobId == null, cancellationToken);
+                    if (inbox is null)
+                        throw new RecycleBinConflictException("收件箱不存在或正在删除，暂时无法恢复邮件。");
+                    await MailboxService.EnsureUidNextAtLeastAsync(db, inbox, cancellationToken);
+                    message.MailboxId = inbox.Id;
+                    message.Uid = inbox.UidNext++;
+                    message.ModSeq = ++inbox.HighestModSeq;
+                }
+                message.Flags = string.Join(' ', message.Flags.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+                    .Where(flag => !flag.Equals("\\Deleted", StringComparison.OrdinalIgnoreCase)));
+                message.ScheduledDeleteAt = null;
                 message.DeletedAt = message.PurgeAfter = null; message.DeletedBy = null;
+                foreach (var duplicate in await db.CleanupQueue.Where(x => x.Id != queueId
+                    && x.ResourceType == CleanupResourceType.MailboxMessage && x.ResourceId == id
+                    && (x.Status == CleanupQueueStatus.Pending || x.Status == CleanupQueueStatus.Failed))
+                    .ToListAsync(cancellationToken))
+                {
+                    duplicate.Status = CleanupQueueStatus.Restored;
+                    duplicate.CompletedAt = clock.UtcNow;
+                }
                 break;
             default:
                 throw new RecycleBinConflictException("该对象类型不支持恢复。");

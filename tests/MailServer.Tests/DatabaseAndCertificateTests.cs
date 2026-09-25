@@ -21,6 +21,120 @@ namespace MailServer.Tests;
 public sealed class DatabaseAndCertificateTests
 {
     [Fact]
+    public async Task RecycleBinRestoresMovedAndExpungedMailOnSqlite()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-recycle-mail-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Database:Provider"] = "Sqlite",
+                ["ConnectionStrings:MailDatabase"] = $"Data Source={Path.Combine(root, "mailserver.db")}",
+                ["Storage:RootPath"] = Path.Combine(root, "messages"),
+                ["SecurityAssets:RootPath"] = Path.Combine(root, "security")
+            }).Build();
+            var collection = new ServiceCollection();
+            collection.AddLogging();
+            collection.AddSingleton<IConfiguration>(configuration);
+            collection.AddMailServerInfrastructure(configuration);
+            await using var services = collection.BuildServiceProvider();
+            var factory = services.GetRequiredService<IDbContextFactory<MailDbContext>>();
+            Guid inboxId;
+            Guid trashId;
+            Guid accountId;
+            await using (var db = await factory.CreateDbContextAsync())
+            {
+                await db.Database.MigrateAsync();
+                var domain = new MailDomain { Name = "restore.example", UsedBytes = 36 };
+                var account = new MailAccount
+                {
+                    Domain = domain, LocalPart = "alice", PasswordHash = "unused",
+                    UsedBytes = 36, QuotaBytes = 4096
+                };
+                var inbox = new Mailbox { Account = account, Name = "INBOX", UidNext = 4 };
+                var trash = new Mailbox { Account = account, Name = "Trash" };
+                for (var uid = 1; uid <= 3; uid++)
+                {
+                    db.MailboxMessages.Add(new MailboxMessage
+                    {
+                        Mailbox = inbox,
+                        Message = new StoredMessage
+                        {
+                            ContentKey = new string((char)('a' + uid), 64), EnvelopeFrom = "", Size = 12
+                        },
+                        Uid = uid
+                    });
+                }
+                db.Mailboxes.Add(trash);
+                await db.SaveChangesAsync();
+                inboxId = inbox.Id;
+                trashId = trash.Id;
+                accountId = account.Id;
+            }
+
+            var mailbox = services.GetRequiredService<IMailboxService>();
+            var recycle = services.GetRequiredService<IRecycleBinService>();
+            await mailbox.CopyAsync(inboxId, "1", true, "Trash", true, CancellationToken.None);
+            var moved = await recycle.SearchAsync(null, CleanupResourceType.MailboxMessage, null,
+                null, null, null, null, 1, 20, CancellationToken.None);
+            Assert.Single(moved.Items);
+            Assert.Contains("Trash", moved.Items[0].DisplayName);
+            await recycle.RestoreAsync(moved.Items[0].QueueId, "admin", CancellationToken.None);
+
+            await mailbox.StoreFlagsAsync(inboxId, "2", true, "+", ["\\Deleted"], CancellationToken.None);
+            await mailbox.ExpungeAsync(inboxId, CancellationToken.None);
+            var expunged = await recycle.SearchAsync(null, CleanupResourceType.MailboxMessage, null,
+                null, null, null, null, 1, 20, CancellationToken.None);
+            Assert.Single(expunged.Items);
+            await recycle.RestoreAsync(expunged.Items[0].QueueId, "admin", CancellationToken.None);
+
+            await mailbox.CopyAsync(inboxId, "3", true, "Trash", true, CancellationToken.None);
+            await mailbox.StoreFlagsAsync(trashId, "1", false, "+", ["\\Deleted"], CancellationToken.None);
+            await mailbox.ExpungeAsync(trashId, CancellationToken.None);
+            var trashExpunged = await recycle.SearchAsync(null, CleanupResourceType.MailboxMessage, null,
+                null, null, null, null, 1, 20, CancellationToken.None);
+            Assert.Single(trashExpunged.Items);
+            await using (var db = await factory.CreateDbContextAsync())
+            {
+                db.CleanupQueue.Add(new CleanupQueueItem
+                {
+                    ResourceType = CleanupResourceType.MailboxMessage,
+                    ResourceId = trashExpunged.Items[0].ResourceId,
+                    PurgeAfter = DateTimeOffset.UtcNow.AddDays(30)
+                });
+                await db.SaveChangesAsync();
+            }
+            await recycle.RestoreAsync(trashExpunged.Items[0].QueueId, "admin", CancellationToken.None);
+
+            await using (var db = await factory.CreateDbContextAsync())
+            {
+                var messages = await db.MailboxMessages.OrderBy(x => x.Uid).ToListAsync();
+                Assert.Equal(3, messages.Count);
+                Assert.All(messages, x =>
+                {
+                    Assert.Equal(inboxId, x.MailboxId);
+                    Assert.Null(x.DeletedAt);
+                    Assert.Null(x.ScheduledDeleteAt);
+                    Assert.DoesNotContain("\\Deleted", x.Flags);
+                });
+                Assert.Equal(3, messages.Select(x => x.Uid).Distinct().Count());
+                Assert.Empty(await db.MailboxMessages.Where(x => x.MailboxId == trashId).ToListAsync());
+                Assert.Equal(36, (await db.Accounts.SingleAsync(x => x.Id == accountId)).UsedBytes);
+                Assert.Equal(4, await db.CleanupQueue.CountAsync(x => x.Status == CleanupQueueStatus.Restored));
+                Assert.Equal(3, await db.AuditRecords.CountAsync(x => x.Action == "recycle.restore" && x.Actor == "admin"));
+            }
+            await Assert.ThrowsAsync<RecycleBinConflictException>(() =>
+                recycle.RestoreAsync(moved.Items[0].QueueId, "admin", CancellationToken.None));
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task RecycleBinSearchPagesAndFiltersDeletedRecordsOnSqlite()
     {
         var root = Path.Combine(Path.GetTempPath(), $"mailserver-recycle-search-{Guid.NewGuid():N}");

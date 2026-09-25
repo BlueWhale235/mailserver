@@ -6,6 +6,7 @@ import { storageSize, type DirectoryAccount, type DirectoryContext, type Directo
 import PageHeader from '../components/PageHeader.vue'
 import DirectoryAliases from '../components/DirectoryAliases.vue'
 import { usePageDraftGuard } from '../composables/usePageDraftGuard'
+defineProps<{ embedded?: boolean }>()
 const route = useRoute(), router = useRouter()
 const domainId = computed(() => String(route.params.id))
 const context = ref<DirectoryContext | null>(null), rows = ref<DirectoryAccount[]>([]), total = ref(0)
@@ -54,14 +55,15 @@ async function remove() {
   catch (cause) { error.value = (cause as Error).message }
   finally { busy.value = false }
 }
-function configure(row: DirectoryAccount) { void router.push({ name: 'account-settings', params: { id: domainId.value, accountId: row.id }, query: { ...route.query } }) }
+function detailRoute(row: DirectoryAccount) { return { name: 'account-settings', params: { id: domainId.value, accountId: row.id }, query: { ...route.query } } }
 </script>
 <template>
-  <PageHeader title="账号和别名" :description="context ? `${context.domainName} · 按账号管理邮箱与关联别名` : '加载邮件域…'">
+  <PageHeader v-if="!embedded" title="账号和别名" :description="context ? `${context.domainName} · 按账号管理邮箱与关联别名` : '加载邮件域…'">
     <v-btn v-if="context?.canReadDomain" variant="text" :to="`/domains/${domainId}`">返回域详情</v-btn>
     <v-btn v-else-if="context" variant="text" to="/account-domains">选择邮件域</v-btn>
     <v-btn v-if="context?.canManageAccounts" color="primary" :to="{ name: 'account-create', params: { id: domainId }, query: route.query }">新建账号</v-btn>
   </PageHeader>
+  <div v-else class="directory-intro"><div><h2>账号和别名</h2><p>按账号查看邮箱与关联别名，可同时搜索账号和别名地址。</p></div><v-btn v-if="context?.canManageAccounts" color="primary" prepend-icon="mdi-plus" :to="{ name: 'account-create', params: { id: domainId }, query: route.query }">新建账号</v-btn></div>
   <v-alert v-if="error" type="error" variant="tonal" class="mb-4">{{ error }}<v-btn variant="text" @click="load">重试</v-btn></v-alert>
   <v-alert v-if="notice" type="success" variant="tonal" class="mb-4">{{ notice }}</v-alert>
   <div class="directory-tabs"><v-btn :variant="pending ? 'text' : 'tonal'" :disabled="aliasesDirty || aliasesBusy" :to="{ query: { ...route.query, view: undefined, page: undefined } }">账号列表</v-btn><v-btn v-if="context?.canReadAliases" :variant="pending ? 'tonal' : 'text'" :disabled="aliasesDirty || aliasesBusy" :to="{ query: { ...route.query, view: 'pending', page: undefined } }">待处理别名</v-btn></div>
@@ -75,7 +77,7 @@ function configure(row: DirectoryAccount) { void router.push({ name: 'account-se
     <div v-if="context?.canManageAccounts" class="directory-batch"><span>已选 {{ selected.length }} 个账号（仅当前页）</span><v-btn variant="text" :disabled="!selected.length || busy || loading" @click="batch('batch-enable')">批量启用</v-btn><v-btn variant="text" :disabled="!selected.length || busy || loading" @click="batch('batch-disable')">批量停用</v-btn><v-btn color="error" variant="text" :disabled="!selected.length || busy || loading" @click="error = ''; deletion = rows.filter(x => selected.includes(x.id)).map(x => ({ ...x }))">批量软删除</v-btn></div>
     <v-table><thead><tr><th v-if="context?.canManageAccounts"><v-checkbox-btn :model-value="allSelected" aria-label="选择当前页账号" :disabled="busy || loading" @update:model-value="value => selected = value ? rows.map(x => x.id) : []" /></th><th>账号地址</th><th v-if="context?.canReadAccounts">状态</th><th v-if="context?.canReadAccounts">已用容量 / 配额</th><th v-if="context?.canReadAliases">别名数量</th><th class="text-right">操作</th></tr></thead><tbody>
       <tr v-if="loading"><td colspan="6">正在加载账号…</td></tr><tr v-else-if="!rows.length && !error"><td colspan="6" class="directory-empty">没有符合条件的账号</td></tr>
-      <tr v-for="row in loading ? [] : rows" :key="row.id"><td v-if="context?.canManageAccounts"><v-checkbox-btn :model-value="selected.includes(row.id)" :aria-label="`选择 ${row.address}`" :disabled="busy" @update:model-value="toggle(row.id)" /></td><td><strong>{{ row.address }}</strong><small v-if="row.matchedAlias" class="matched-alias">匹配别名：{{ row.matchedAlias }}<span v-if="row.matchedAliasCount > 1"> 等 {{ row.matchedAliasCount }} 个</span></small></td><td v-if="context?.canReadAccounts"><v-chip size="small" :color="row.isEnabled ? 'success' : 'default'" variant="tonal">{{ row.isEnabled ? '已启用' : '已停用' }}</v-chip></td><td v-if="context?.canReadAccounts">{{ storageSize(row.usedBytes) }} / {{ storageSize(row.quotaBytes) }}</td><td v-if="context?.canReadAliases">{{ row.aliasCount }}</td><td class="text-right"><v-btn variant="text" color="primary" @click="configure(row)">配置</v-btn></td></tr>
+      <tr v-for="row in loading ? [] : rows" :key="row.id"><td v-if="context?.canManageAccounts"><v-checkbox-btn :model-value="selected.includes(row.id)" :aria-label="`选择 ${row.address}`" :disabled="busy" @update:model-value="toggle(row.id)" /></td><td><strong>{{ row.address }}</strong><small v-if="row.matchedAlias" class="matched-alias">匹配别名：{{ row.matchedAlias }}<span v-if="row.matchedAliasCount > 1"> 等 {{ row.matchedAliasCount }} 个</span></small></td><td v-if="context?.canReadAccounts"><v-chip size="small" :color="row.isEnabled ? 'success' : 'default'" variant="tonal">{{ row.isEnabled ? '已启用' : '已停用' }}</v-chip></td><td v-if="context?.canReadAccounts">{{ storageSize(row.usedBytes) }} / {{ storageSize(row.quotaBytes) }}</td><td v-if="context?.canReadAliases">{{ row.aliasCount }}</td><td class="text-right"><v-btn variant="text" color="primary" :to="detailRoute(row)" :aria-label="`查看 ${row.address} 的详情`">详情</v-btn></td></tr>
     </tbody></v-table>
     <div class="directory-footer"><span>共 {{ total }} 个账号 · 每页 20 个</span><v-pagination :model-value="page" :length="pages" :total-visible="5" :disabled="loading || busy" @update:model-value="setPage" /></div>
   </v-card>
@@ -84,4 +86,5 @@ function configure(row: DirectoryAccount) { void router.push({ name: 'account-se
 </template>
 <style scoped>
 .directory-panel{padding:24px}.directory-tabs{display:flex;gap:8px;margin-bottom:16px}.directory-filter{display:flex;gap:16px;align-items:center;margin-bottom:20px}.directory-filter .v-text-field{flex:1;max-width:650px}.directory-filter .v-select{max-width:190px}.directory-batch,.directory-footer{display:flex;align-items:center;gap:12px;justify-content:flex-end;margin:12px 0}.directory-batch span,.directory-footer span{margin-right:auto;color:#64748b}.matched-alias{display:block;color:#386299;margin:6px 0;overflow-wrap:anywhere}.directory-empty{padding:48px!important;text-align:center;color:#64748b}td{overflow-wrap:anywhere}
+.directory-intro{display:flex;align-items:center;justify-content:space-between;gap:16px;margin:22px 0 16px}.directory-intro h2{margin:0;font-size:19px}.directory-intro p{margin:5px 0 0;color:#64748b;font-size:13px}
 </style>
