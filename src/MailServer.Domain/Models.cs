@@ -535,6 +535,37 @@ public sealed class FirewallRule
     public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
 }
 
+/// <summary>
+/// 跨进程配置代次。固定作用域由基础设施层维护，业务写入与代次递增必须同事务提交。
+/// </summary>
+public sealed class ConfigurationVersion
+{
+    public required string Scope { get; set; }
+    public long Version { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
+}
+
+/// <summary>
+/// 配置缓存进程心跳，用于管理端判断各协议进程是否已经应用最新代次。
+/// </summary>
+public sealed class ConfigurationProcessStatus
+{
+    public required string ProcessId { get; set; }
+    public required string InstanceName { get; set; }
+    public required string Roles { get; set; }
+    public DateTimeOffset StartedAt { get; set; }
+    public DateTimeOffset LastSeenAt { get; set; }
+    public long RulesVersion { get; set; }
+    public long FirewallVersion { get; set; }
+    public long SettingsVersion { get; set; }
+    public long EstimatedCacheBytes { get; set; }
+    public int EntryCount { get; set; }
+    public long Hits { get; set; }
+    public long Misses { get; set; }
+    public long ReloadFailures { get; set; }
+    public string? LastError { get; set; }
+}
+
 public sealed class DeliveryAttempt
 {
     public Guid Id { get; set; } = Guid.NewGuid();

@@ -42,6 +42,24 @@ public sealed class MailRulesOptions
 }
 
 /// <summary>
+/// 有界配置快照缓存。SizeLimitBytes 是当前进程的预算；拆分部署应为每个进程分别配置。
+/// </summary>
+public sealed class ConfigurationCacheOptions
+{
+    public const string SectionName = "ConfigurationCache";
+    public bool Enabled { get; set; } = true;
+    public long SizeLimitBytes { get; set; } = 4 * 1024 * 1024;
+    public long MaximumEntryBytes { get; set; } = 1024 * 1024;
+    public int VersionPollSeconds { get; set; } = 3;
+    public int AbsoluteRefreshSeconds { get; set; } = 60;
+    public int MaximumConcurrentLoads { get; set; } = 2;
+    public int RuleFallbackBatchSize { get; set; } = 64;
+    public int StatusHeartbeatSeconds { get; set; } = 30;
+    public int ProcessStaleSeconds { get; set; } = 90;
+    public int ProcessRetentionHours { get; set; } = 24;
+}
+
+/// <summary>
 /// 转发和 SRS 配置。SrsSecret 为空时不应启用跨域转发生产能力。
 /// </summary>
 public sealed class ForwardingOptions

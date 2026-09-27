@@ -3,7 +3,6 @@ namespace MailServer.Infrastructure;
 public enum DatabaseProvider
 {
     Sqlite,
-    PostgreSql,
     MySql
 }
 
@@ -18,7 +17,6 @@ public static class DatabaseProviderExtensions
     public static string MigrationsAssemblyName(this DatabaseProvider provider) => provider switch
     {
         DatabaseProvider.Sqlite => "MailServer.Migrations.Sqlite",
-        DatabaseProvider.PostgreSql => "MailServer.Migrations.PostgreSql",
         DatabaseProvider.MySql => "MailServer.Migrations.MySql",
         _ => throw new ArgumentOutOfRangeException(nameof(provider), provider, null)
     };

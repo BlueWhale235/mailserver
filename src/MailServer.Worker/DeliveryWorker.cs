@@ -16,6 +16,7 @@ public sealed class DeliveryWorker(
     PluginPipeline pipeline,
     BounceService bounceService,
     SystemSettingsService settings,
+    IOptions<DeliveryOptions> deliveryDefaults,
     ILogger<DeliveryWorker> logger) : BackgroundService
 {
     private readonly string _owner = $"{Environment.MachineName}:{Environment.ProcessId}:{Guid.NewGuid():N}";
@@ -24,8 +25,17 @@ public sealed class DeliveryWorker(
     {
         while (!stoppingToken.IsCancellationRequested)
         {
-            var options = await settings.GetDeliveryOptionsAsync(stoppingToken);
-            IReadOnlyList<DeliveryJob> jobs;
+            DeliveryOptions options;
+            try
+            {
+                options = await settings.GetDeliveryOptionsAsync(stoppingToken);
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                logger.LogError(exception, "Unable to read delivery settings; using configured defaults for this poll.");
+                options = deliveryDefaults.Value;
+            }
+            IReadOnlyList<DeliveryLease> jobs;
             try
             {
                 jobs = await queue.LeaseAsync(
@@ -54,15 +64,23 @@ public sealed class DeliveryWorker(
             await Parallel.ForEachAsync(
                 jobs,
                 new ParallelOptions { MaxDegreeOfParallelism = Math.Min(options.BatchSize, 8), CancellationToken = stoppingToken },
-                (job, cancellationToken) => ProcessAsync(job, options, cancellationToken));
+                (lease, cancellationToken) => ProcessAsync(lease, options, cancellationToken));
         }
     }
 
     private async ValueTask ProcessAsync(
-        DeliveryJob job,
+        DeliveryLease lease,
         DeliveryOptions options,
         CancellationToken cancellationToken)
     {
+        var job = lease.Job;
+        using var attemptCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var leaseLost = 0;
+        var renewal = RenewLeaseAsync(
+            lease,
+            TimeSpan.FromSeconds(options.LeaseSeconds),
+            attemptCancellation,
+            () => Interlocked.Exchange(ref leaseLost, 1));
         DeliveryResult result;
         try
         {
@@ -74,7 +92,7 @@ public sealed class DeliveryWorker(
                 job.Attempts);
             var decision = await pipeline.OnDeliveryAsync(
                 new DeliveryContext(job.Id, job.Sender, job.Recipient, job.Attempts),
-                cancellationToken);
+                attemptCancellation.Token);
             if (decision.Kind != PluginDecisionKind.Continue)
             {
                 // 投递插件在真正连接远端前运行，可用于合规拦截、维护窗口暂停或自定义路由禁用。
@@ -90,9 +108,16 @@ public sealed class DeliveryWorker(
             else
             {
                 // 传输实现只负责一次投递尝试；成功/失败、退避和退信由队列和 Worker 统一处理。
-                await using var content = await contentStore.OpenReadAsync(job.Message.ContentKey, cancellationToken);
-                result = await transport.DeliverAsync(job, content, cancellationToken);
+                await using var content = await contentStore.OpenReadAsync(job.Message.ContentKey, attemptCancellation.Token);
+                result = await transport.DeliverAsync(job, content, attemptCancellation.Token);
             }
+        }
+        catch (OperationCanceledException) when (Volatile.Read(ref leaseLost) == 1 && !cancellationToken.IsCancellationRequested)
+        {
+            logger.LogWarning("Delivery job {JobId} stopped because its lease was lost.", job.Id);
+            attemptCancellation.Cancel();
+            await renewal;
+            return;
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
@@ -100,18 +125,39 @@ public sealed class DeliveryWorker(
             result = DeliveryResult.Temporary(exception.Message);
         }
 
-        await queue.CompleteAsync(job.Id, result, cancellationToken);
-        await pipeline.OnDeliveryCompletedAsync(
-            new DeliveryCompletedContext(
-                job.Id,
-                job.Sender,
-                job.Recipient,
-                job.Attempts,
-                result.Succeeded,
-                result.PermanentFailure,
-                result.Response,
-                result.RemoteHost),
-            cancellationToken);
+        DeliveryCompletion completion;
+        try
+        {
+            completion = await queue.CompleteAsync(lease, result, cancellationToken);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            logger.LogError(exception, "Unable to complete delivery job {JobId}; the lease will be allowed to expire.", job.Id);
+            attemptCancellation.Cancel();
+            await renewal;
+            return;
+        }
+        attemptCancellation.Cancel();
+        await renewal;
+        if (!completion.Applied) return;
+        try
+        {
+            await pipeline.OnDeliveryCompletedAsync(
+                new DeliveryCompletedContext(
+                    job.Id,
+                    job.Sender,
+                    job.Recipient,
+                    job.Attempts,
+                    result.Succeeded,
+                    result.PermanentFailure,
+                    result.Response,
+                    result.RemoteHost),
+                cancellationToken);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            logger.LogError(exception, "Delivery completion plugin failed for job {JobId}.", job.Id);
+        }
         if (result.Succeeded)
         {
             logger.LogInformation(
@@ -131,7 +177,7 @@ public sealed class DeliveryWorker(
                 result.Response);
         }
 
-        if (!result.Succeeded && (result.PermanentFailure || job.Attempts >= options.MaximumAttempts))
+        if (!result.Succeeded && completion.FinalFailure)
         {
             // 最终失败才生成退信，避免临时网络故障时提前通知发件人。
             logger.LogWarning(
@@ -139,7 +185,46 @@ public sealed class DeliveryWorker(
                 job.Id,
                 job.Sender,
                 job.Recipient);
-            await bounceService.CreateAsync(job, result.Response, result.PermanentFailure, cancellationToken, result.Diagnostic?.EnhancedStatusCode);
+            try
+            {
+                await bounceService.CreateAsync(job, result.Response, result.PermanentFailure, cancellationToken, result.Diagnostic?.EnhancedStatusCode);
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                logger.LogError(exception, "Unable to create final bounce for delivery job {JobId}.", job.Id);
+            }
+        }
+    }
+
+    private async Task RenewLeaseAsync(
+        DeliveryLease lease,
+        TimeSpan duration,
+        CancellationTokenSource attemptCancellation,
+        Action markLost)
+    {
+        var interval = TimeSpan.FromSeconds(Math.Max(5, duration.TotalSeconds / 3));
+        try
+        {
+            while (!attemptCancellation.IsCancellationRequested)
+            {
+                await Task.Delay(interval, attemptCancellation.Token);
+                if (!await queue.RenewAsync(lease, duration, attemptCancellation.Token))
+                {
+                    markLost();
+                    logger.LogWarning("Delivery job {JobId} lost its lease during renewal.", lease.Job.Id);
+                    attemptCancellation.Cancel();
+                    return;
+                }
+            }
+        }
+        catch (OperationCanceledException) when (attemptCancellation.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception)
+        {
+            markLost();
+            logger.LogError(exception, "Delivery job {JobId} lease renewal failed.", lease.Job.Id);
+            attemptCancellation.Cancel();
         }
     }
 }

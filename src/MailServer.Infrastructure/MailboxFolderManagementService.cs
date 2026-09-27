@@ -32,7 +32,8 @@ public sealed record DomainMailboxFoldersView(
 
 public sealed class MailboxFolderManagementService(
     IDbContextFactory<MailDbContext> dbFactory,
-    SystemSettingsService systemSettings)
+    SystemSettingsService systemSettings,
+    ConfigurationSnapshotCache? configurationCache = null)
 {
     private const string GlobalMailboxFoldersKey = "mailbox-defaults:folders";
 
@@ -106,8 +107,10 @@ public sealed class MailboxFolderManagementService(
         }
 
         AddAudit(db, actor, "mailbox-folder.add", $"domain:{domainId}", normalized);
+        var settingsVersion = await ConfigurationVersionService.BumpAsync(db, ConfigurationScopes.Settings, cancellationToken);
         await db.SaveChangesAsync(cancellationToken);
         await transaction.CommitAsync(cancellationToken);
+        configurationCache?.ObserveCommittedVersion(ConfigurationScopes.Settings, settingsVersion);
         return await GetAsync(domainId, cancellationToken);
     }
 
@@ -122,13 +125,17 @@ public sealed class MailboxFolderManagementService(
             || normalized.Distinct(StringComparer.OrdinalIgnoreCase).Count() != normalized.Length)
             throw new InvalidOperationException("Folder order contains a duplicate or system folder.");
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+        await using var transaction = db.Database.IsRelational() ? await db.Database.BeginTransactionAsync(cancellationToken) : null;
         var current = (await GetConfiguredFoldersAsync(db, domainId, cancellationToken))
             .Where(x => !MailboxNames.IsSystemFolder(x)).ToArray();
         if (!current.ToHashSet(StringComparer.OrdinalIgnoreCase).SetEquals(normalized))
             throw new InvalidOperationException("Folder order must contain every configured extra folder exactly once.");
         await SaveConfiguredFoldersAsync(db, domainId, normalized.ToList(), cancellationToken);
         AddAudit(db, actor, "mailbox-folder.reorder", $"domain:{domainId}", string.Join(',', normalized));
+        var settingsVersion = await ConfigurationVersionService.BumpAsync(db, ConfigurationScopes.Settings, cancellationToken);
         await db.SaveChangesAsync(cancellationToken);
+        if (transaction is not null) await transaction.CommitAsync(cancellationToken);
+        configurationCache?.ObserveCommittedVersion(ConfigurationScopes.Settings, settingsVersion);
         return await GetAsync(domainId, cancellationToken);
     }
 
@@ -329,8 +336,17 @@ public sealed class MailboxFolderManagementService(
             await WakeTaskAsync(db, cancellationToken);
         }
         AddAudit(db, actor, "mailbox-folder.delete-request", $"domain:{domainId}", $"folder={normalized};job={job.Id}");
+        long? settingsVersion = null;
+        long? rulesVersion = null;
+        if (removeFromConfiguration)
+        {
+            settingsVersion = await ConfigurationVersionService.BumpAsync(db, ConfigurationScopes.Settings, cancellationToken);
+            rulesVersion = await ConfigurationVersionService.BumpAsync(db, ConfigurationScopes.Rules, cancellationToken);
+        }
         await db.SaveChangesAsync(cancellationToken);
         await transaction.CommitAsync(cancellationToken);
+        if (settingsVersion is not null) configurationCache?.ObserveCommittedVersion(ConfigurationScopes.Settings, settingsVersion.Value);
+        if (rulesVersion is not null) configurationCache?.ObserveCommittedVersion(ConfigurationScopes.Rules, rulesVersion.Value);
         return ToView(job);
     }
 

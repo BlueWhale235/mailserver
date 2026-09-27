@@ -217,7 +217,7 @@
 - `DependencyInjection` 移除全部集群服务/托管服务注册；`TaskAndClusterServices`（现名 `MaintenanceTaskServices`）删除复制日志拦截器、集群租约、见证租约、节流器、集群校验/快照任务与复制后台服务，任务执行者改为本机标识（`主机名:进程号`）。
 - API 移除 `/cluster*` 端点、写入守卫中的“可写主节点”判定与 `/health/ready` 的集群健康依赖，改为本地就绪；SMTP/IMAP 移除“仅主节点接受写入会话”的拒绝分支与等待副本确认逻辑。
 - 权限移除 `cluster.read`/`cluster.manage`；审计移除 `AuditCategory.Node` 与 `cluster.*` 文案映射（保留 `NodeId` 字段用于记录操作来源主机）。
-- 手改三套迁移（SQLite/PostgreSQL/MySQL）与模型快照：删除 `cluster_*`/`replication_*` 建表、索引、实体快照，以及 `scheduled_tasks.IsClusterTask` 列。
+- 手改两套迁移（SQLite/MySQL）与模型快照：删除 `cluster_*`/`replication_*` 建表、索引、实体快照，以及 `scheduled_tasks.IsClusterTask` 列。
 - CLI 移除 `cluster join|force-remove|force-leave|recover-primary` 与 `run cluster`，帮助文案与默认配置同步；`MailServer.slnx` 与各 csproj 移除项目引用。
 - 配置删除 `Cluster`/`ClusterTransport`/`ClusterSyncThrottle` 配置节；文档与 README 移除集群章节。
 
@@ -233,7 +233,7 @@
 - 前端 ESLint、71 项 Vitest 通过，Vite 生产构建通过。
 - 浏览器巡检（`?preview=1`）12 个顶层页面控制台无 error；左侧菜单无「集群」，`/admin/cluster` 正确回落概览。
 
-本轮仍未验证：真实 PostgreSQL/MySQL 迁移在既有数据库上的升级路径、真实后端启动后的端到端写入。总体目标仍未完成。
+本轮仍未验证：真实 MySQL 迁移在既有数据库上的升级路径、真实后端启动后的端到端写入。总体目标仍未完成。
 
 ## 2026-09-19：彻底移除审计与任务中的「节点」维度
 
@@ -365,7 +365,7 @@
 - 前端 ESLint 0 warning；Vitest 87 项通过（10 文件，原 83 项）；Vite 生产构建通过。
 - 真实浏览器（mock 预览）验收：邮箱 54 条 3 页、别名 53 条 3 页逐页翻页与末页回退正确；域名 northwind.cn 的别名编辑可回显不在当前页的目标账号；修改规则名后顶部显示「未保存」且保存按钮由禁用变为可用，点「返回规则列表」弹确认，取消后草稿保留；切换到发信规则时同样弹确认，取消后 URL 与分区不变、确认后进入发信规则并丢弃草稿；点概览触发路由离开确认；正常保存成功后提示「收信规则已保存。」且列表内容更新；全程控制台无 error/exception。
 
-本轮仍未验证：真实后端（非 Mock）下的分页总数、别名目标账号接口与规则保存/排序；真实 PostgreSQL/MySQL 三库行为；Linux 实机部署。总体目标仍未完成。
+本轮仍未验证：真实后端（非 Mock）下的分页总数、别名目标账号接口与规则保存/排序；真实 SQLite/MySQL 行为；Linux 实机部署。总体目标仍未完成。
 
 ## 2026-09-20：会话失效统一处理与旧节点标识彻底清理
 
@@ -406,7 +406,7 @@
 - 前端 ESLint 0 warning；`vue-tsc --noEmit` 通过；Vitest 96 项通过（10 文件，原 94 项）；Vite 生产构建通过。
 - 真实浏览器（mock 预览）验收：发信规则新建时动作下拉含「保存副本到文件夹」，选中后文件夹字段标签为「Sent 副本文件夹」且未选文件夹时提示「请选择 Sent 副本的目标文件夹」并禁用保存；删光动作后提示「请至少添加一个执行动作」且保存禁用；同时放 `Reject` 与 `ForwardTo` 时提示「拒绝发信与转发不能同时使用，请删除其中一个动作」且保存禁用；保存 `MoveToFolder=Junk` 的发信规则后列表摘要显示「保存副本到文件夹：Junk」，重新打开回显一致；上移规则后提示「规则执行顺序已更新。」且序号与顺序重新从服务器读取；全程控制台无 error/exception。
 
-本轮仍未验证：真实后端（非 Mock）下的规则动作写入与 Sent 副本落盘、文件夹删除后的规则重定向、真实 PostgreSQL/MySQL 行为；Linux 实机部署。总体目标仍未完成。
+本轮仍未验证：真实后端（非 Mock）下的规则动作写入与 Sent 副本落盘、文件夹删除后的规则重定向、真实 SQLite/MySQL 行为；Linux 实机部署。总体目标仍未完成。
 
 ## 2026-09-20：彻底清除节点遗留标识并修复发布包旧资源残留
 

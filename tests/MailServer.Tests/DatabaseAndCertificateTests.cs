@@ -734,8 +734,9 @@ public sealed class DatabaseAndCertificateTests
                 expectedAttempts: new Dictionary<Guid, int> { [failedId] = 0 });
             Assert.Equal("Conflict", repeated.Items[0].Status);
             var retriedLease = await queue.LeaseAsync("test-retry", 1, TimeSpan.FromMinutes(1), CancellationToken.None);
-            Assert.Equal(failedId, Assert.Single(retriedLease).Id);
-            await queue.CompleteAsync(failedId, DeliveryResult.Permanent("550 rejected"), CancellationToken.None);
+            var failedLease = Assert.Single(retriedLease);
+            Assert.Equal(failedId, failedLease.Id);
+            await queue.CompleteAsync(failedLease, DeliveryResult.Permanent("550 rejected"), CancellationToken.None);
             var staleAfterWorker = await administration.BatchRetryDeliveriesAsync(
                 [failedId], "test", CancellationToken.None,
                 expectedAttempts: new Dictionary<Guid, int> { [failedId] = 0 });
@@ -784,7 +785,7 @@ public sealed class DatabaseAndCertificateTests
                 Assert.False(await db.DeliveryJobs.AnyAsync(x => x.Id == unreferencedJobId));
                 Assert.False(await db.Messages.AnyAsync(x => x.Id == unreferencedMessageId));
             }
-            await queue.CompleteAsync(leased[0].Id, DeliveryResult.Temporary(
+            await queue.CompleteAsync(leased[0], DeliveryResult.Temporary(
                 "451 token=hidden-token sender@example.com", diagnostic: new DeliveryDiagnostic("SMTP",
                     SessionSummary: "C: AUTH PLAIN c2VjcmV0\r\nC: RCPT TO:<recipient@example.net>\r\nC: DATA\r\nmail body")),
                 CancellationToken.None);

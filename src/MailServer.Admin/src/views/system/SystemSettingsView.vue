@@ -6,7 +6,7 @@ import StatusPill from '../../components/StatusPill.vue'
 import { ApiError, api, jsonBody } from '../../lib/api'
 import { usePermission } from '../../composables/usePermission'
 
-type SectionKey = 'delivery' | 'smtp' | 'mailboxes' | 'certificates'
+type SectionKey = 'delivery' | 'smtp' | 'mailboxes' | 'certificates' | 'cache'
 
 interface DeliverySettings {
   batchSize: number
@@ -30,12 +30,35 @@ interface CertificateSettings {
   effectiveDefaultMailHostName: string | null
 }
 
+interface VersionSet { rules: number; firewall: number; settings: number }
+interface CacheProcessStatus {
+  processId: string
+  instanceName: string
+  roles: string[]
+  lastSeenAt: string
+  appliedVersions: VersionSet
+  estimatedCacheBytes: number
+  entryCount: number
+  hits: number
+  misses: number
+  reloadFailures: number
+  lastError: string | null
+  state: 'current' | 'lagging' | 'stale'
+}
+interface CacheStatus {
+  savedVersions: VersionSet
+  sizeLimitBytes: number
+  processStaleSeconds: number
+  processes: CacheProcessStatus[]
+}
+
 const { can } = usePermission()
 const sections: Array<{ key: SectionKey; title: string; description: string; icon: string }> = [
   { key: 'delivery', title: '投递调度', description: '批量、租约与重试节奏', icon: 'mdi-send-clock-outline' },
   { key: 'smtp', title: 'SMTP 会话', description: '命令阶段超时控制', icon: 'mdi-email-fast-outline' },
   { key: 'mailboxes', title: '默认文件夹', description: '新邮箱初始化目录', icon: 'mdi-folder-multiple-outline' },
   { key: 'certificates', title: '证书选择', description: '全局证书后备策略', icon: 'mdi-certificate-outline' },
+  { key: 'cache', title: '配置缓存', description: '进程版本与内存状态', icon: 'mdi-memory' },
 ]
 const systemFolders = ['INBOX', 'Sent', 'Drafts', 'Trash', 'Junk', 'Archives']
 
@@ -44,9 +67,10 @@ const delivery = ref<DeliverySettings>({ batchSize: 20, leaseSeconds: 120, maxim
 const smtp = ref<SmtpSettings>({ commandTimeoutSeconds: 300 })
 const mailboxes = ref<MailboxSettings>({ defaultFolders: [...systemFolders] })
 const certificates = ref<CertificateSettings>({ defaultMailHostName: null, allowSingleCertificateFallback: false, availableMailHostNames: [], effectiveDefaultMailHostName: null })
-const baselines = ref<Record<SectionKey, string>>({ delivery: '', smtp: '', mailboxes: '', certificates: '' })
-const loaded = ref<Record<SectionKey, boolean>>({ delivery: false, smtp: false, mailboxes: false, certificates: false })
-const sectionErrors = ref<Record<SectionKey, string>>({ delivery: '', smtp: '', mailboxes: '', certificates: '' })
+const cacheStatus = ref<CacheStatus>({ savedVersions: { rules: 0, firewall: 0, settings: 0 }, sizeLimitBytes: 0, processStaleSeconds: 90, processes: [] })
+const baselines = ref<Record<SectionKey, string>>({ delivery: '', smtp: '', mailboxes: '', certificates: '', cache: '' })
+const loaded = ref<Record<SectionKey, boolean>>({ delivery: false, smtp: false, mailboxes: false, certificates: false, cache: false })
+const sectionErrors = ref<Record<SectionKey, string>>({ delivery: '', smtp: '', mailboxes: '', certificates: '', cache: '' })
 const loading = ref(false)
 const savingSection = ref<SectionKey | null>(null)
 const notice = ref('')
@@ -67,6 +91,7 @@ const snapshots = computed<Record<SectionKey, string>>(() => ({
     availableMailHostNames: certificates.value.availableMailHostNames,
     effectiveDefaultMailHostName: certificates.value.effectiveDefaultMailHostName,
   }),
+  cache: baselines.value.cache,
 }))
 const dirtySections = computed(() => sections.filter(section => loaded.value[section.key] && snapshots.value[section.key] !== baselines.value[section.key]).map(section => section.key))
 const dirtyCount = computed(() => dirtySections.value.length)
@@ -88,6 +113,7 @@ const sectionValid = computed<Record<SectionKey, boolean>>(() => ({
   smtp: !smtpError.value,
   mailboxes: mailboxes.value.defaultFolders.length >= systemFolders.length,
   certificates: !certificateHostError.value,
+  cache: true,
 }))
 const currentValid = computed(() => sectionValid.value[activeSection.value])
 
@@ -123,6 +149,18 @@ function isSystemFolder(folder: string) {
   return systemFolders.some(item => item.toLowerCase() === folder.toLowerCase())
 }
 
+function formatBytes(value: number) {
+  if (value < 1024) return `${value} B`
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KiB`
+  return `${(value / 1024 / 1024).toFixed(2)} MiB`
+}
+
+function cacheState(process: CacheProcessStatus) {
+  if (process.state === 'current') return { label: '已同步', tone: 'success' as const }
+  if (process.state === 'lagging') return { label: '同步中', tone: 'warning' as const }
+  return { label: '已离线', tone: 'danger' as const }
+}
+
 function acceptDelivery(value: DeliverySettings) {
   delivery.value = globalThis.structuredClone(value)
   baselines.value.delivery = JSON.stringify(delivery.value)
@@ -152,13 +190,20 @@ function acceptCertificates(value: CertificateSettings) {
   loaded.value.certificates = true
 }
 
+function acceptCacheStatus(value: CacheStatus) {
+  cacheStatus.value = value
+  baselines.value.cache = 'read-only'
+  loaded.value.cache = true
+}
+
 async function loadSection(section: SectionKey) {
   sectionErrors.value[section] = ''
   try {
     if (section === 'delivery') acceptDelivery(await api<DeliverySettings>('/settings/delivery'))
     else if (section === 'smtp') acceptSmtp(await api<SmtpSettings>('/settings/smtp'))
     else if (section === 'mailboxes') acceptMailboxes(await api<MailboxSettings>('/settings/mailboxes'))
-    else acceptCertificates(await api<CertificateSettings>('/settings/certificates'))
+    else if (section === 'certificates') acceptCertificates(await api<CertificateSettings>('/settings/certificates'))
+    else acceptCacheStatus(await api<CacheStatus>('/settings/cache-status'))
   } catch (cause) {
     loaded.value[section] = false
     sectionErrors.value[section] = cause instanceof Error ? cause.message : `${sections.find(item => item.key === section)?.title}加载失败`
@@ -191,7 +236,7 @@ function resetCurrent() {
   if (activeSection.value === 'delivery') delivery.value = JSON.parse(baseline) as DeliverySettings
   else if (activeSection.value === 'smtp') smtp.value = JSON.parse(baseline) as SmtpSettings
   else if (activeSection.value === 'mailboxes') mailboxes.value = JSON.parse(baseline) as MailboxSettings
-  else certificates.value = JSON.parse(baseline) as CertificateSettings
+  else if (activeSection.value === 'certificates') certificates.value = JSON.parse(baseline) as CertificateSettings
   folderError.value = ''
   notice.value = ''
 }
@@ -210,12 +255,14 @@ async function saveCurrent() {
       acceptSmtp(await api<SmtpSettings>('/settings/smtp', { method: 'PUT', body: jsonBody(smtp.value) }))
     } else if (section === 'mailboxes') {
       acceptMailboxes(await api<MailboxSettings>('/settings/mailboxes', { method: 'PUT', body: jsonBody(mailboxes.value) }))
-    } else {
+    } else if (section === 'certificates') {
       const payload = {
         defaultMailHostName: normalizeHostName(certificates.value.defaultMailHostName) || null,
         allowSingleCertificateFallback: certificates.value.allowSingleCertificateFallback,
       }
       acceptCertificates(await api<CertificateSettings>('/settings/certificates', { method: 'PUT', body: jsonBody(payload) }))
+    } else {
+      return
     }
     notice.value = `${sectionTitle}已保存`
   } catch (cause) {
@@ -362,7 +409,7 @@ onBeforeUnmount(() => {
           <p class="folder-count">新邮箱将创建 {{ mailboxes.defaultFolders.length }} 个默认文件夹，其中 {{ customFolders.length }} 个为自定义。</p>
         </template>
 
-        <template v-else>
+        <template v-else-if="activeSection === 'certificates'">
           <v-alert type="info" variant="tonal" density="compact" class="mb-5">域名证书仍优先按邮件主机名精确匹配。这里配置的是无法精确匹配时的全局选择策略。</v-alert>
           <div class="certificate-grid">
             <div>
@@ -377,6 +424,29 @@ onBeforeUnmount(() => {
               <div v-else class="effective"><v-icon>mdi-shield-key-outline</v-icon><div><b>不使用全局默认证书</b><small>继续按连接目标主机名精确选择证书</small></div></div>
               <div class="available-hosts"><b>当前可用主机名</b><v-chip v-for="host in certificates.availableMailHostNames" :key="host" size="small" variant="tonal">{{ host }}</v-chip><span v-if="!certificates.availableMailHostNames.length">尚未发现可用域证书</span></div>
             </div>
+          </div>
+        </template>
+
+        <template v-else>
+          <v-alert type="info" variant="tonal" density="compact" class="mb-5">配置保存后，各进程通常会在 {{ cacheStatus.processStaleSeconds > 0 ? '3 秒左右' : '短时间内' }} 应用新版本；离线状态表示超过 {{ cacheStatus.processStaleSeconds }} 秒未上报。</v-alert>
+          <div class="cache-summary">
+            <div><span>规则版本</span><b>{{ cacheStatus.savedVersions.rules }}</b></div>
+            <div><span>防火墙版本</span><b>{{ cacheStatus.savedVersions.firewall }}</b></div>
+            <div><span>设置版本</span><b>{{ cacheStatus.savedVersions.settings }}</b></div>
+            <div><span>单进程预算</span><b>{{ formatBytes(cacheStatus.sizeLimitBytes) }}</b></div>
+          </div>
+          <div class="cache-processes">
+            <article v-for="process in cacheStatus.processes" :key="process.processId">
+              <header><div><b>{{ process.instanceName }}</b><span>{{ process.roles.join(' · ') }}</span></div><StatusPill :label="cacheState(process).label" :tone="cacheState(process).tone" /></header>
+              <dl>
+                <div><dt>运行版本</dt><dd>规则 {{ process.appliedVersions.rules }} · 防火墙 {{ process.appliedVersions.firewall }} · 设置 {{ process.appliedVersions.settings }}</dd></div>
+                <div><dt>缓存占用</dt><dd>{{ formatBytes(process.estimatedCacheBytes) }} / {{ process.entryCount }} 项</dd></div>
+                <div><dt>命中统计</dt><dd>{{ process.hits }} 命中 · {{ process.misses }} 未命中</dd></div>
+                <div><dt>最后活动</dt><dd>{{ new Date(process.lastSeenAt).toLocaleString() }}</dd></div>
+              </dl>
+              <v-alert v-if="process.lastError" type="warning" variant="tonal" density="compact">{{ process.lastError }}</v-alert>
+            </article>
+            <v-alert v-if="!cacheStatus.processes.length" type="warning" variant="tonal">尚未收到任何进程的配置缓存心跳。</v-alert>
           </div>
         </template>
       </div>
@@ -453,6 +523,17 @@ onBeforeUnmount(() => {
 .available-hosts { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
 .available-hosts b { width: 100%; margin-bottom: 2px; color: var(--text-secondary); font-size: 11px; }
 .available-hosts > span { color: var(--text-muted); font-size: 11px; }
+.cache-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 18px; }
+.cache-summary > div { display: flex; flex-direction: column; gap: 5px; padding: 14px; border: 1px solid var(--border); border-radius: 8px; background: #f8fafc; }
+.cache-summary span, .cache-processes span, .cache-processes dt { color: var(--text-muted); font-size: 11px; }
+.cache-summary b { font-size: 17px; }
+.cache-processes { display: grid; gap: 12px; }
+.cache-processes article { padding: 16px; border: 1px solid var(--border); border-radius: 9px; }
+.cache-processes header { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.cache-processes header > div { display: flex; flex-direction: column; gap: 2px; }
+.cache-processes dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 22px; margin: 14px 0 0; }
+.cache-processes dl > div { display: flex; flex-direction: column; gap: 2px; }
+.cache-processes dd { margin: 0; font-size: 12px; }
 .section-actions { display: flex; align-items: center; min-height: 68px; padding: 12px 22px; border-top: 1px solid var(--border); background: #fbfcfe; }
 .section-actions > span { color: var(--text-muted); font-size: 11px; }
 @media (max-width: 1050px) {
@@ -466,5 +547,6 @@ onBeforeUnmount(() => {
   .settings-nav, .field-grid.two-columns { grid-template-columns: 1fr; }
   .folder-add { grid-template-columns: 1fr; }
   .section-actions { align-items: stretch; flex-direction: column; gap: 8px; }
+  .cache-summary, .cache-processes dl { grid-template-columns: 1fr; }
 }
 </style>

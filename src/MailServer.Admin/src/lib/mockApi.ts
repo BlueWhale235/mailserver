@@ -501,6 +501,25 @@ const previewSettings: Record<string, Record<string, unknown>> = {
     availableMailHostNames: ['mail.northwind.cn', 'mx.acme-mail.com'],
     effectiveDefaultMailHostName: 'mail.northwind.cn',
   },
+  '/settings/cache-status': {
+    savedVersions: { rules: 14, firewall: 6, settings: 9 },
+    sizeLimitBytes: 4_194_304,
+    processStaleSeconds: 90,
+    processes: [
+      {
+        processId: 'preview-api-4120', instanceName: 'preview-host', roles: ['api'],
+        lastSeenAt: '2026-09-27T04:30:00Z', appliedVersions: { rules: 14, firewall: 6, settings: 9 },
+        estimatedCacheBytes: 786_432, entryCount: 18, hits: 1842, misses: 31, reloadFailures: 0,
+        lastError: null, state: 'current',
+      },
+      {
+        processId: 'preview-worker-4124', instanceName: 'preview-host', roles: ['worker'],
+        lastSeenAt: '2026-09-27T04:29:48Z', appliedVersions: { rules: 14, firewall: 6, settings: 9 },
+        estimatedCacheBytes: 344_064, entryCount: 8, hits: 926, misses: 12, reloadFailures: 1,
+        lastError: '上一次设置刷新失败，当前继续使用已有快照。', state: 'current',
+      },
+    ],
+  },
   '/settings/message-templates': { senderDisplayName: '邮件投递系统', permanentFailureSubject: '邮件投递失败', permanentFailureBody: '<p>收件人：{recipient}</p><p>失败原因：{reason}</p>', retryExhaustedSubject: '邮件重试次数已用尽', retryExhaustedBody: '<p>向 {recipient} 投递已尝试 {attempts} 次。</p><p>{reason}</p>', quotaExceededSubject: '邮件投递失败：收件方容量超限', quotaExceededBody: '<p>收件人：{recipient}</p><p>{reason}</p><p>请您手动联系收件人，请其清理邮箱或增加容量后再重新发送邮件。</p>' },
 }
 const previewPlugins: MockPlugin[] = [

@@ -78,9 +78,9 @@ internal static class MailServerCli
 
         var interactive = !args.HasFlag("non-interactive") && !Console.IsInputRedirected;
         var providerText = args.Get("provider")
-            ?? Prompt(interactive, "Database provider (Sqlite/PostgreSql/MySql)", "Sqlite");
+            ?? Prompt(interactive, "Database provider (Sqlite/MySql)", "Sqlite");
         if (!Enum.TryParse<DatabaseProvider>(providerText, true, out var provider))
-            return Fail("Database provider must be Sqlite, PostgreSql, or MySql.");
+            return Fail("Database provider must be Sqlite or MySql.");
         var connection = args.Get("connection")
             ?? Prompt(interactive, "Database connection string", DefaultConnection(provider));
         var bind = args.Get("bind") ?? Prompt(interactive, "Admin bind address", "127.0.0.1");
@@ -384,7 +384,7 @@ internal static class MailServerCli
     private static IEnumerable<string> ValidateConfiguration(IConfiguration configuration)
     {
         if (!Enum.TryParse<DatabaseProvider>(configuration["Database:Provider"], true, out _))
-            yield return "Database:Provider must be Sqlite, PostgreSql, or MySql.";
+            yield return "Database:Provider must be Sqlite or MySql.";
         if (string.IsNullOrWhiteSpace(configuration.GetConnectionString("MailDatabase")))
             yield return "ConnectionStrings:MailDatabase is required.";
         var admin = configuration.GetSection(AdminServerOptions.SectionName).Get<AdminServerOptions>()
@@ -514,6 +514,19 @@ internal static class MailServerCli
             ["SecurityAssets"] = new { RootPath = "security-assets" },
             ["MailboxDefaults"] = new { Folders = new[] { "INBOX", "Sent", "Drafts", "Trash", "Junk", "Archives" } },
             ["MailRules"] = new { SentCopyGraceSeconds = 60, SentCopyDeduplicationMinutes = 15 },
+            ["ConfigurationCache"] = new
+            {
+                Enabled = true,
+                SizeLimitBytes = 4 * 1024 * 1024,
+                MaximumEntryBytes = 1024 * 1024,
+                VersionPollSeconds = 3,
+                AbsoluteRefreshSeconds = 60,
+                MaximumConcurrentLoads = 2,
+                RuleFallbackBatchSize = 64,
+                StatusHeartbeatSeconds = 30,
+                ProcessStaleSeconds = 90,
+                ProcessRetentionHours = 24
+            },
             ["Forwarding"] = new
             {
                 SrsSecret = Convert.ToHexString(RandomNumberGenerator.GetBytes(32)),
@@ -606,7 +619,6 @@ internal static class MailServerCli
     private static string DefaultConnection(DatabaseProvider provider) => provider switch
     {
         DatabaseProvider.Sqlite => "Data Source=data/mailserver.db",
-        DatabaseProvider.PostgreSql => "Host=localhost;Port=5432;Database=mailserver;Username=mailserver;Password=mailserver",
         DatabaseProvider.MySql => "Server=localhost;Port=3306;Database=mailserver;User=mailserver;Password=mailserver",
         _ => throw new ArgumentOutOfRangeException(nameof(provider))
     };
@@ -665,7 +677,7 @@ internal static class MailServerCli
             MailServer portable CLI
 
               mailserver --version
-              mailserver init [--provider Sqlite|PostgreSql|MySql] [--config path]
+              mailserver init [--provider Sqlite|MySql] [--config path]
               mailserver doctor [--config path] [--domain example.com] [--selector dkim-selector]
               mailserver config validate
               mailserver db status|update

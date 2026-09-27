@@ -5,15 +5,14 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
-using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
 #nullable disable
 
-namespace MailServer.Migrations.PostgreSql.Migrations
+namespace MailServer.Migrations.MySql.Migrations
 {
     [DbContext(typeof(MailDbContext))]
-    [Migration("20260902082920_InitialMailServer2")]
-    partial class InitialMailServer2
+    [Migration("20260926151507_ConfigurationCaching")]
+    partial class ConfigurationCaching
     {
         /// <inheritdoc />
         protected override void BuildTargetModel(ModelBuilder modelBuilder)
@@ -21,31 +20,29 @@ namespace MailServer.Migrations.PostgreSql.Migrations
 #pragma warning disable 612, 618
             modelBuilder
                 .HasAnnotation("ProductVersion", "10.0.7")
-                .HasAnnotation("Relational:MaxIdentifierLength", 63);
-
-            NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
+                .HasAnnotation("Relational:MaxIdentifierLength", 64);
 
             modelBuilder.Entity("MailServer.Domain.AdminUser", b =>
                 {
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
+                        .HasColumnType("char(36)");
 
                     b.Property<DateTimeOffset>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.Property<bool>("IsEnabled")
-                        .HasColumnType("boolean");
+                        .HasColumnType("tinyint(1)");
 
                     b.Property<string>("PasswordHash")
                         .IsRequired()
                         .HasMaxLength(1024)
-                        .HasColumnType("character varying(1024)");
+                        .HasColumnType("varchar(1024)");
 
                     b.Property<string>("UserName")
                         .IsRequired()
                         .HasMaxLength(128)
-                        .HasColumnType("character varying(128)");
+                        .HasColumnType("varchar(128)");
 
                     b.HasKey("Id");
 
@@ -59,39 +56,39 @@ namespace MailServer.Migrations.PostgreSql.Migrations
                 {
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
+                        .HasColumnType("char(36)");
 
                     b.Property<DateTimeOffset>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.Property<string>("CreatedBy")
                         .IsRequired()
                         .HasMaxLength(256)
-                        .HasColumnType("character varying(256)");
+                        .HasColumnType("varchar(256)");
 
                     b.Property<DateTimeOffset?>("ExpiresAt")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.Property<DateTimeOffset?>("LastUsedAt")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.Property<string>("Name")
                         .IsRequired()
                         .HasMaxLength(128)
-                        .HasColumnType("character varying(128)");
+                        .HasColumnType("varchar(128)");
 
                     b.Property<string>("Prefix")
                         .IsRequired()
                         .HasMaxLength(32)
-                        .HasColumnType("character varying(32)");
+                        .HasColumnType("varchar(32)");
 
                     b.Property<DateTimeOffset?>("RevokedAt")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.Property<string>("SecretHash")
                         .IsRequired()
                         .HasMaxLength(128)
-                        .HasColumnType("character varying(128)");
+                        .HasColumnType("varchar(128)");
 
                     b.HasKey("Id");
 
@@ -107,67 +104,67 @@ namespace MailServer.Migrations.PostgreSql.Migrations
                 {
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
+                        .HasColumnType("char(36)");
 
                     b.Property<string>("Action")
                         .IsRequired()
                         .HasMaxLength(128)
-                        .HasColumnType("character varying(128)");
+                        .HasColumnType("varchar(128)");
 
                     b.Property<string>("Actor")
                         .IsRequired()
                         .HasMaxLength(256)
-                        .HasColumnType("character varying(256)");
+                        .HasColumnType("varchar(256)");
 
                     b.Property<string>("Category")
                         .HasMaxLength(32)
-                        .HasColumnType("character varying(32)");
+                        .HasColumnType("varchar(32)");
 
                     b.Property<string>("ChangeSummaryJson")
                         .HasMaxLength(32768)
-                        .HasColumnType("character varying(32768)");
+                        .HasColumnType("longtext");
 
                     b.Property<DateTimeOffset>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.Property<string>("Detail")
-                        .HasColumnType("text");
+                        .HasColumnType("longtext");
 
                     b.Property<long?>("DurationMilliseconds")
                         .HasColumnType("bigint");
 
                     b.Property<string>("PluginId")
                         .HasMaxLength(128)
-                        .HasColumnType("character varying(128)");
+                        .HasColumnType("varchar(128)");
 
                     b.Property<string>("PluginName")
                         .HasMaxLength(256)
-                        .HasColumnType("character varying(256)");
+                        .HasColumnType("varchar(256)");
 
                     b.Property<string>("RawJson")
                         .HasMaxLength(262144)
-                        .HasColumnType("character varying(262144)");
+                        .HasColumnType("longtext");
 
                     b.Property<string>("RelatedId")
                         .HasMaxLength(256)
-                        .HasColumnType("character varying(256)");
+                        .HasColumnType("varchar(256)");
 
                     b.Property<string>("RemoteAddress")
                         .HasMaxLength(128)
-                        .HasColumnType("character varying(128)");
+                        .HasColumnType("varchar(128)");
 
                     b.Property<string>("RequestId")
                         .HasMaxLength(128)
-                        .HasColumnType("character varying(128)");
+                        .HasColumnType("varchar(128)");
 
                     b.Property<string>("Resource")
                         .IsRequired()
                         .HasMaxLength(512)
-                        .HasColumnType("character varying(512)");
+                        .HasColumnType("varchar(512)");
 
                     b.Property<string>("Status")
                         .HasMaxLength(32)
-                        .HasColumnType("character varying(32)");
+                        .HasColumnType("varchar(32)");
 
                     b.HasKey("Id");
 
@@ -179,6 +176,8 @@ namespace MailServer.Migrations.PostgreSql.Migrations
 
                     b.HasIndex("Status");
 
+                    b.HasIndex("Action", "Resource", "RequestId");
+
                     b.ToTable("audit_records", (string)null);
                 });
 
@@ -186,49 +185,49 @@ namespace MailServer.Migrations.PostgreSql.Migrations
                 {
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
+                        .HasColumnType("char(36)");
 
                     b.Property<Guid?>("AccountId")
-                        .HasColumnType("uuid");
+                        .HasColumnType("char(36)");
 
                     b.Property<int>("Attempts")
-                        .HasColumnType("integer");
+                        .HasColumnType("int");
 
                     b.Property<DateTimeOffset?>("CompletedAt")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.Property<string>("ContentKey")
                         .HasMaxLength(64)
-                        .HasColumnType("character varying(64)");
+                        .HasColumnType("varchar(64)");
 
                     b.Property<DateTimeOffset>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.Property<Guid?>("DomainId")
-                        .HasColumnType("uuid");
+                        .HasColumnType("char(36)");
 
                     b.Property<long>("EstimatedBytes")
                         .HasColumnType("bigint");
 
                     b.Property<string>("LastError")
                         .HasMaxLength(4096)
-                        .HasColumnType("character varying(4096)");
+                        .HasColumnType("varchar(4096)");
 
                     b.Property<DateTimeOffset>("PurgeAfter")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.Property<Guid?>("ResourceId")
-                        .HasColumnType("uuid");
+                        .HasColumnType("char(36)");
 
                     b.Property<string>("ResourceType")
                         .IsRequired()
                         .HasMaxLength(32)
-                        .HasColumnType("character varying(32)");
+                        .HasColumnType("varchar(32)");
 
                     b.Property<string>("Status")
                         .IsRequired()
                         .HasMaxLength(32)
-                        .HasColumnType("character varying(32)");
+                        .HasColumnType("varchar(32)");
 
                     b.HasKey("Id");
 
@@ -239,73 +238,147 @@ namespace MailServer.Migrations.PostgreSql.Migrations
                     b.ToTable("cleanup_queue", (string)null);
                 });
 
+            modelBuilder.Entity("MailServer.Domain.ConfigurationProcessStatus", b =>
+                {
+                    b.Property<string>("ProcessId")
+                        .HasMaxLength(160)
+                        .HasColumnType("varchar(160)");
+
+                    b.Property<int>("EntryCount")
+                        .HasColumnType("int");
+
+                    b.Property<long>("EstimatedCacheBytes")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("FirewallVersion")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("Hits")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("InstanceName")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("varchar(128)");
+
+                    b.Property<string>("LastError")
+                        .HasMaxLength(2048)
+                        .HasColumnType("varchar(2048)");
+
+                    b.Property<DateTimeOffset>("LastSeenAt")
+                        .HasColumnType("datetime");
+
+                    b.Property<long>("Misses")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("ReloadFailures")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("Roles")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("varchar(128)");
+
+                    b.Property<long>("RulesVersion")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("SettingsVersion")
+                        .HasColumnType("bigint");
+
+                    b.Property<DateTimeOffset>("StartedAt")
+                        .HasColumnType("datetime");
+
+                    b.HasKey("ProcessId");
+
+                    b.HasIndex("LastSeenAt");
+
+                    b.ToTable("configuration_process_statuses", (string)null);
+                });
+
+            modelBuilder.Entity("MailServer.Domain.ConfigurationVersion", b =>
+                {
+                    b.Property<string>("Scope")
+                        .HasMaxLength(32)
+                        .HasColumnType("varchar(32)");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasColumnType("datetime");
+
+                    b.Property<long>("Version")
+                        .HasColumnType("bigint");
+
+                    b.HasKey("Scope");
+
+                    b.ToTable("configuration_versions", (string)null);
+                });
+
             modelBuilder.Entity("MailServer.Domain.DeliveryAttempt", b =>
                 {
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
+                        .HasColumnType("char(36)");
 
                     b.Property<int>("AttemptNumber")
-                        .HasColumnType("integer");
+                        .HasColumnType("int");
 
                     b.Property<DateTimeOffset>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.Property<Guid>("DeliveryJobId")
-                        .HasColumnType("uuid");
+                        .HasColumnType("char(36)");
 
                     b.Property<long>("DurationMilliseconds")
                         .HasColumnType("bigint");
 
                     b.Property<string>("EnhancedStatusCode")
                         .HasMaxLength(16)
-                        .HasColumnType("character varying(16)");
+                        .HasColumnType("varchar(16)");
 
                     b.Property<string>("FailureCategory")
                         .HasMaxLength(64)
-                        .HasColumnType("character varying(64)");
+                        .HasColumnType("varchar(64)");
 
                     b.Property<DateTimeOffset?>("NextRetryAt")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.Property<bool>("PermanentFailure")
-                        .HasColumnType("boolean");
+                        .HasColumnType("tinyint(1)");
 
                     b.Property<string>("RemoteAddress")
                         .HasMaxLength(64)
-                        .HasColumnType("character varying(64)");
+                        .HasColumnType("varchar(64)");
 
                     b.Property<string>("RemoteHost")
                         .HasMaxLength(255)
-                        .HasColumnType("character varying(255)");
+                        .HasColumnType("varchar(255)");
 
                     b.Property<string>("Response")
                         .HasMaxLength(4096)
-                        .HasColumnType("character varying(4096)");
+                        .HasColumnType("varchar(4096)");
 
                     b.Property<string>("SessionSummary")
                         .HasMaxLength(65536)
-                        .HasColumnType("character varying(65536)");
+                        .HasColumnType("longtext");
 
                     b.Property<string>("SmtpStatusCode")
                         .HasMaxLength(16)
-                        .HasColumnType("character varying(16)");
+                        .HasColumnType("varchar(16)");
 
                     b.Property<string>("Stage")
                         .IsRequired()
                         .HasMaxLength(32)
-                        .HasColumnType("character varying(32)");
+                        .HasColumnType("varchar(32)");
 
                     b.Property<bool>("Succeeded")
-                        .HasColumnType("boolean");
+                        .HasColumnType("tinyint(1)");
 
                     b.Property<string>("TlsCipherSuite")
                         .HasMaxLength(128)
-                        .HasColumnType("character varying(128)");
+                        .HasColumnType("varchar(128)");
 
                     b.Property<string>("TlsProtocol")
                         .HasMaxLength(32)
-                        .HasColumnType("character varying(32)");
+                        .HasColumnType("varchar(32)");
 
                     b.HasKey("Id");
 
@@ -320,56 +393,56 @@ namespace MailServer.Migrations.PostgreSql.Migrations
                 {
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
+                        .HasColumnType("char(36)");
 
                     b.Property<int>("Attempts")
-                        .HasColumnType("integer");
+                        .HasColumnType("int");
 
                     b.Property<DateTimeOffset>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.Property<int>("ForwardDepth")
-                        .HasColumnType("integer");
+                        .HasColumnType("int");
 
                     b.Property<string>("LastError")
-                        .HasColumnType("text");
+                        .HasColumnType("longtext");
 
                     b.Property<string>("LeaseOwner")
                         .HasMaxLength(128)
-                        .HasColumnType("character varying(128)");
+                        .HasColumnType("varchar(128)");
 
                     b.Property<DateTimeOffset?>("LeaseUntil")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.Property<Guid>("MessageId")
-                        .HasColumnType("uuid");
+                        .HasColumnType("char(36)");
 
                     b.Property<DateTimeOffset>("NextAttemptAt")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.Property<Guid?>("OriginRuleId")
-                        .HasColumnType("uuid");
+                        .HasColumnType("char(36)");
 
                     b.Property<string>("Recipient")
                         .IsRequired()
                         .HasMaxLength(320)
-                        .HasColumnType("character varying(320)");
+                        .HasColumnType("varchar(320)");
 
                     b.Property<Guid?>("RouteDomainId")
-                        .HasColumnType("uuid");
+                        .HasColumnType("char(36)");
 
                     b.Property<string>("Sender")
                         .IsRequired()
                         .HasMaxLength(320)
-                        .HasColumnType("character varying(320)");
+                        .HasColumnType("varchar(320)");
 
                     b.Property<string>("Status")
                         .IsRequired()
                         .HasMaxLength(32)
-                        .HasColumnType("character varying(32)");
+                        .HasColumnType("varchar(32)");
 
                     b.Property<DateTimeOffset>("UpdatedAt")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.HasKey("Id");
 
@@ -387,51 +460,51 @@ namespace MailServer.Migrations.PostgreSql.Migrations
             modelBuilder.Entity("MailServer.Domain.DomainCertificate", b =>
                 {
                     b.Property<Guid>("DomainId")
-                        .HasColumnType("uuid");
+                        .HasColumnType("char(36)");
 
                     b.Property<string>("CertificatePath")
                         .IsRequired()
                         .HasMaxLength(2048)
-                        .HasColumnType("character varying(2048)");
+                        .HasColumnType("varchar(2048)");
 
                     b.Property<string>("Issuer")
                         .IsRequired()
                         .HasMaxLength(1024)
-                        .HasColumnType("character varying(1024)");
+                        .HasColumnType("varchar(1024)");
 
                     b.Property<DateTimeOffset>("NotAfter")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.Property<DateTimeOffset>("NotBefore")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.Property<string>("PrivateKeyPath")
                         .IsRequired()
                         .HasMaxLength(2048)
-                        .HasColumnType("character varying(2048)");
+                        .HasColumnType("varchar(2048)");
 
                     b.Property<string>("Source")
                         .IsRequired()
                         .HasMaxLength(32)
-                        .HasColumnType("character varying(32)");
+                        .HasColumnType("varchar(32)");
 
                     b.Property<string>("Subject")
                         .IsRequired()
                         .HasMaxLength(1024)
-                        .HasColumnType("character varying(1024)");
+                        .HasColumnType("varchar(1024)");
 
                     b.Property<string>("SubjectAlternativeNames")
                         .IsRequired()
                         .HasMaxLength(4096)
-                        .HasColumnType("character varying(4096)");
+                        .HasColumnType("varchar(4096)");
 
                     b.Property<string>("Thumbprint")
                         .IsRequired()
                         .HasMaxLength(128)
-                        .HasColumnType("character varying(128)");
+                        .HasColumnType("varchar(128)");
 
                     b.Property<DateTimeOffset>("UpdatedAt")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.HasKey("DomainId");
 
@@ -441,24 +514,24 @@ namespace MailServer.Migrations.PostgreSql.Migrations
             modelBuilder.Entity("MailServer.Domain.DomainDnsCheck", b =>
                 {
                     b.Property<Guid>("DomainId")
-                        .HasColumnType("uuid");
+                        .HasColumnType("char(36)");
 
                     b.Property<DateTimeOffset?>("CheckedAt")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.Property<string>("DetailsJson")
                         .IsRequired()
                         .HasMaxLength(32768)
-                        .HasColumnType("character varying(32768)");
+                        .HasColumnType("longtext");
 
                     b.Property<string>("LastError")
                         .HasMaxLength(4096)
-                        .HasColumnType("character varying(4096)");
+                        .HasColumnType("varchar(4096)");
 
                     b.Property<string>("Status")
                         .IsRequired()
                         .HasMaxLength(32)
-                        .HasColumnType("character varying(32)");
+                        .HasColumnType("varchar(32)");
 
                     b.HasKey("DomainId");
 
@@ -468,109 +541,109 @@ namespace MailServer.Migrations.PostgreSql.Migrations
             modelBuilder.Entity("MailServer.Domain.DomainDnsSettings", b =>
                 {
                     b.Property<Guid>("DomainId")
-                        .HasColumnType("uuid");
+                        .HasColumnType("char(36)");
 
                     b.Property<bool>("DaneEnabled")
-                        .HasColumnType("boolean");
+                        .HasColumnType("tinyint(1)");
 
                     b.Property<string>("DaneTlsaRecords")
                         .IsRequired()
                         .HasMaxLength(8192)
-                        .HasColumnType("character varying(8192)");
+                        .HasColumnType("varchar(8192)");
 
                     b.Property<string>("DmarcAggregateReportUris")
                         .IsRequired()
                         .HasMaxLength(4096)
-                        .HasColumnType("character varying(4096)");
+                        .HasColumnType("varchar(4096)");
 
                     b.Property<string>("DmarcDkimAlignment")
                         .IsRequired()
                         .HasMaxLength(4)
-                        .HasColumnType("character varying(4)");
+                        .HasColumnType("varchar(4)");
 
                     b.Property<string>("DmarcFailureOptions")
                         .IsRequired()
                         .HasMaxLength(32)
-                        .HasColumnType("character varying(32)");
+                        .HasColumnType("varchar(32)");
 
                     b.Property<string>("DmarcForensicReportUris")
                         .IsRequired()
                         .HasMaxLength(4096)
-                        .HasColumnType("character varying(4096)");
+                        .HasColumnType("varchar(4096)");
 
                     b.Property<int>("DmarcPercentage")
-                        .HasColumnType("integer");
+                        .HasColumnType("int");
 
                     b.Property<string>("DmarcPolicy")
                         .IsRequired()
                         .HasMaxLength(16)
-                        .HasColumnType("character varying(16)");
+                        .HasColumnType("varchar(16)");
 
                     b.Property<string>("DmarcSpfAlignment")
                         .IsRequired()
                         .HasMaxLength(4)
-                        .HasColumnType("character varying(4)");
+                        .HasColumnType("varchar(4)");
 
                     b.Property<string>("DmarcSubdomainPolicy")
                         .HasMaxLength(16)
-                        .HasColumnType("character varying(16)");
+                        .HasColumnType("varchar(16)");
 
                     b.Property<int>("MtaStsMaxAgeSeconds")
-                        .HasColumnType("integer");
+                        .HasColumnType("int");
 
                     b.Property<string>("MtaStsMode")
                         .IsRequired()
                         .HasMaxLength(16)
-                        .HasColumnType("character varying(16)");
+                        .HasColumnType("varchar(16)");
 
                     b.Property<string>("MtaStsMxPatterns")
                         .IsRequired()
                         .HasMaxLength(4096)
-                        .HasColumnType("character varying(4096)");
+                        .HasColumnType("varchar(4096)");
 
                     b.Property<string>("MtaStsPolicyId")
                         .IsRequired()
                         .HasMaxLength(32)
-                        .HasColumnType("character varying(32)");
+                        .HasColumnType("varchar(32)");
 
                     b.Property<string>("SpfAllPolicy")
                         .IsRequired()
                         .HasMaxLength(16)
-                        .HasColumnType("character varying(16)");
+                        .HasColumnType("varchar(16)");
 
                     b.Property<string>("SpfCustomMechanisms")
                         .IsRequired()
                         .HasMaxLength(4096)
-                        .HasColumnType("character varying(4096)");
+                        .HasColumnType("varchar(4096)");
 
                     b.Property<bool>("SpfIncludeA")
-                        .HasColumnType("boolean");
+                        .HasColumnType("tinyint(1)");
 
                     b.Property<bool>("SpfIncludeMx")
-                        .HasColumnType("boolean");
+                        .HasColumnType("tinyint(1)");
 
                     b.Property<string>("SpfIncludes")
                         .IsRequired()
                         .HasMaxLength(4096)
-                        .HasColumnType("character varying(4096)");
+                        .HasColumnType("varchar(4096)");
 
                     b.Property<string>("SpfIpv4")
                         .IsRequired()
                         .HasMaxLength(4096)
-                        .HasColumnType("character varying(4096)");
+                        .HasColumnType("varchar(4096)");
 
                     b.Property<string>("SpfIpv6")
                         .IsRequired()
                         .HasMaxLength(4096)
-                        .HasColumnType("character varying(4096)");
+                        .HasColumnType("varchar(4096)");
 
                     b.Property<string>("TlsReportUris")
                         .IsRequired()
                         .HasMaxLength(4096)
-                        .HasColumnType("character varying(4096)");
+                        .HasColumnType("varchar(4096)");
 
                     b.Property<DateTimeOffset>("UpdatedAt")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.HasKey("DomainId");
 
@@ -581,25 +654,25 @@ namespace MailServer.Migrations.PostgreSql.Migrations
                 {
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
+                        .HasColumnType("char(36)");
 
                     b.Property<string>("Cidr")
                         .IsRequired()
                         .HasMaxLength(64)
-                        .HasColumnType("character varying(64)");
+                        .HasColumnType("varchar(64)");
 
                     b.Property<DateTimeOffset>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.Property<bool>("IsEnabled")
-                        .HasColumnType("boolean");
+                        .HasColumnType("tinyint(1)");
 
                     b.Property<string>("Note")
                         .HasMaxLength(512)
-                        .HasColumnType("character varying(512)");
+                        .HasColumnType("varchar(512)");
 
                     b.Property<DateTimeOffset>("UpdatedAt")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.HasKey("Id");
 
@@ -613,35 +686,35 @@ namespace MailServer.Migrations.PostgreSql.Migrations
                 {
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
+                        .HasColumnType("char(36)");
 
                     b.Property<DateTimeOffset>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.Property<DateTimeOffset?>("DeletedAt")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.Property<string>("DeletedBy")
-                        .HasColumnType("text");
+                        .HasColumnType("longtext");
 
                     b.Property<Guid>("DomainId")
-                        .HasColumnType("uuid");
+                        .HasColumnType("char(36)");
 
                     b.Property<bool>("IsEnabled")
-                        .HasColumnType("boolean");
+                        .HasColumnType("tinyint(1)");
 
                     b.Property<string>("LocalPart")
                         .IsRequired()
                         .HasMaxLength(128)
-                        .HasColumnType("character varying(128)");
+                        .HasColumnType("varchar(128)");
 
                     b.Property<string>("PasswordHash")
                         .IsRequired()
                         .HasMaxLength(1024)
-                        .HasColumnType("character varying(1024)");
+                        .HasColumnType("varchar(1024)");
 
                     b.Property<DateTimeOffset?>("PurgeAfter")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.Property<long>("QuotaBytes")
                         .HasColumnType("bigint");
@@ -665,33 +738,33 @@ namespace MailServer.Migrations.PostgreSql.Migrations
                 {
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
+                        .HasColumnType("char(36)");
 
                     b.Property<DateTimeOffset>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.Property<string>("DestinationAddress")
                         .HasMaxLength(320)
-                        .HasColumnType("character varying(320)");
+                        .HasColumnType("varchar(320)");
 
                     b.Property<Guid>("DomainId")
-                        .HasColumnType("uuid");
+                        .HasColumnType("char(36)");
 
                     b.Property<bool>("IsEnabled")
-                        .HasColumnType("boolean");
+                        .HasColumnType("tinyint(1)");
 
                     b.Property<string>("Mode")
                         .IsRequired()
                         .HasMaxLength(32)
-                        .HasColumnType("character varying(32)");
+                        .HasColumnType("varchar(32)");
 
                     b.Property<string>("SourceLocalPart")
                         .IsRequired()
                         .HasMaxLength(128)
-                        .HasColumnType("character varying(128)");
+                        .HasColumnType("varchar(128)");
 
                     b.Property<Guid?>("TargetAccountId")
-                        .HasColumnType("uuid");
+                        .HasColumnType("char(36)");
 
                     b.HasKey("Id");
 
@@ -707,52 +780,52 @@ namespace MailServer.Migrations.PostgreSql.Migrations
                 {
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
+                        .HasColumnType("char(36)");
 
                     b.Property<DateTimeOffset>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.Property<DateTimeOffset?>("DeletedAt")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.Property<string>("DeletedBy")
-                        .HasColumnType("text");
+                        .HasColumnType("longtext");
 
                     b.Property<bool>("DirectDeliverSameDomain")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("boolean")
+                        .HasColumnType("tinyint(1)")
                         .HasDefaultValue(true);
 
                     b.Property<string>("DkimPrivateKeyPath")
                         .HasMaxLength(2048)
-                        .HasColumnType("character varying(2048)");
+                        .HasColumnType("varchar(2048)");
 
                     b.Property<string>("DkimPublicKey")
                         .HasMaxLength(4096)
-                        .HasColumnType("character varying(4096)");
+                        .HasColumnType("varchar(4096)");
 
                     b.Property<string>("DkimSelector")
                         .HasMaxLength(63)
-                        .HasColumnType("character varying(63)");
+                        .HasColumnType("varchar(63)");
 
                     b.Property<bool>("IsActive")
-                        .HasColumnType("boolean");
+                        .HasColumnType("tinyint(1)");
 
                     b.Property<string>("MailHostName")
                         .HasMaxLength(255)
-                        .HasColumnType("character varying(255)");
+                        .HasColumnType("varchar(255)");
 
                     b.Property<string>("Name")
                         .IsRequired()
                         .HasMaxLength(255)
-                        .HasColumnType("character varying(255)");
+                        .HasColumnType("varchar(255)");
 
                     b.Property<string>("OutboundIpAddresses")
                         .HasMaxLength(1024)
-                        .HasColumnType("character varying(1024)");
+                        .HasColumnType("varchar(1024)");
 
                     b.Property<DateTimeOffset?>("PurgeAfter")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.Property<long>("QuotaBytes")
                         .ValueGeneratedOnAdd()
@@ -761,7 +834,7 @@ namespace MailServer.Migrations.PostgreSql.Migrations
 
                     b.Property<string>("SmtpHostName")
                         .HasMaxLength(255)
-                        .HasColumnType("character varying(255)");
+                        .HasColumnType("varchar(255)");
 
                     b.Property<long>("UsedBytes")
                         .ValueGeneratedOnAdd()
@@ -785,42 +858,42 @@ namespace MailServer.Migrations.PostgreSql.Migrations
                 {
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
+                        .HasColumnType("char(36)");
 
                     b.Property<DateTimeOffset>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.Property<string>("Direction")
                         .IsRequired()
                         .HasMaxLength(32)
-                        .HasColumnType("character varying(32)");
+                        .HasColumnType("varchar(32)");
 
                     b.Property<Guid>("DomainId")
-                        .HasColumnType("uuid");
+                        .HasColumnType("char(36)");
 
                     b.Property<bool>("IsEnabled")
-                        .HasColumnType("boolean");
+                        .HasColumnType("tinyint(1)");
 
                     b.Property<string>("MatchMode")
                         .IsRequired()
                         .HasMaxLength(16)
-                        .HasColumnType("character varying(16)");
+                        .HasColumnType("varchar(16)");
 
                     b.Property<string>("Name")
                         .IsRequired()
                         .HasMaxLength(128)
-                        .HasColumnType("character varying(128)");
+                        .HasColumnType("varchar(128)");
 
                     b.Property<int>("Priority")
-                        .HasColumnType("integer");
+                        .HasColumnType("int");
 
                     b.Property<string>("TargetMailboxName")
                         .IsRequired()
                         .HasMaxLength(255)
-                        .HasColumnType("character varying(255)");
+                        .HasColumnType("varchar(255)");
 
                     b.Property<DateTimeOffset>("UpdatedAt")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.HasKey("Id");
 
@@ -833,23 +906,23 @@ namespace MailServer.Migrations.PostgreSql.Migrations
                 {
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
+                        .HasColumnType("char(36)");
 
                     b.Property<string>("Kind")
                         .IsRequired()
                         .HasMaxLength(32)
-                        .HasColumnType("character varying(32)");
+                        .HasColumnType("varchar(32)");
 
                     b.Property<int>("Position")
-                        .HasColumnType("integer");
+                        .HasColumnType("int");
 
                     b.Property<Guid>("RuleId")
-                        .HasColumnType("uuid");
+                        .HasColumnType("char(36)");
 
                     b.Property<string>("ValuesJson")
                         .IsRequired()
                         .HasMaxLength(4096)
-                        .HasColumnType("character varying(4096)");
+                        .HasColumnType("varchar(4096)");
 
                     b.HasKey("Id");
 
@@ -862,28 +935,28 @@ namespace MailServer.Migrations.PostgreSql.Migrations
                 {
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
+                        .HasColumnType("char(36)");
 
                     b.Property<string>("Field")
                         .IsRequired()
                         .HasMaxLength(32)
-                        .HasColumnType("character varying(32)");
+                        .HasColumnType("varchar(32)");
 
                     b.Property<string>("Operator")
                         .IsRequired()
                         .HasMaxLength(32)
-                        .HasColumnType("character varying(32)");
+                        .HasColumnType("varchar(32)");
 
                     b.Property<int>("Position")
-                        .HasColumnType("integer");
+                        .HasColumnType("int");
 
                     b.Property<Guid>("RuleId")
-                        .HasColumnType("uuid");
+                        .HasColumnType("char(36)");
 
                     b.Property<string>("ValuesJson")
                         .IsRequired()
                         .HasMaxLength(4096)
-                        .HasColumnType("character varying(4096)");
+                        .HasColumnType("varchar(4096)");
 
                     b.HasKey("Id");
 
@@ -896,19 +969,19 @@ namespace MailServer.Migrations.PostgreSql.Migrations
                 {
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
+                        .HasColumnType("char(36)");
 
                     b.Property<Guid>("AccountId")
-                        .HasColumnType("uuid");
+                        .HasColumnType("char(36)");
 
                     b.Property<DateTimeOffset>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.Property<DateTimeOffset?>("DeletedAt")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.Property<string>("DeletedBy")
-                        .HasColumnType("text");
+                        .HasColumnType("longtext");
 
                     b.Property<long>("HighestModSeq")
                         .HasColumnType("bigint");
@@ -916,13 +989,13 @@ namespace MailServer.Migrations.PostgreSql.Migrations
                     b.Property<string>("Name")
                         .IsRequired()
                         .HasMaxLength(255)
-                        .HasColumnType("character varying(255)");
+                        .HasColumnType("varchar(255)");
 
                     b.Property<Guid?>("PendingDeletionJobId")
-                        .HasColumnType("uuid");
+                        .HasColumnType("char(36)");
 
                     b.Property<DateTimeOffset?>("PurgeAfter")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.Property<long>("UidNext")
                         .HasColumnType("bigint");
@@ -946,40 +1019,40 @@ namespace MailServer.Migrations.PostgreSql.Migrations
                 {
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
+                        .HasColumnType("char(36)");
 
                     b.Property<Guid?>("AccountId")
-                        .HasColumnType("uuid");
+                        .HasColumnType("char(36)");
 
                     b.Property<int>("AffectedAccountCount")
-                        .HasColumnType("integer");
+                        .HasColumnType("int");
 
                     b.Property<int>("AffectedMailboxCount")
-                        .HasColumnType("integer");
+                        .HasColumnType("int");
 
                     b.Property<int>("AffectedRuleCount")
-                        .HasColumnType("integer");
+                        .HasColumnType("int");
 
                     b.Property<int>("Attempts")
-                        .HasColumnType("integer");
+                        .HasColumnType("int");
 
                     b.Property<DateTimeOffset?>("CompletedAt")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.Property<DateTimeOffset>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.Property<Guid>("DomainId")
-                        .HasColumnType("uuid");
+                        .HasColumnType("char(36)");
 
                     b.Property<string>("FolderName")
                         .IsRequired()
                         .HasMaxLength(255)
-                        .HasColumnType("character varying(255)");
+                        .HasColumnType("varchar(255)");
 
                     b.Property<string>("LastError")
                         .HasMaxLength(4096)
-                        .HasColumnType("character varying(4096)");
+                        .HasColumnType("varchar(4096)");
 
                     b.Property<long>("ProcessedMessages")
                         .HasColumnType("bigint");
@@ -987,21 +1060,21 @@ namespace MailServer.Migrations.PostgreSql.Migrations
                     b.Property<string>("RequestedBy")
                         .IsRequired()
                         .HasMaxLength(320)
-                        .HasColumnType("character varying(320)");
+                        .HasColumnType("varchar(320)");
 
                     b.Property<DateTimeOffset?>("StartedAt")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.Property<string>("Status")
                         .IsRequired()
                         .HasMaxLength(32)
-                        .HasColumnType("character varying(32)");
+                        .HasColumnType("varchar(32)");
 
                     b.Property<long>("TotalMessages")
                         .HasColumnType("bigint");
 
                     b.Property<DateTimeOffset>("UpdatedAt")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.HasKey("Id");
 
@@ -1014,36 +1087,36 @@ namespace MailServer.Migrations.PostgreSql.Migrations
                 {
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
+                        .HasColumnType("char(36)");
 
                     b.Property<DateTimeOffset?>("DeletedAt")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.Property<string>("DeletedBy")
-                        .HasColumnType("text");
+                        .HasColumnType("longtext");
 
                     b.Property<string>("Flags")
                         .IsRequired()
                         .HasMaxLength(512)
-                        .HasColumnType("character varying(512)");
+                        .HasColumnType("varchar(512)");
 
                     b.Property<DateTimeOffset>("InternalDate")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.Property<Guid>("MailboxId")
-                        .HasColumnType("uuid");
+                        .HasColumnType("char(36)");
 
                     b.Property<Guid>("MessageId")
-                        .HasColumnType("uuid");
+                        .HasColumnType("char(36)");
 
                     b.Property<long>("ModSeq")
                         .HasColumnType("bigint");
 
                     b.Property<DateTimeOffset?>("PurgeAfter")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.Property<DateTimeOffset?>("ScheduledDeleteAt")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.Property<long>("Uid")
                         .HasColumnType("bigint");
@@ -1066,38 +1139,38 @@ namespace MailServer.Migrations.PostgreSql.Migrations
                 {
                     b.Property<string>("Domain")
                         .HasMaxLength(255)
-                        .HasColumnType("character varying(255)");
+                        .HasColumnType("varchar(255)");
 
                     b.Property<DateTimeOffset>("ExpiresAt")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.Property<DateTimeOffset>("FetchedAt")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.Property<string>("LastError")
                         .HasMaxLength(4096)
-                        .HasColumnType("character varying(4096)");
+                        .HasColumnType("varchar(4096)");
 
                     b.Property<DateTimeOffset?>("LastRefreshAttemptAt")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.Property<int>("MaxAgeSeconds")
-                        .HasColumnType("integer");
+                        .HasColumnType("int");
 
                     b.Property<string>("Mode")
                         .IsRequired()
                         .HasMaxLength(16)
-                        .HasColumnType("character varying(16)");
+                        .HasColumnType("varchar(16)");
 
                     b.Property<string>("MxPatterns")
                         .IsRequired()
                         .HasMaxLength(4096)
-                        .HasColumnType("character varying(4096)");
+                        .HasColumnType("varchar(4096)");
 
                     b.Property<string>("PolicyId")
                         .IsRequired()
                         .HasMaxLength(32)
-                        .HasColumnType("character varying(32)");
+                        .HasColumnType("varchar(32)");
 
                     b.HasKey("Domain");
 
@@ -1110,34 +1183,34 @@ namespace MailServer.Migrations.PostgreSql.Migrations
                 {
                     b.Property<string>("SubjectType")
                         .HasMaxLength(32)
-                        .HasColumnType("character varying(32)");
+                        .HasColumnType("varchar(32)");
 
                     b.Property<Guid>("SubjectId")
-                        .HasColumnType("uuid");
+                        .HasColumnType("char(36)");
 
                     b.Property<string>("PermissionCode")
                         .HasMaxLength(128)
-                        .HasColumnType("character varying(128)");
+                        .HasColumnType("varchar(128)");
 
                     b.Property<string>("ResourceType")
                         .ValueGeneratedOnAdd()
                         .HasMaxLength(64)
-                        .HasColumnType("character varying(64)")
+                        .HasColumnType("varchar(64)")
                         .HasDefaultValue("");
 
                     b.Property<string>("ResourceKey")
                         .ValueGeneratedOnAdd()
                         .HasMaxLength(128)
-                        .HasColumnType("character varying(128)")
+                        .HasColumnType("varchar(128)")
                         .HasDefaultValue("");
 
                     b.Property<DateTimeOffset>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.Property<string>("CreatedBy")
                         .IsRequired()
                         .HasMaxLength(256)
-                        .HasColumnType("character varying(256)");
+                        .HasColumnType("varchar(256)");
 
                     b.HasKey("SubjectType", "SubjectId", "PermissionCode", "ResourceType", "ResourceKey");
 
@@ -1150,60 +1223,60 @@ namespace MailServer.Migrations.PostgreSql.Migrations
                 {
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
+                        .HasColumnType("char(36)");
 
                     b.Property<Guid>("DomainId")
-                        .HasColumnType("uuid");
+                        .HasColumnType("char(36)");
 
                     b.Property<Guid>("MessageId")
-                        .HasColumnType("uuid");
+                        .HasColumnType("char(36)");
 
                     b.Property<string>("PluginId")
                         .HasMaxLength(128)
-                        .HasColumnType("character varying(128)");
+                        .HasColumnType("varchar(128)");
 
                     b.Property<string>("PluginName")
                         .HasMaxLength(256)
-                        .HasColumnType("character varying(256)");
+                        .HasColumnType("varchar(256)");
 
                     b.Property<DateTimeOffset>("QuarantinedAt")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.Property<string>("Reason")
                         .IsRequired()
                         .HasMaxLength(2048)
-                        .HasColumnType("character varying(2048)");
+                        .HasColumnType("varchar(2048)");
 
                     b.Property<string>("RecipientsJson")
                         .IsRequired()
                         .HasMaxLength(4096)
-                        .HasColumnType("character varying(4096)");
+                        .HasColumnType("varchar(4096)");
 
                     b.Property<string>("RemoteAddress")
                         .IsRequired()
                         .HasMaxLength(128)
-                        .HasColumnType("character varying(128)");
+                        .HasColumnType("varchar(128)");
 
                     b.Property<string>("ReviewNote")
                         .HasMaxLength(2048)
-                        .HasColumnType("character varying(2048)");
+                        .HasColumnType("varchar(2048)");
 
                     b.Property<DateTimeOffset?>("ReviewedAt")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.Property<string>("ReviewedBy")
                         .HasMaxLength(256)
-                        .HasColumnType("character varying(256)");
+                        .HasColumnType("varchar(256)");
 
                     b.Property<string>("Sender")
                         .IsRequired()
                         .HasMaxLength(320)
-                        .HasColumnType("character varying(320)");
+                        .HasColumnType("varchar(320)");
 
                     b.Property<string>("Status")
                         .IsRequired()
                         .HasMaxLength(32)
-                        .HasColumnType("character varying(32)");
+                        .HasColumnType("varchar(32)");
 
                     b.HasKey("Id");
 
@@ -1218,32 +1291,32 @@ namespace MailServer.Migrations.PostgreSql.Migrations
                 {
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
+                        .HasColumnType("char(36)");
 
                     b.Property<Guid>("AccountId")
-                        .HasColumnType("uuid");
+                        .HasColumnType("char(36)");
 
                     b.Property<long>("Bytes")
                         .HasColumnType("bigint");
 
                     b.Property<DateTimeOffset>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.Property<Guid>("DomainId")
-                        .HasColumnType("uuid");
+                        .HasColumnType("char(36)");
 
                     b.Property<string>("IdempotencyKey")
                         .IsRequired()
                         .HasMaxLength(256)
-                        .HasColumnType("character varying(256)");
+                        .HasColumnType("varchar(256)");
 
                     b.Property<Guid?>("MailboxMessageId")
-                        .HasColumnType("uuid");
+                        .HasColumnType("char(36)");
 
                     b.Property<string>("Operation")
                         .IsRequired()
                         .HasMaxLength(32)
-                        .HasColumnType("character varying(32)");
+                        .HasColumnType("varchar(32)");
 
                     b.HasKey("Id");
 
@@ -1259,52 +1332,51 @@ namespace MailServer.Migrations.PostgreSql.Migrations
                 {
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
+                        .HasColumnType("char(36)");
 
                     b.Property<int>("BatchSize")
-                        .HasColumnType("integer");
+                        .HasColumnType("int");
 
                     b.Property<int>("IntervalMinutes")
-                        .HasColumnType("integer");
-
+                        .HasColumnType("int");
 
                     b.Property<bool>("IsEnabled")
-                        .HasColumnType("boolean");
+                        .HasColumnType("tinyint(1)");
 
                     b.Property<bool>("IsSystem")
-                        .HasColumnType("boolean");
+                        .HasColumnType("tinyint(1)");
 
                     b.Property<DateTimeOffset?>("LastRunAt")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.Property<int>("MaximumAttempts")
-                        .HasColumnType("integer");
+                        .HasColumnType("int");
 
                     b.Property<string>("Name")
                         .IsRequired()
                         .HasMaxLength(128)
-                        .HasColumnType("character varying(128)");
+                        .HasColumnType("varchar(128)");
 
                     b.Property<DateTimeOffset>("NextRunAt")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.Property<string>("SettingsJson")
                         .IsRequired()
                         .HasMaxLength(8192)
-                        .HasColumnType("character varying(8192)");
+                        .HasColumnType("varchar(8192)");
 
                     b.Property<string>("Status")
                         .IsRequired()
                         .HasMaxLength(32)
-                        .HasColumnType("character varying(32)");
+                        .HasColumnType("varchar(32)");
 
                     b.Property<int>("TimeoutSeconds")
-                        .HasColumnType("integer");
+                        .HasColumnType("int");
 
                     b.Property<string>("Type")
                         .IsRequired()
                         .HasMaxLength(64)
-                        .HasColumnType("character varying(64)");
+                        .HasColumnType("varchar(64)");
 
                     b.HasKey("Id");
 
@@ -1320,48 +1392,48 @@ namespace MailServer.Migrations.PostgreSql.Migrations
                 {
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
+                        .HasColumnType("char(36)");
 
                     b.Property<Guid>("AccountId")
-                        .HasColumnType("uuid");
+                        .HasColumnType("char(36)");
 
                     b.Property<Guid?>("ClientMailboxMessageId")
-                        .HasColumnType("uuid");
+                        .HasColumnType("char(36)");
 
                     b.Property<DateTimeOffset?>("CompletedAt")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.Property<DateTimeOffset>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.Property<DateTimeOffset>("DeduplicateUntil")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.Property<string>("IdentityKey")
                         .HasMaxLength(64)
-                        .HasColumnType("character varying(64)");
+                        .HasColumnType("varchar(64)");
 
                     b.Property<Guid>("MessageId")
-                        .HasColumnType("uuid");
+                        .HasColumnType("char(36)");
 
                     b.Property<DateTimeOffset>("ReadyAt")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.Property<Guid?>("RuleId")
-                        .HasColumnType("uuid");
+                        .HasColumnType("char(36)");
 
                     b.Property<Guid?>("ServerMailboxMessageId")
-                        .HasColumnType("uuid");
+                        .HasColumnType("char(36)");
 
                     b.Property<string>("State")
                         .IsRequired()
                         .HasMaxLength(32)
-                        .HasColumnType("character varying(32)");
+                        .HasColumnType("varchar(32)");
 
                     b.Property<string>("TargetMailboxName")
                         .IsRequired()
                         .HasMaxLength(255)
-                        .HasColumnType("character varying(255)");
+                        .HasColumnType("varchar(255)");
 
                     b.HasKey("Id");
 
@@ -1380,24 +1452,24 @@ namespace MailServer.Migrations.PostgreSql.Migrations
                 {
                     b.Property<string>("Token")
                         .HasMaxLength(96)
-                        .HasColumnType("character varying(96)");
+                        .HasColumnType("varchar(96)");
 
                     b.Property<DateTimeOffset>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.Property<Guid>("DomainId")
-                        .HasColumnType("uuid");
+                        .HasColumnType("char(36)");
 
                     b.Property<DateTimeOffset>("ExpiresAt")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.Property<int>("ForwardDepth")
-                        .HasColumnType("integer");
+                        .HasColumnType("int");
 
                     b.Property<string>("OriginalSender")
                         .IsRequired()
                         .HasMaxLength(320)
-                        .HasColumnType("character varying(320)");
+                        .HasColumnType("varchar(320)");
 
                     b.HasKey("Token");
 
@@ -1412,24 +1484,24 @@ namespace MailServer.Migrations.PostgreSql.Migrations
                 {
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
+                        .HasColumnType("char(36)");
 
                     b.Property<string>("ContentKey")
                         .IsRequired()
                         .HasMaxLength(64)
-                        .HasColumnType("character varying(64)");
+                        .HasColumnType("varchar(64)");
 
                     b.Property<string>("EnvelopeFrom")
                         .IsRequired()
                         .HasMaxLength(320)
-                        .HasColumnType("character varying(320)");
+                        .HasColumnType("varchar(320)");
 
                     b.Property<string>("InternetMessageId")
                         .HasMaxLength(998)
-                        .HasColumnType("character varying(998)");
+                        .HasColumnType("varchar(998)");
 
                     b.Property<DateTimeOffset>("ReceivedAt")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.Property<long>("Size")
                         .HasColumnType("bigint");
@@ -1445,12 +1517,12 @@ namespace MailServer.Migrations.PostgreSql.Migrations
                 {
                     b.Property<string>("Key")
                         .HasMaxLength(128)
-                        .HasColumnType("character varying(128)");
+                        .HasColumnType("varchar(128)");
 
                     b.Property<string>("Value")
                         .IsRequired()
                         .HasMaxLength(8192)
-                        .HasColumnType("character varying(8192)");
+                        .HasColumnType("varchar(8192)");
 
                     b.HasKey("Key");
 
@@ -1461,34 +1533,34 @@ namespace MailServer.Migrations.PostgreSql.Migrations
                 {
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
+                        .HasColumnType("char(36)");
 
                     b.Property<int>("Attempt")
-                        .HasColumnType("integer");
+                        .HasColumnType("int");
 
                     b.Property<DateTimeOffset?>("CompletedAt")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.Property<string>("Error")
                         .HasMaxLength(4096)
-                        .HasColumnType("character varying(4096)");
+                        .HasColumnType("varchar(4096)");
 
                     b.Property<int>("ProcessedCount")
-                        .HasColumnType("integer");
+                        .HasColumnType("int");
 
                     b.Property<long>("ReleasedBytes")
                         .HasColumnType("bigint");
 
                     b.Property<Guid>("ScheduledTaskId")
-                        .HasColumnType("uuid");
+                        .HasColumnType("char(36)");
 
                     b.Property<DateTimeOffset>("StartedAt")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.Property<string>("Status")
                         .IsRequired()
                         .HasMaxLength(32)
-                        .HasColumnType("character varying(32)");
+                        .HasColumnType("varchar(32)");
 
                     b.HasKey("Id");
 
@@ -1501,15 +1573,15 @@ namespace MailServer.Migrations.PostgreSql.Migrations
                 {
                     b.Property<Guid>("ScheduledTaskId")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
+                        .HasColumnType("char(36)");
 
                     b.Property<DateTimeOffset>("ExpiresAt")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.Property<string>("Owner")
                         .IsRequired()
                         .HasMaxLength(256)
-                        .HasColumnType("character varying(256)");
+                        .HasColumnType("varchar(256)");
 
                     b.HasKey("ScheduledTaskId");
 
@@ -1520,53 +1592,53 @@ namespace MailServer.Migrations.PostgreSql.Migrations
                 {
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
+                        .HasColumnType("char(36)");
 
                     b.Property<string>("FailureReason")
                         .IsRequired()
                         .HasMaxLength(4096)
-                        .HasColumnType("character varying(4096)");
+                        .HasColumnType("varchar(4096)");
 
                     b.Property<string>("MxHost")
                         .IsRequired()
                         .HasMaxLength(255)
-                        .HasColumnType("character varying(255)");
+                        .HasColumnType("varchar(255)");
 
                     b.Property<DateTimeOffset>("OccurredAt")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.Property<string>("PolicyDomain")
                         .IsRequired()
                         .HasMaxLength(255)
-                        .HasColumnType("character varying(255)");
+                        .HasColumnType("varchar(255)");
 
                     b.Property<string>("PolicyString")
                         .IsRequired()
                         .HasMaxLength(8192)
-                        .HasColumnType("character varying(8192)");
+                        .HasColumnType("varchar(8192)");
 
                     b.Property<string>("PolicyType")
                         .IsRequired()
                         .HasMaxLength(32)
-                        .HasColumnType("character varying(32)");
+                        .HasColumnType("varchar(32)");
 
                     b.Property<string>("ReceivingIp")
                         .IsRequired()
                         .HasMaxLength(64)
-                        .HasColumnType("character varying(64)");
+                        .HasColumnType("varchar(64)");
 
                     b.Property<bool>("Reported")
-                        .HasColumnType("boolean");
+                        .HasColumnType("tinyint(1)");
 
                     b.Property<string>("ResultType")
                         .IsRequired()
                         .HasMaxLength(64)
-                        .HasColumnType("character varying(64)");
+                        .HasColumnType("varchar(64)");
 
                     b.Property<string>("SendingIp")
                         .IsRequired()
                         .HasMaxLength(64)
-                        .HasColumnType("character varying(64)");
+                        .HasColumnType("varchar(64)");
 
                     b.HasKey("Id");
 
@@ -1579,43 +1651,56 @@ namespace MailServer.Migrations.PostgreSql.Migrations
                 {
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
+                        .HasColumnType("char(36)");
 
                     b.Property<int>("Attempts")
-                        .HasColumnType("integer");
+                        .HasColumnType("int");
 
                     b.Property<DateTimeOffset?>("CompletedAt")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.Property<string>("LastError")
                         .HasMaxLength(4096)
-                        .HasColumnType("character varying(4096)");
+                        .HasColumnType("varchar(4096)");
+
+                    b.Property<string>("LastManualRetryKey")
+                        .HasMaxLength(32)
+                        .HasColumnType("varchar(32)");
+
+                    b.Property<string>("LeaseOwner")
+                        .HasMaxLength(128)
+                        .HasColumnType("varchar(128)");
+
+                    b.Property<DateTimeOffset?>("LeaseUntil")
+                        .HasColumnType("datetime");
 
                     b.Property<DateTimeOffset>("NextAttemptAt")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.Property<DateTimeOffset>("PeriodEnd")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.Property<DateTimeOffset>("PeriodStart")
-                        .HasColumnType("timestamp with time zone");
+                        .HasColumnType("datetime");
 
                     b.Property<string>("PolicyDomain")
                         .IsRequired()
                         .HasMaxLength(255)
-                        .HasColumnType("character varying(255)");
+                        .HasColumnType("varchar(255)");
 
                     b.Property<string>("ReportJson")
                         .IsRequired()
                         .HasMaxLength(1048576)
-                        .HasColumnType("character varying(1048576)");
+                        .HasColumnType("longtext");
 
                     b.Property<string>("ReportUri")
                         .IsRequired()
                         .HasMaxLength(2048)
-                        .HasColumnType("character varying(2048)");
+                        .HasColumnType("varchar(2048)");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("LeaseUntil");
 
                     b.HasIndex("CompletedAt", "NextAttemptAt");
 

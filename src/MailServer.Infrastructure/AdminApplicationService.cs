@@ -287,7 +287,8 @@ public sealed class AdminApplicationService(
     SystemSettingsService systemSettings,
     IMessageContentStore contentStore,
     DomainCertificateProvider certificateProvider,
-    PermissionService permissions)
+    PermissionService permissions,
+    ConfigurationSnapshotCache? configurationCache = null)
 {
     public async Task<AdminUser?> AuthenticateAsync(
         string userName,
@@ -436,6 +437,7 @@ public sealed class AdminApplicationService(
     {
         var normalized = IpFirewallRules.NormalizeCidr(cidr);
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+        await using var transaction = db.Database.IsRelational() ? await db.Database.BeginTransactionAsync(cancellationToken) : null;
         if (await db.FirewallRules.AnyAsync(x => x.Cidr == normalized, cancellationToken))
             throw new InvalidOperationException("Firewall rule already exists.");
         var now = DateTimeOffset.UtcNow;
@@ -448,7 +450,10 @@ public sealed class AdminApplicationService(
         };
         db.FirewallRules.Add(rule);
         AddAudit(db, actor, "firewall.create", $"firewall:{rule.Id}", normalized, requestId);
+        var version = await ConfigurationVersionService.BumpAsync(db, ConfigurationScopes.Firewall, cancellationToken);
         await db.SaveChangesAsync(cancellationToken);
+        if (transaction is not null) await transaction.CommitAsync(cancellationToken);
+        configurationCache?.ObserveCommittedVersion(ConfigurationScopes.Firewall, version);
         return new FirewallRuleView(rule.Id, rule.Cidr, rule.Note, rule.IsEnabled, rule.CreatedAt, rule.UpdatedAt);
     }
 
@@ -461,13 +466,17 @@ public sealed class AdminApplicationService(
         string? requestId = null)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+        await using var transaction = db.Database.IsRelational() ? await db.Database.BeginTransactionAsync(cancellationToken) : null;
         var rule = await db.FirewallRules.SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
             ?? throw new KeyNotFoundException("Firewall rule not found.");
         rule.IsEnabled = isEnabled;
         rule.Note = NullIfWhiteSpace(note);
         rule.UpdatedAt = DateTimeOffset.UtcNow;
         AddAudit(db, actor, "firewall.update", $"firewall:{rule.Id}", $"{rule.Cidr}; enabled={isEnabled}", requestId);
+        var version = await ConfigurationVersionService.BumpAsync(db, ConfigurationScopes.Firewall, cancellationToken);
         await db.SaveChangesAsync(cancellationToken);
+        if (transaction is not null) await transaction.CommitAsync(cancellationToken);
+        configurationCache?.ObserveCommittedVersion(ConfigurationScopes.Firewall, version);
         return new FirewallRuleView(rule.Id, rule.Cidr, rule.Note, rule.IsEnabled, rule.CreatedAt, rule.UpdatedAt);
     }
 
@@ -478,11 +487,15 @@ public sealed class AdminApplicationService(
         string? requestId = null)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+        await using var transaction = db.Database.IsRelational() ? await db.Database.BeginTransactionAsync(cancellationToken) : null;
         var rule = await db.FirewallRules.SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
             ?? throw new KeyNotFoundException("Firewall rule not found.");
         db.FirewallRules.Remove(rule);
         AddAudit(db, actor, "firewall.delete", $"firewall:{rule.Id}", rule.Cidr, requestId);
+        var version = await ConfigurationVersionService.BumpAsync(db, ConfigurationScopes.Firewall, cancellationToken);
         await db.SaveChangesAsync(cancellationToken);
+        if (transaction is not null) await transaction.CommitAsync(cancellationToken);
+        configurationCache?.ObserveCommittedVersion(ConfigurationScopes.Firewall, version);
     }
 
     public async Task<IReadOnlyList<MailDomain>> GetDomainsAsync(CancellationToken cancellationToken)

@@ -210,7 +210,9 @@ public sealed class CoreTests
                 Sender = "from@example.com",
                 Recipient = "to@example.net",
                 Status = DeliveryStatus.Processing,
-                Attempts = 1
+                Attempts = 1,
+                LeaseOwner = "diagnostic-test",
+                LeaseUntil = DateTimeOffset.UtcNow.AddMinutes(1)
             };
             db.DeliveryJobs.Add(job);
             await db.SaveChangesAsync();
@@ -220,7 +222,9 @@ public sealed class CoreTests
         var queue = new DeliveryQueue(factory, settings,
             Options.Create(new DatabaseOptions { Provider = DatabaseProvider.Sqlite }),
             NullLogger<DeliveryQueue>.Instance);
-        await queue.CompleteAsync(jobId, DeliveryResult.Temporary(
+        await queue.CompleteAsync(new DeliveryLease(
+            new DeliveryJob { Id = jobId, Sender = "from@example.com", Recipient = "to@example.net" },
+            "diagnostic-test", 1, DateTimeOffset.UtcNow.AddMinutes(1)), DeliveryResult.Temporary(
             "451 temporary", diagnostic: new DeliveryDiagnostic("SMTP",
                 SessionSummary: "C: AUTH LOGIN dG9rZW4=\r\nC: RCPT TO:<to@example.net>")), CancellationToken.None);
 

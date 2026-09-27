@@ -12,7 +12,6 @@
     <PackageVersion Include="Microsoft.EntityFrameworkCore.Sqlite.Core" Version="10.0.7" />
     <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.7.0" />
     <PackageVersion Include="MySql.EntityFrameworkCore" Version="10.0.7" />
-    <PackageVersion Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.2" />
     <PackageVersion Include="SourceGear.sqlite3" Version="3.50.4.5" />
     <PackageVersion Include="SQLitePCLRaw.core" Version="3.0.3" />
     <PackageVersion Include="SQLitePCLRaw.provider.e_sqlite3" Version="3.0.3" />

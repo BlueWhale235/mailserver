@@ -235,6 +235,80 @@ namespace MailServer.Migrations.MySql.Migrations
                     b.ToTable("cleanup_queue", (string)null);
                 });
 
+            modelBuilder.Entity("MailServer.Domain.ConfigurationProcessStatus", b =>
+                {
+                    b.Property<string>("ProcessId")
+                        .HasMaxLength(160)
+                        .HasColumnType("varchar(160)");
+
+                    b.Property<int>("EntryCount")
+                        .HasColumnType("int");
+
+                    b.Property<long>("EstimatedCacheBytes")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("FirewallVersion")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("Hits")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("InstanceName")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("varchar(128)");
+
+                    b.Property<string>("LastError")
+                        .HasMaxLength(2048)
+                        .HasColumnType("varchar(2048)");
+
+                    b.Property<DateTimeOffset>("LastSeenAt")
+                        .HasColumnType("datetime");
+
+                    b.Property<long>("Misses")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("ReloadFailures")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("Roles")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("varchar(128)");
+
+                    b.Property<long>("RulesVersion")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("SettingsVersion")
+                        .HasColumnType("bigint");
+
+                    b.Property<DateTimeOffset>("StartedAt")
+                        .HasColumnType("datetime");
+
+                    b.HasKey("ProcessId");
+
+                    b.HasIndex("LastSeenAt");
+
+                    b.ToTable("configuration_process_statuses", (string)null);
+                });
+
+            modelBuilder.Entity("MailServer.Domain.ConfigurationVersion", b =>
+                {
+                    b.Property<string>("Scope")
+                        .HasMaxLength(32)
+                        .HasColumnType("varchar(32)");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasColumnType("datetime");
+
+                    b.Property<long>("Version")
+                        .HasColumnType("bigint");
+
+                    b.HasKey("Scope");
+
+                    b.ToTable("configuration_versions", (string)null);
+                });
+
             modelBuilder.Entity("MailServer.Domain.DeliveryAttempt", b =>
                 {
                     b.Property<Guid>("Id")

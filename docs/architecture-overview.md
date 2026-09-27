@@ -34,7 +34,7 @@ flowchart TB
     end
 
     subgraph Data[持久化与资产]
-        DB[(EF Core 元数据数据库<br/>SQLite · PostgreSQL · MySQL)]
+        DB[(EF Core 元数据数据库<br/>SQLite · MySQL)]
         Content[(原始邮件文件存储)]
         Security[(证书与 DKIM 安全资产)]
         Plugins[(插件目录)]

@@ -122,13 +122,22 @@ public sealed partial class ImapServerService(
             }
 
             // 在 IMAP greeting 之前执行防火墙判断，避免被阻断来源继续探测能力列表。
-            if (firewall is not null
-                && client.Client.RemoteEndPoint is IPEndPoint remoteEndPoint
-                && await firewall.IsBlockedAsync(remoteEndPoint.Address, cancellationToken))
+            try
             {
-                logger.LogWarning(
-                    "IMAP connection from {RemoteAddress} was closed by firewall before greeting.",
-                    remoteEndPoint.Address);
+                if (firewall is not null
+                    && client.Client.RemoteEndPoint is IPEndPoint remoteEndPoint
+                    && await firewall.IsBlockedAsync(remoteEndPoint.Address, cancellationToken))
+                {
+                    logger.LogWarning(
+                        "IMAP connection from {RemoteAddress} was closed by firewall before greeting.",
+                        remoteEndPoint.Address);
+                    client.Dispose();
+                    continue;
+                }
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                logger.LogError(exception, "IMAP firewall evaluation failed; closing only the current connection.");
                 client.Dispose();
                 continue;
             }

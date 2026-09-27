@@ -8,24 +8,15 @@ Docker Compose 文件面向源码仓库使用，会在本机从 `src` 构建各�
 
 先使用 CLI 生成 `mailserver.json`，再配置 `.env`。
 
-PostgreSQL：
-
-```bash
-docker compose --profile postgres up -d postgres
-docker compose --profile postgres --profile tools run --rm cli db update
-docker compose --profile postgres --profile tools run --rm cli admin create admin --password 'replace-this-password'
-docker compose --profile postgres up --build -d api smtp imap worker
-```
-
 MySQL：
 
-先从 `.env.example` 复制 `.env`，设置 `DATABASE_PROVIDER=MySql`，并将 `MAIL_DATABASE_CONNECTION` 设为指向 `mysql:3306` 的连接字符串；其中的数据库密码须与 `MYSQL_PASSWORD` 一致。不要沿用示例中的 PostgreSQL 默认连接串。首次迁移前备份现有数据库和邮件存储；以下命令用于新安装或已确认备份的环境。
+先从 `.env.example` 复制 `.env`，确认数据库密码与 `MYSQL_PASSWORD` 一致。首次迁移前备份现有数据库和邮件存储；以下命令用于新安装或已确认备份的环境。
 
 ```bash
-docker compose --profile mysql up -d mysql
-docker compose --profile mysql --profile tools run --rm cli db update
-docker compose --profile mysql --profile tools run --rm cli admin create admin --password 'replace-this-password'
-docker compose --profile mysql up --build -d api smtp imap worker
+docker compose up -d mysql
+docker compose --profile tools run --rm cli db update
+docker compose --profile tools run --rm cli admin create admin --password 'replace-this-password'
+docker compose up --build -d api smtp imap worker
 ```
 
 上线前用 `/api/v1/health/ready` 检查数据库、迁移、邮件存储及安全资产状态，再验证 `/admin` 深层路由、登录与 CSRF、SMTP／IMAP 连接和 Direct MX 出站 TCP/25。正式运行前还需完成清单中的 MySQL 实库并发验证和独立进程监控验收。

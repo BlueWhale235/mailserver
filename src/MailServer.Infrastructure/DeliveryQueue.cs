@@ -20,7 +20,7 @@ public sealed class DeliveryQueue(
 {
     private readonly DatabaseProvider _provider = databaseOptions.Value.Provider;
 
-    public async Task<IReadOnlyList<DeliveryJob>> LeaseAsync(
+    public async Task<IReadOnlyList<DeliveryLease>> LeaseAsync(
         string owner,
         int count,
         TimeSpan duration,
@@ -30,22 +30,9 @@ public sealed class DeliveryQueue(
         await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
         var now = DateTimeOffset.UtcNow;
         var nowTicks = now.UtcDateTime.Ticks;
-        // PostgreSQL/MySQL 使用 SKIP LOCKED 支持多 Worker 并发抢占；SQLite 没有等价语义，只依赖事务串行化。
+        // MySQL 使用 SKIP LOCKED 支持多 Worker 并发抢占；SQLite 没有等价语义，只依赖事务串行化。
         var jobs = _provider switch
         {
-            DatabaseProvider.PostgreSql => await db.DeliveryJobs
-                .FromSqlInterpolated($"""
-                    SELECT * FROM delivery_jobs
-                    WHERE
-                        ("Status" IN ('Pending', 'Deferred')
-                         OR ("Status" = 'Processing' AND "LeaseUntil" < {now}))
-                        AND "NextAttemptAt" <= {now}
-                    ORDER BY "NextAttemptAt", "CreatedAt"
-                    LIMIT {count}
-                    FOR UPDATE SKIP LOCKED
-                    """)
-                .Include(x => x.Message)
-                .ToListAsync(cancellationToken),
             DatabaseProvider.MySql => await db.DeliveryJobs
                 .FromSqlInterpolated($"""
                     SELECT * FROM delivery_jobs
@@ -95,13 +82,53 @@ public sealed class DeliveryQueue(
                 now.Add(duration));
         }
 
-        return jobs;
+        return jobs.Select(job => new DeliveryLease(job, owner, job.Attempts, job.LeaseUntil!.Value)).ToArray();
     }
 
-    public async Task CompleteAsync(Guid jobId, DeliveryResult result, CancellationToken cancellationToken)
+    public async Task<bool> RenewAsync(DeliveryLease lease, TimeSpan duration, CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
-        var job = await db.DeliveryJobs.SingleAsync(x => x.Id == jobId, cancellationToken);
+        var now = DateTimeOffset.UtcNow;
+        if (!db.Database.IsRelational())
+        {
+            var tracked = await db.DeliveryJobs.SingleOrDefaultAsync(x => x.Id == lease.Job.Id, cancellationToken);
+            if (tracked is null || tracked.Status != DeliveryStatus.Processing
+                || tracked.LeaseOwner != lease.Owner || tracked.Attempts != lease.Attempt)
+                return false;
+            tracked.LeaseUntil = now.Add(duration);
+            tracked.UpdatedAt = now;
+            await db.SaveChangesAsync(cancellationToken);
+            return true;
+        }
+        var changed = await db.DeliveryJobs.Where(x => x.Id == lease.Job.Id
+                && x.Status == DeliveryStatus.Processing
+                && x.LeaseOwner == lease.Owner
+                && x.Attempts == lease.Attempt)
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(x => x.LeaseUntil, now.Add(duration))
+                .SetProperty(x => x.UpdatedAt, now), cancellationToken);
+        return changed == 1;
+    }
+
+    public async Task<DeliveryCompletion> CompleteAsync(
+        DeliveryLease lease,
+        DeliveryResult result,
+        CancellationToken cancellationToken)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+        await using var transaction = db.Database.IsRelational()
+            ? await db.Database.BeginTransactionAsync(cancellationToken) : null;
+        var job = await db.DeliveryJobs.SingleOrDefaultAsync(x => x.Id == lease.Job.Id
+            && x.Status == DeliveryStatus.Processing
+            && x.LeaseOwner == lease.Owner
+            && x.Attempts == lease.Attempt, cancellationToken);
+        if (job is null)
+        {
+            logger.LogWarning(
+                "Delivery job {JobId} completion was ignored because owner={Owner}, attempt={Attempt} no longer holds the lease.",
+                lease.Job.Id, lease.Owner, lease.Attempt);
+            return new DeliveryCompletion(false, null, false);
+        }
         var diagnostic = result.Diagnostic;
         var safeResponse = DeliverySessionSummary.SanitizeResponse(result.Response);
         var attempt = new DeliveryAttempt
@@ -148,6 +175,7 @@ public sealed class DeliveryQueue(
         }
 
         await db.SaveChangesAsync(cancellationToken);
+        if (transaction is not null) await transaction.CommitAsync(cancellationToken);
         logger.LogInformation(
             "Delivery job {JobId} completed: status={Status}, succeeded={Succeeded}, permanentFailure={PermanentFailure}, attempts={Attempts}, nextAttemptAt={NextAttemptAt}, remoteHost={RemoteHost}, response={Response}.",
             job.Id,
@@ -158,6 +186,7 @@ public sealed class DeliveryQueue(
             job.NextAttemptAt,
             result.RemoteHost ?? string.Empty,
             safeResponse);
+        return new DeliveryCompletion(true, job.Status, job.Status == DeliveryStatus.Failed);
     }
 
     public async Task RetryNowAsync(Guid jobId, CancellationToken cancellationToken, int? expectedAttempts = null)

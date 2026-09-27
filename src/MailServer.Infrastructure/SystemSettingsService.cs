@@ -74,7 +74,8 @@ public sealed class SystemSettingsService(
     IDbContextFactory<MailDbContext> dbFactory,
     IOptions<DeliveryOptions> deliveryDefaults,
     IOptions<MailboxDefaultsOptions> mailboxDefaults,
-    IOptions<CertificatesOptions> certificateDefaults)
+    IOptions<CertificatesOptions> certificateDefaults,
+    ConfigurationSnapshotCache? cache = null)
 {
     private const string DeliveryPrefix = "delivery:";
     private const string MailboxPrefix = "mailbox-defaults:";
@@ -90,9 +91,9 @@ public sealed class SystemSettingsService(
     private const string TemplatePermanentFailureSubjectKey = "permanent-failure-subject";
     private const string TemplatePermanentFailureBodyKey = "permanent-failure-body";
     private const string TemplateRetryExhaustedSubjectKey = "retry-exhausted-subject";
-    private const string TemplateRetryExhaustedBodyKey = "retry-exhausted-body";
     private const string TemplateQuotaExceededSubjectKey = "quota-exceeded-subject";
     private const string TemplateQuotaExceededBodyKey = "quota-exceeded-body";
+    private const string TemplateRetryExhaustedBodyKey = "retry-exhausted-body";
 
     private readonly DeliveryOptions _deliveryDefaults = deliveryDefaults.Value;
     private readonly MailboxDefaultsOptions _mailboxDefaults = mailboxDefaults.Value;
@@ -112,6 +113,19 @@ public sealed class SystemSettingsService(
 
     public async Task<DeliverySettingsView> GetDeliverySettingsAsync(CancellationToken cancellationToken)
     {
+        if (cache is not null)
+        {
+            return await cache.GetAsync(
+                "settings:delivery",
+                ConfigurationScopes.Settings,
+                async token => (await LoadDeliverySettingsAsync(token), 512),
+                cancellationToken);
+        }
+        return await LoadDeliverySettingsAsync(cancellationToken);
+    }
+
+    private async Task<DeliverySettingsView> LoadDeliverySettingsAsync(CancellationToken cancellationToken)
+    {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         var values = await db.SystemSettings.AsNoTracking()
             .Where(x => x.Key.StartsWith(DeliveryPrefix))
@@ -130,15 +144,32 @@ public sealed class SystemSettingsService(
     {
         Validate(settings);
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+        await using var transaction = db.Database.IsRelational() ? await db.Database.BeginTransactionAsync(cancellationToken) : null;
         await UpsertAsync(db, "batch-size", settings.BatchSize, cancellationToken);
         await UpsertAsync(db, "lease-seconds", settings.LeaseSeconds, cancellationToken);
         await UpsertAsync(db, "maximum-attempts", settings.MaximumAttempts, cancellationToken);
         await UpsertAsync(db, "poll-interval-seconds", settings.PollIntervalSeconds, cancellationToken);
+        var version = await ConfigurationVersionService.BumpAsync(db, ConfigurationScopes.Settings, cancellationToken);
         await db.SaveChangesAsync(cancellationToken);
+        if (transaction is not null) await transaction.CommitAsync(cancellationToken);
+        cache?.ObserveCommittedVersion(ConfigurationScopes.Settings, version);
         return settings;
     }
 
     public async Task<SmtpSettingsView> GetSmtpSettingsAsync(CancellationToken cancellationToken)
+    {
+        if (cache is not null)
+        {
+            return await cache.GetAsync(
+                "settings:smtp",
+                ConfigurationScopes.Settings,
+                async token => (await LoadSmtpSettingsAsync(token), 256),
+                cancellationToken);
+        }
+        return await LoadSmtpSettingsAsync(cancellationToken);
+    }
+
+    private async Task<SmtpSettingsView> LoadSmtpSettingsAsync(CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         var values = await db.SystemSettings.AsNoTracking()
@@ -153,12 +184,33 @@ public sealed class SystemSettingsService(
     {
         Validate(settings);
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+        await using var transaction = db.Database.IsRelational() ? await db.Database.BeginTransactionAsync(cancellationToken) : null;
         await UpsertAsync(db, SmtpPrefix, SmtpCommandTimeoutKey, settings.CommandTimeoutSeconds.ToString(), cancellationToken);
+        var version = await ConfigurationVersionService.BumpAsync(db, ConfigurationScopes.Settings, cancellationToken);
         await db.SaveChangesAsync(cancellationToken);
+        if (transaction is not null) await transaction.CommitAsync(cancellationToken);
+        cache?.ObserveCommittedVersion(ConfigurationScopes.Settings, version);
         return settings;
     }
 
     public async Task<MailboxSettingsView> GetMailboxSettingsAsync(CancellationToken cancellationToken)
+    {
+        if (cache is not null)
+        {
+            return await cache.GetAsync(
+                "settings:mailbox:global",
+                ConfigurationScopes.Settings,
+                async token =>
+                {
+                    var value = await LoadMailboxSettingsAsync(token);
+                    return (value, 256L + value.DefaultFolders.Sum(x => x.Length * 2L));
+                },
+                cancellationToken);
+        }
+        return await LoadMailboxSettingsAsync(cancellationToken);
+    }
+
+    private async Task<MailboxSettingsView> LoadMailboxSettingsAsync(CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         var value = await db.SystemSettings.AsNoTracking()
@@ -174,19 +226,40 @@ public sealed class SystemSettingsService(
     {
         var normalized = MailboxNames.NormalizeDefaults(settings.DefaultFolders);
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+        await using var transaction = db.Database.IsRelational() ? await db.Database.BeginTransactionAsync(cancellationToken) : null;
         await UpsertAsync(
             db,
             MailboxPrefix,
             MailboxFoldersKey,
             JsonSerializer.Serialize(normalized),
             cancellationToken);
+        var version = await ConfigurationVersionService.BumpAsync(db, ConfigurationScopes.Settings, cancellationToken);
         await db.SaveChangesAsync(cancellationToken);
+        if (transaction is not null) await transaction.CommitAsync(cancellationToken);
+        cache?.ObserveCommittedVersion(ConfigurationScopes.Settings, version);
         return new MailboxSettingsView(normalized);
     }
 
     public async Task<MailboxSettingsView> GetDomainMailboxSettingsAsync(
         Guid domainId,
         CancellationToken cancellationToken)
+    {
+        if (cache is not null)
+        {
+            return await cache.GetAsync(
+                $"settings:mailbox:domain:{domainId:N}",
+                ConfigurationScopes.Settings,
+                async token =>
+                {
+                    var value = await LoadDomainMailboxSettingsAsync(domainId, token);
+                    return (value, 256L + value.DefaultFolders.Sum(x => x.Length * 2L));
+                },
+                cancellationToken);
+        }
+        return await LoadDomainMailboxSettingsAsync(domainId, cancellationToken);
+    }
+
+    private async Task<MailboxSettingsView> LoadDomainMailboxSettingsAsync(Guid domainId, CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         if (!await db.Domains.AsNoTracking().AnyAsync(x => x.Id == domainId, cancellationToken))
@@ -196,7 +269,11 @@ public sealed class SystemSettingsService(
             .Select(x => x.Value)
             .SingleOrDefaultAsync(cancellationToken);
         if (value is not null) return new MailboxSettingsView(ReadMailboxFolders(value));
-        return await GetMailboxSettingsAsync(cancellationToken);
+        var global = await db.SystemSettings.AsNoTracking()
+            .Where(x => x.Key == MailboxPrefix + MailboxFoldersKey)
+            .Select(x => x.Value)
+            .SingleOrDefaultAsync(cancellationToken);
+        return new MailboxSettingsView(ReadMailboxFolders(global));
     }
 
     public async Task<MailboxSettingsView> SaveDomainMailboxSettingsAsync(
@@ -206,6 +283,7 @@ public sealed class SystemSettingsService(
     {
         var normalized = MailboxNames.NormalizeDefaults(settings.DefaultFolders);
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+        await using var transaction = db.Database.IsRelational() ? await db.Database.BeginTransactionAsync(cancellationToken) : null;
         if (!await db.Domains.AsNoTracking().AnyAsync(x => x.Id == domainId, cancellationToken))
             throw new KeyNotFoundException("Domain not found.");
         await UpsertAsync(
@@ -214,7 +292,10 @@ public sealed class SystemSettingsService(
             MailboxFoldersKey,
             JsonSerializer.Serialize(normalized),
             cancellationToken);
+        var version = await ConfigurationVersionService.BumpAsync(db, ConfigurationScopes.Settings, cancellationToken);
         await db.SaveChangesAsync(cancellationToken);
+        if (transaction is not null) await transaction.CommitAsync(cancellationToken);
+        cache?.ObserveCommittedVersion(ConfigurationScopes.Settings, version);
         return new MailboxSettingsView(normalized);
     }
 

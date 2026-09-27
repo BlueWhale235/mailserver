@@ -10,7 +10,6 @@
     <ProjectReference Include="../../src/MailServer.Infrastructure/MailServer.Infrastructure.csproj" />
     <ProjectReference Include="../../src/MailServer.Api/MailServer.Api.csproj" />
     <ProjectReference Include="../../src/MailServer.Migrations.MySql/MailServer.Migrations.MySql.csproj" />
-    <ProjectReference Include="../../src/MailServer.Migrations.PostgreSql/MailServer.Migrations.PostgreSql.csproj" />
     <ProjectReference Include="../../src/MailServer.Migrations.Sqlite/MailServer.Migrations.Sqlite.csproj" />
     <ProjectReference Include="../../src/MailServer.Smtp/MailServer.Smtp.csproj" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.InMemory" />

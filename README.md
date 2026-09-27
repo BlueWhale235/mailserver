@@ -7,11 +7,11 @@
 - SMTP：25/465/587、STARTTLS、隐式 TLS、AUTH、防开放中继及流式 DATA。
 - IMAP：UID、Flags、FETCH、SEARCH、STORE、COPY、MOVE、APPEND、EXPUNGE 和 IDLE。
 - 外发投递：仅 Direct MX，支持重试租约、退信、分阶段诊断、TLS 策略和 DKIM。
-- 数据存储：SQLite、PostgreSQL、MySQL，以及独立的 EF Core 迁移程序集。
+- 数据存储：SQLite、MySQL，以及独立的 EF Core 迁移程序集。
 - 管理与安全：`/api/v1`、`/admin`、JWT/API Key、PEM 证书和 TLS 1.2/1.3。
 - 扩展与运维：插件系统、单文件 CLI、诊断、Docker Compose 和便携发布。
 
-SQLite 适合本机开发和单 Worker 测试；生产建议使用 PostgreSQL 16+ 或 MySQL 8.4 LTS+。
+SQLite 适合便携单机和单 Worker 部署；拆分服务或多 Worker 生产部署建议使用 MySQL 8.4 LTS+。
 
 ## 快速开始
 

@@ -7,7 +7,6 @@
     <ProjectReference Include="../MailServer.Imap/MailServer.Imap.csproj" />
     <ProjectReference Include="../MailServer.Infrastructure/MailServer.Infrastructure.csproj" />
     <ProjectReference Include="../MailServer.Migrations.MySql/MailServer.Migrations.MySql.csproj" />
-    <ProjectReference Include="../MailServer.Migrations.PostgreSql/MailServer.Migrations.PostgreSql.csproj" />
     <ProjectReference Include="../MailServer.Migrations.Sqlite/MailServer.Migrations.Sqlite.csproj" />
     <ProjectReference Include="../MailServer.Smtp/MailServer.Smtp.csproj" />
     <ProjectReference Include="../MailServer.Worker/MailServer.Worker.csproj" />

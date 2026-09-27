@@ -176,6 +176,22 @@ public sealed record DeliveryResult(
     public static DeliveryResult Permanent(string response, string? host = null, DeliveryDiagnostic? diagnostic = null) => new(false, true, response, host, diagnostic);
 }
 
+public sealed record DeliveryLease(
+    DeliveryJob Job,
+    string Owner,
+    int Attempt,
+    DateTimeOffset LeaseUntil)
+{
+    public Guid Id => Job.Id;
+    public Guid MessageId => Job.MessageId;
+    public DeliveryStatus Status => Job.Status;
+}
+
+public sealed record DeliveryCompletion(
+    bool Applied,
+    DeliveryStatus? Status,
+    bool FinalFailure);
+
 /// <summary>
 /// 邮箱摘要，字段含义遵循 IMAP 计数、UIDVALIDITY、UIDNEXT 和 MODSEQ 语义。
 /// </summary>
@@ -345,8 +361,9 @@ public interface IInboundMessageService
 /// </summary>
 public interface IDeliveryQueue
 {
-    Task<IReadOnlyList<DeliveryJob>> LeaseAsync(string owner, int count, TimeSpan duration, CancellationToken cancellationToken);
-    Task CompleteAsync(Guid jobId, DeliveryResult result, CancellationToken cancellationToken);
+    Task<IReadOnlyList<DeliveryLease>> LeaseAsync(string owner, int count, TimeSpan duration, CancellationToken cancellationToken);
+    Task<bool> RenewAsync(DeliveryLease lease, TimeSpan duration, CancellationToken cancellationToken);
+    Task<DeliveryCompletion> CompleteAsync(DeliveryLease lease, DeliveryResult result, CancellationToken cancellationToken);
     Task RetryNowAsync(Guid jobId, CancellationToken cancellationToken, int? expectedAttempts = null);
     Task DeleteAsync(Guid jobId, CancellationToken cancellationToken);
 }

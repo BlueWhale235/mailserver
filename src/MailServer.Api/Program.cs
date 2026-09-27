@@ -2107,6 +2107,12 @@ api.MapGet("/settings/delivery", async (
     Results.Ok(await administration.GetDeliverySettingsAsync(cancellationToken)))
     .RequirePermission(PermissionCodes.SettingsDetail);
 
+api.MapGet("/settings/cache-status", async (
+    ConfigurationVersionService configurationVersions,
+    CancellationToken cancellationToken) =>
+    Results.Ok(await configurationVersions.GetStatusAsync(cancellationToken)))
+    .RequirePermission(PermissionCodes.SettingsDetail);
+
 api.MapGet("/settings/smtp", async (
     AdminApplicationService administration,
     CancellationToken cancellationToken) =>

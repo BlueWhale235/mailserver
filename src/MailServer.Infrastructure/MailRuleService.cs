@@ -79,9 +79,21 @@ public sealed record MailRuleRejection(Guid RuleId, string RuleName, string? Rea
 
 public sealed partial class MailRuleService(
     IDbContextFactory<MailDbContext> dbFactory,
-    ILogger<MailRuleService> logger)
+    ILogger<MailRuleService> logger,
+    ConfigurationSnapshotCache? cache = null,
+    ConfigurationVersionService? versions = null)
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    private sealed record CompiledPattern(string Text, Regex? Wildcard);
+    private sealed record CompiledCondition(MailRuleField Field, MailRuleOperator Operator, IReadOnlyList<CompiledPattern> Values);
+    private sealed record CompiledRule(
+        Guid Id,
+        string Name,
+        MailRuleMatchMode MatchMode,
+        string TargetMailboxName,
+        IReadOnlyList<CompiledCondition> Conditions,
+        IReadOnlyList<MailRuleActionView> Actions);
+    private sealed record RuleSnapshot(IReadOnlyList<CompiledRule> Rules, bool Oversized);
 
     public async Task<IReadOnlyList<MailRuleView>> GetRulesAsync(
         Guid domainId,
@@ -130,6 +142,7 @@ public sealed partial class MailRuleService(
     {
         var normalized = Validate(input);
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+        await using var transaction = db.Database.IsRelational() ? await db.Database.BeginTransactionAsync(cancellationToken) : null;
         if (!await db.Domains.AnyAsync(x => x.Id == domainId, cancellationToken))
             throw new KeyNotFoundException("Domain not found.");
         var priority = await db.MailRules
@@ -161,7 +174,10 @@ public sealed partial class MailRuleService(
         };
         db.MailRules.Add(rule);
         AddAudit(db, actor, "mail-rule.create", $"mail-rule:{rule.Id}", $"{input.Direction}:{rule.Name}");
+        var version = await ConfigurationVersionService.BumpAsync(db, ConfigurationScopes.Rules, cancellationToken);
         await db.SaveChangesAsync(cancellationToken);
+        if (transaction is not null) await transaction.CommitAsync(cancellationToken);
+        cache?.ObserveCommittedVersion(ConfigurationScopes.Rules, version);
         return ToView(rule);
     }
 
@@ -220,8 +236,10 @@ public sealed partial class MailRuleService(
         db.MailRuleConditions.AddRange(rule.Conditions);
         db.MailRuleActions.AddRange(rule.Actions);
         AddAudit(db, actor, "mail-rule.update", $"mail-rule:{rule.Id}", rule.Name);
+        var version = await ConfigurationVersionService.BumpAsync(db, ConfigurationScopes.Rules, cancellationToken);
         await db.SaveChangesAsync(cancellationToken);
         if (transaction is not null) await transaction.CommitAsync(cancellationToken);
+        cache?.ObserveCommittedVersion(ConfigurationScopes.Rules, version);
         return ToView(rule);
     }
 
@@ -232,6 +250,7 @@ public sealed partial class MailRuleService(
         CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+        await using var transaction = db.Database.IsRelational() ? await db.Database.BeginTransactionAsync(cancellationToken) : null;
         var rule = await db.MailRules.SingleOrDefaultAsync(
             x => x.Id == ruleId && x.DomainId == domainId,
             cancellationToken) ?? throw new KeyNotFoundException("Mail rule not found.");
@@ -240,6 +259,10 @@ public sealed partial class MailRuleService(
         AddAudit(db, actor, "mail-rule.delete", $"mail-rule:{rule.Id}", rule.Name);
         await db.SaveChangesAsync(cancellationToken);
         await NormalizePrioritiesAsync(db, domainId, direction, cancellationToken);
+        var version = await ConfigurationVersionService.BumpAsync(db, ConfigurationScopes.Rules, cancellationToken);
+        await db.SaveChangesAsync(cancellationToken);
+        if (transaction is not null) await transaction.CommitAsync(cancellationToken);
+        cache?.ObserveCommittedVersion(ConfigurationScopes.Rules, version);
     }
 
     public async Task ReorderAsync(
@@ -250,6 +273,7 @@ public sealed partial class MailRuleService(
         CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+        await using var transaction = db.Database.IsRelational() ? await db.Database.BeginTransactionAsync(cancellationToken) : null;
         var rules = await db.MailRules
             .Where(x => x.DomainId == domainId && x.Direction == direction)
             .ToListAsync(cancellationToken);
@@ -264,7 +288,10 @@ public sealed partial class MailRuleService(
         }
 
         AddAudit(db, actor, "mail-rule.reorder", $"domain:{domainId}", direction.ToString());
+        var version = await ConfigurationVersionService.BumpAsync(db, ConfigurationScopes.Rules, cancellationToken);
         await db.SaveChangesAsync(cancellationToken);
+        if (transaction is not null) await transaction.CommitAsync(cancellationToken);
+        cache?.ObserveCommittedVersion(ConfigurationScopes.Rules, version);
     }
 
     public async Task<MailRuleMatch?> MatchAsync(
@@ -273,18 +300,12 @@ public sealed partial class MailRuleService(
         MailRuleFacts facts,
         CancellationToken cancellationToken)
     {
-        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
-        var rules = await db.MailRules.AsNoTracking()
-            .Include(x => x.Conditions)
-            .Include(x => x.Actions)
-            .AsSplitQuery()
-            .Where(x => x.DomainId == domainId && x.Direction == direction && x.IsEnabled)
-            .OrderBy(x => x.Priority)
-            .ThenBy(x => x.CreatedAt)
-            .ToListAsync(cancellationToken);
-        foreach (var rule in rules)
+        var snapshot = await GetSnapshotAsync(domainId, direction, cancellationToken);
+        if (snapshot.Oversized)
+            return await MatchBatchedAsync(domainId, direction, facts, rejectionOnly: false, cancellationToken) as MailRuleMatch;
+        foreach (var rule in snapshot.Rules)
         {
-            var results = rule.Conditions.OrderBy(x => x.Position).Select(x => Matches(x, facts)).ToArray();
+            var results = rule.Conditions.Select(x => Matches(x, facts)).ToArray();
             var matched = rule.MatchMode == MailRuleMatchMode.All ? results.All(x => x) : results.Any(x => x);
             if (matched)
             {
@@ -294,8 +315,8 @@ public sealed partial class MailRuleService(
                     domainId,
                     direction,
                     rule.TargetMailboxName);
-                var actions = rule.Actions.OrderBy(x => x.Position).Select(ToActionView).ToArray();
-                if (actions.Length == 0)
+                var actions = rule.Actions;
+                if (actions.Count == 0)
                 {
                     actions = [new MailRuleActionView(Guid.Empty, MailRuleActionKind.MoveToFolder, [rule.TargetMailboxName], 0)];
                 }
@@ -320,22 +341,17 @@ public sealed partial class MailRuleService(
             .Select(x => (Guid?)x.DomainId)
             .SingleOrDefaultAsync(cancellationToken);
         if (domainId is null) return null;
-        var rules = await db.MailRules.AsNoTracking()
-            .Include(x => x.Conditions)
-            .Include(x => x.Actions)
-            .AsSplitQuery()
-            .Where(x => x.DomainId == domainId && x.Direction == MailRuleDirection.Outgoing && x.IsEnabled)
-            .OrderBy(x => x.Priority)
-            .ThenBy(x => x.CreatedAt)
-            .ToListAsync(cancellationToken);
-        foreach (var rule in rules)
+        var snapshot = await GetSnapshotAsync(domainId.Value, MailRuleDirection.Outgoing, cancellationToken);
+        if (snapshot.Oversized)
+            return await MatchBatchedAsync(domainId.Value, MailRuleDirection.Outgoing, facts, rejectionOnly: true, cancellationToken) as MailRuleRejection;
+        foreach (var rule in snapshot.Rules)
         {
-            var results = rule.Conditions.OrderBy(x => x.Position).Select(x => Matches(x, facts)).ToArray();
+            var results = rule.Conditions.Select(x => Matches(x, facts)).ToArray();
             var matched = rule.MatchMode == MailRuleMatchMode.All ? results.All(x => x) : results.Any(x => x);
             if (!matched) continue;
-            var reject = rule.Actions.OrderBy(x => x.Position).FirstOrDefault(x => x.Kind == MailRuleActionKind.Reject);
+            var reject = rule.Actions.FirstOrDefault(x => x.Kind == MailRuleActionKind.Reject);
             if (reject is null) continue;
-            var reason = DeserializeValues(reject.ValuesJson).FirstOrDefault();
+            var reason = reject.Values.FirstOrDefault();
             logger.LogInformation(
                 "Outgoing mail rule {RuleId} rejected a message for domain {DomainId}: {Reason}",
                 rule.Id,
@@ -345,6 +361,126 @@ public sealed partial class MailRuleService(
         }
 
         return null;
+    }
+
+    private async Task<RuleSnapshot> GetSnapshotAsync(
+        Guid domainId,
+        MailRuleDirection direction,
+        CancellationToken cancellationToken)
+    {
+        if (cache is null) return (await LoadSnapshotAsync(domainId, direction, cancellationToken)).Value;
+        return await cache.GetAsync(
+            $"rules:{domainId:N}:{direction}",
+            ConfigurationScopes.Rules,
+            token => LoadSnapshotAsync(domainId, direction, token),
+            cancellationToken);
+    }
+
+    private async Task<(RuleSnapshot Value, long Size)> LoadSnapshotAsync(
+        Guid domainId,
+        MailRuleDirection direction,
+        CancellationToken cancellationToken)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+        var count = await db.MailRules.AsNoTracking()
+            .CountAsync(x => x.DomainId == domainId && x.Direction == direction && x.IsEnabled, cancellationToken);
+        var estimate = 512L + count * 2048L;
+        if (cache is not null && estimate > cache.Options.MaximumEntryBytes)
+            return (new RuleSnapshot([], true), estimate);
+        var rows = await LoadRuleBatchAsync(db, domainId, direction, 0, Math.Max(1, count), cancellationToken);
+        var rules = rows.Select(Compile).ToArray();
+        estimate = 512L + rows.Sum(EstimateRuleSize);
+        return (new RuleSnapshot(rules, estimate > (cache?.Options.MaximumEntryBytes ?? long.MaxValue)), estimate);
+    }
+
+    private async Task<object?> MatchBatchedAsync(
+        Guid domainId,
+        MailRuleDirection direction,
+        MailRuleFacts facts,
+        bool rejectionOnly,
+        CancellationToken cancellationToken)
+    {
+        for (var attempt = 0; attempt < 2; attempt++)
+        {
+            var before = versions is null ? null : await versions.ReadAsync(cancellationToken);
+            await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+            var batchSize = Math.Clamp(cache?.Options.RuleFallbackBatchSize ?? 64, 1, 512);
+            object? candidate = null;
+            for (var offset = 0; ; offset += batchSize)
+            {
+                var rows = await LoadRuleBatchAsync(db, domainId, direction, offset, batchSize, cancellationToken);
+                foreach (var rule in rows.Select(Compile))
+                {
+                    var results = rule.Conditions.Select(x => Matches(x, facts)).ToArray();
+                    var matched = rule.MatchMode == MailRuleMatchMode.All ? results.All(x => x) : results.Any(x => x);
+                    if (!matched) continue;
+                    if (rejectionOnly)
+                    {
+                        var reject = rule.Actions.FirstOrDefault(x => x.Kind == MailRuleActionKind.Reject);
+                        if (reject is not null)
+                        {
+                            candidate = new MailRuleRejection(rule.Id, rule.Name, reject.Values.FirstOrDefault());
+                            break;
+                        }
+                        continue;
+                    }
+                    IReadOnlyList<MailRuleActionView> actions = rule.Actions.Count == 0
+                        ? [new MailRuleActionView(Guid.Empty, MailRuleActionKind.MoveToFolder, [rule.TargetMailboxName], 0)]
+                        : rule.Actions;
+                    candidate = new MailRuleMatch(rule.Id, rule.Name, rule.TargetMailboxName, actions);
+                    break;
+                }
+                if (candidate is not null || rows.Count < batchSize) break;
+            }
+            var after = versions is null ? before : await versions.ReadAsync(cancellationToken);
+            if (before?.Rules == after?.Rules) return candidate;
+        }
+        throw new InvalidOperationException("Mail rules changed repeatedly during bounded evaluation.");
+    }
+
+    private static Task<List<MailRule>> LoadRuleBatchAsync(
+        MailDbContext db,
+        Guid domainId,
+        MailRuleDirection direction,
+        int offset,
+        int count,
+        CancellationToken cancellationToken) =>
+        db.MailRules.AsNoTracking()
+            .Include(x => x.Conditions)
+            .Include(x => x.Actions)
+            .AsSplitQuery()
+            .Where(x => x.DomainId == domainId && x.Direction == direction && x.IsEnabled)
+            .OrderBy(x => x.Priority).ThenBy(x => x.CreatedAt).ThenBy(x => x.Id)
+            .Skip(offset).Take(count).ToListAsync(cancellationToken);
+
+    private static long EstimateRuleSize(MailRule rule) =>
+        512L + rule.Name.Length * 2L + rule.TargetMailboxName.Length * 2L
+        + rule.Conditions.Sum(x => 128L + x.ValuesJson.Length * 2L)
+        + rule.Actions.Sum(x => 96L + x.ValuesJson.Length * 2L);
+
+    private static CompiledRule Compile(MailRule rule) => new(
+        rule.Id,
+        rule.Name,
+        rule.MatchMode,
+        rule.TargetMailboxName,
+        rule.Conditions.OrderBy(x => x.Position).Select(x => new CompiledCondition(
+            x.Field,
+            x.Operator,
+            DeserializeValues(x.ValuesJson)
+                .Select(value => CompilePattern(x.Field == MailRuleField.SenderDomain ? NormalizeDomain(value) : value))
+                .ToArray())).ToArray(),
+        rule.Actions.OrderBy(x => x.Position).Select(ToActionView).ToArray());
+
+    private static CompiledPattern CompilePattern(string value)
+    {
+        if (!value.Contains('*') && !value.Contains('?')) return new CompiledPattern(value, null);
+        var pattern = "^" + Regex.Escape(value)
+            .Replace("\\*", ".*", StringComparison.Ordinal)
+            .Replace("\\?", ".", StringComparison.Ordinal) + "$";
+        return new CompiledPattern(value, new Regex(
+            pattern,
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.NonBacktracking,
+            TimeSpan.FromMilliseconds(200)));
     }
 
     public static MailRuleFacts BuildFacts(
@@ -404,6 +540,50 @@ public sealed partial class MailRuleService(
             MailRuleField.HasAttachment => condition.Operator == MailRuleOperator.Is
                                             && bool.TryParse(values[0], out var expected)
                                             && expected == facts.HasAttachment,
+            _ => false
+        };
+    }
+
+    private static bool Matches(CompiledCondition condition, MailRuleFacts facts)
+    {
+        var values = condition.Values.Select(x => x.Text).ToArray();
+        return condition.Field switch
+        {
+            MailRuleField.Sender => MatchText(facts.Senders, condition.Operator, condition.Values),
+            MailRuleField.SenderDomain => MatchText(facts.SenderDomains, condition.Operator, condition.Values),
+            MailRuleField.Recipient => MatchText(facts.Recipients, condition.Operator, condition.Values),
+            MailRuleField.Cc => MatchText(facts.Cc, condition.Operator, condition.Values),
+            MailRuleField.RecipientOrCc => MatchText(facts.Recipients.Concat(facts.Cc), condition.Operator, condition.Values),
+            MailRuleField.Subject => MatchText([facts.Subject], condition.Operator, condition.Values),
+            MailRuleField.Body => MatchText([facts.Body], condition.Operator, condition.Values),
+            MailRuleField.AttachmentName => MatchText(facts.AttachmentNames, condition.Operator, condition.Values),
+            MailRuleField.MessageSize => MatchNumber(facts.MessageSize, condition.Operator, values),
+            MailRuleField.MessageTime => MatchTime(facts.MessageTime, condition.Operator, values),
+            MailRuleField.HasAttachment => condition.Operator == MailRuleOperator.Is
+                                            && values.Length > 0
+                                            && bool.TryParse(values[0], out var expected)
+                                            && expected == facts.HasAttachment,
+            _ => false
+        };
+    }
+
+    private static bool MatchText(
+        IEnumerable<string> candidates,
+        MailRuleOperator operation,
+        IReadOnlyList<CompiledPattern> values)
+    {
+        var source = candidates.Where(x => !string.IsNullOrWhiteSpace(x)).ToArray();
+        static bool Match(string candidate, CompiledPattern pattern, bool contains) => pattern.Wildcard is not null
+            ? pattern.Wildcard.IsMatch(candidate)
+            : contains
+                ? candidate.Contains(pattern.Text, StringComparison.OrdinalIgnoreCase)
+                : string.Equals(candidate, pattern.Text, StringComparison.OrdinalIgnoreCase);
+        return operation switch
+        {
+            MailRuleOperator.ContainsAny => values.Any(value => source.Any(candidate => Match(candidate, value, true))),
+            MailRuleOperator.ContainsAll => values.All(value => source.Any(candidate => Match(candidate, value, true))),
+            MailRuleOperator.EqualsAny => values.Any(value => source.Any(candidate => Match(candidate, value, false))),
+            MailRuleOperator.NotContainsAny => values.All(value => source.All(candidate => !Match(candidate, value, true))),
             _ => false
         };
     }

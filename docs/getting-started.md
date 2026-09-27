@@ -30,7 +30,7 @@ dotnet run --project src/MailServer.Cli -- init
 该命令会：
 
 - 创建当前目录的 `mailserver.json`；
-- 选择 SQLite、PostgreSQL 或 MySQL；
+- 选择 SQLite 或 MySQL；
 - 配置后台地址、端口和 PEM 路径；
 - 生成随机 JWT 密钥；
 - 应用所选 Provider 的数据库迁移；
@@ -96,11 +96,9 @@ mailserver db update
 Provider 值：
 
 - `Sqlite`：本机开发测试，投递租约只支持一个 Worker。
-- `PostgreSql`：使用 `FOR UPDATE SKIP LOCKED`，适合多 Worker。
 - `MySql`：使用 MySQL 8 的 `FOR UPDATE SKIP LOCKED`。
 
-三套迁移分别位于：
+两套迁移分别位于：
 
 - `MailServer.Migrations.Sqlite`
-- `MailServer.Migrations.PostgreSql`
 - `MailServer.Migrations.MySql`

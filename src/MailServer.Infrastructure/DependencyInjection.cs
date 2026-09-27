@@ -28,6 +28,7 @@ public static class DependencyInjection
         services.Configure<DeliveryOptions>(configuration.GetSection(DeliveryOptions.SectionName));
         services.Configure<MailboxDefaultsOptions>(configuration.GetSection(MailboxDefaultsOptions.SectionName));
         services.Configure<MailRulesOptions>(configuration.GetSection(MailRulesOptions.SectionName));
+        services.Configure<ConfigurationCacheOptions>(configuration.GetSection(ConfigurationCacheOptions.SectionName));
         services.Configure<ForwardingOptions>(configuration.GetSection(ForwardingOptions.SectionName));
         services.Configure<PluginOptions>(configuration.GetSection(PluginOptions.SectionName));
         services.Configure<SecurityAssetsOptions>(configuration.GetSection(SecurityAssetsOptions.SectionName));
@@ -36,8 +37,8 @@ public static class DependencyInjection
         services.Configure<TransportSecurityOptions>(configuration.GetSection(TransportSecurityOptions.SectionName));
         services.Configure<MaintenanceOptions>(configuration.GetSection(MaintenanceOptions.SectionName));
         services.AddHttpContextAccessor();
-        services.AddSingleton<AuditStampInterceptor>();
         services.AddSingleton<DeliveryNotificationService>();
+        services.AddSingleton<AuditStampInterceptor>();
         services.AddPooledDbContextFactory<MailDbContext>((provider, options) =>
         {
             options.AddInterceptors(provider.GetRequiredService<AuditStampInterceptor>());
@@ -56,9 +57,6 @@ public static class DependencyInjection
                     options.UseSqlite(connectionString, x => x.MigrationsAssembly(migrationsAssembly));
                     options.ConfigureWarnings(warnings =>
                         warnings.Ignore(RelationalEventId.NonTransactionalMigrationOperationWarning));
-                    break;
-                case DatabaseProvider.PostgreSql:
-                    options.UseNpgsql(connectionString, x => x.MigrationsAssembly(migrationsAssembly));
                     break;
                 case DatabaseProvider.MySql:
                     options.UseMySQL(connectionString, x => x.MigrationsAssembly(migrationsAssembly));
@@ -94,6 +92,9 @@ public static class DependencyInjection
         services.AddSingleton<DomainCertificateService>();
         services.AddSingleton<DomainDnsService>();
         services.AddSingleton<MailRuleService>();
+        services.AddSingleton<ConfigurationSnapshotCache>();
+        services.AddSingleton<ConfigurationVersionService>();
+        services.AddHostedService<ConfigurationCacheMonitor>();
         services.AddSingleton<SrsService>();
         services.AddSingleton<SentCopyService>();
         services.AddSingleton<IpFirewallService>();

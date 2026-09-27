@@ -15,7 +15,6 @@
     </PackageReference>
     <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite.Core" />
     <PackageReference Include="MySql.EntityFrameworkCore" />
-    <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" />
     <PackageReference Include="SourceGear.sqlite3" />
     <PackageReference Include="SQLitePCLRaw.core" />
     <PackageReference Include="SQLitePCLRaw.provider.e_sqlite3" />

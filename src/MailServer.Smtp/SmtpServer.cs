@@ -146,13 +146,22 @@ public sealed class SmtpServerService(
             }
 
             // 连接级防火墙在欢迎语之前执行，避免被拒绝来源确认服务器能力。
-            if (firewall is not null
-                && client.Client.RemoteEndPoint is IPEndPoint remoteEndPoint
-                && await firewall.IsBlockedAsync(remoteEndPoint.Address, cancellationToken))
+            try
             {
-                logger.LogWarning(
-                    "SMTP connection from {RemoteAddress} was closed by firewall before banner.",
-                    remoteEndPoint.Address);
+                if (firewall is not null
+                    && client.Client.RemoteEndPoint is IPEndPoint remoteEndPoint
+                    && await firewall.IsBlockedAsync(remoteEndPoint.Address, cancellationToken))
+                {
+                    logger.LogWarning(
+                        "SMTP connection from {RemoteAddress} was closed by firewall before banner.",
+                        remoteEndPoint.Address);
+                    client.Dispose();
+                    continue;
+                }
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                logger.LogError(exception, "SMTP firewall evaluation failed; closing only the current connection.");
                 client.Dispose();
                 continue;
             }
@@ -976,7 +985,17 @@ public sealed class SmtpServerService(
                 state.Recipients,
                 data.CanSeek ? data.Length : 0,
                 DateTimeOffset.UtcNow);
-            var rejection = await ruleService.EvaluateOutgoingRejectionAsync(accountId, facts, cancellationToken);
+            MailRuleRejection? rejection;
+            try
+            {
+                rejection = await ruleService.EvaluateOutgoingRejectionAsync(accountId, facts, cancellationToken);
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                logger.LogError(exception, "Outgoing rule evaluation failed for SMTP DATA from {Remote}.", remote);
+                await connection.ReplyAsync("451 4.3.0 Mail policy is temporarily unavailable", cancellationToken);
+                return false;
+            }
             if (rejection is not null)
             {
                 logger.LogInformation(

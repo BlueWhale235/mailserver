@@ -32,6 +32,8 @@ public sealed class MailDbContext(DbContextOptions<MailDbContext> options) : DbC
     public DbSet<AuditRecord> AuditRecords => Set<AuditRecord>();
     public DbSet<SystemSetting> SystemSettings => Set<SystemSetting>();
     public DbSet<FirewallRule> FirewallRules => Set<FirewallRule>();
+    public DbSet<ConfigurationVersion> ConfigurationVersions => Set<ConfigurationVersion>();
+    public DbSet<ConfigurationProcessStatus> ConfigurationProcessStatuses => Set<ConfigurationProcessStatus>();
     public DbSet<MtaStsPolicyCache> MtaStsPolicyCaches => Set<MtaStsPolicyCache>();
     public DbSet<TlsDeliveryEvent> TlsDeliveryEvents => Set<TlsDeliveryEvent>();
     public DbSet<TlsReportDelivery> TlsReportDeliveries => Set<TlsReportDelivery>();
@@ -92,6 +94,24 @@ public sealed class MailDbContext(DbContextOptions<MailDbContext> options) : DbC
             entity.HasKey(x => x.Key);
             entity.Property(x => x.Key).HasMaxLength(128);
             entity.Property(x => x.Value).HasMaxLength(8192);
+        });
+
+        modelBuilder.Entity<ConfigurationVersion>(entity =>
+        {
+            entity.ToTable("configuration_versions");
+            entity.HasKey(x => x.Scope);
+            entity.Property(x => x.Scope).HasMaxLength(32);
+        });
+
+        modelBuilder.Entity<ConfigurationProcessStatus>(entity =>
+        {
+            entity.ToTable("configuration_process_statuses");
+            entity.HasKey(x => x.ProcessId);
+            entity.HasIndex(x => x.LastSeenAt);
+            entity.Property(x => x.ProcessId).HasMaxLength(160);
+            entity.Property(x => x.InstanceName).HasMaxLength(128);
+            entity.Property(x => x.Roles).HasMaxLength(128);
+            entity.Property(x => x.LastError).HasMaxLength(2048);
         });
 
         modelBuilder.Entity<DomainCertificate>(entity =>
