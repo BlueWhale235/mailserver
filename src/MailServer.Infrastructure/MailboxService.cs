@@ -70,7 +70,7 @@ public sealed partial class MailboxService(
             .Select(x => (Guid?)x.DomainId)
             .SingleOrDefaultAsync(cancellationToken)
             ?? throw new KeyNotFoundException("Account not found.");
-        var settings = await systemSettings.GetDomainMailboxSettingsAsync(domainId, cancellationToken);
+        var settings = await systemSettings.GetDomainMailboxSettingsAsync(domainId, cancellationToken, useCache: true);
         var existingMailboxes = await db.Mailboxes.IgnoreQueryFilters()
             .Where(x => x.AccountId == accountId)
             .ToListAsync(cancellationToken);
@@ -770,7 +770,7 @@ public sealed partial class MailboxService(
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         var domainId = await db.Accounts.AsNoTracking().Where(x => x.Id == accountId)
             .Select(x => x.DomainId).SingleAsync(cancellationToken);
-        var settings = await systemSettings.GetDomainMailboxSettingsAsync(domainId, cancellationToken);
+        var settings = await systemSettings.GetDomainMailboxSettingsAsync(domainId, cancellationToken, useCache: true);
         var order = settings.DefaultFolders.Select((name, index) => (name, index))
             .ToDictionary(x => x.name, x => x.index, StringComparer.OrdinalIgnoreCase);
         return mailboxes

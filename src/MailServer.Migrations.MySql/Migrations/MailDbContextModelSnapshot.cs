@@ -271,6 +271,10 @@ namespace MailServer.Migrations.MySql.Migrations
                     b.Property<long>("ReloadFailures")
                         .HasColumnType("bigint");
 
+                    b.Property<string>("ResourceStatusJson")
+                        .HasMaxLength(8192)
+                        .HasColumnType("varchar(8192)");
+
                     b.Property<string>("Roles")
                         .IsRequired()
                         .HasMaxLength(128)

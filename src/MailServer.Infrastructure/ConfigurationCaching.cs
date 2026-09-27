@@ -135,166 +135,198 @@ public sealed class ConfigurationVersionService(
     }
 }
 
+// Request-local bypass keeps administrative reads fresh in a shared run-all host.
+public sealed class ConfigurationCacheBypass : IDisposable
+{
+    private static readonly AsyncLocal<bool> Current = new();
+    private readonly bool _previous = Current.Value;
+    public static bool IsActive => Current.Value;
+    public ConfigurationCacheBypass() => Current.Value = true;
+    public void Dispose() => Current.Value = _previous;
+}
+
 public sealed class ConfigurationSnapshotCache : IDisposable
 {
     private sealed record CacheValue(object Value, long Version, DateTimeOffset LoadedAt, long Size);
-    private sealed record EntryInfo(long Size, object Token, DateTimeOffset LoadedAt);
-
-    private readonly MemoryCache _cache;
-    private readonly ConfigurationCacheOptions _options;
+    private sealed record Failure(int Count, DateTimeOffset RetryAt, Exception Error);
+    private readonly object _sync = new();
+    private readonly Dictionary<string, CacheValue> _entries = new(StringComparer.Ordinal);
+    private readonly LinkedList<string> _lru = new();
+    private readonly Dictionary<string, LinkedListNode<string>> _nodes = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, TaskCompletionSource<CacheValue>> _loads = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, Failure> _failures = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, long> _versions = new(StringComparer.Ordinal);
+    private readonly CancellationTokenSource _lifetime = new();
     private readonly SemaphoreSlim _loadLimit;
-    private readonly ConcurrentDictionary<string, Task<CacheValue>> _loads = new(StringComparer.Ordinal);
-    private readonly ConcurrentDictionary<string, EntryInfo> _entries = new(StringComparer.Ordinal);
-    private readonly ConcurrentDictionary<string, long> _versions = new(StringComparer.OrdinalIgnoreCase);
     private readonly ILogger<ConfigurationSnapshotCache> _logger;
     private readonly Meter _meter = new("MailServer.ConfigurationCache", "1.0.0");
-    private readonly Counter<long> _hitCounter;
-    private readonly Counter<long> _missCounter;
-    private readonly Counter<long> _evictionCounter;
-    private readonly Counter<long> _failureCounter;
+    private readonly Counter<long> _hitCounter, _missCounter, _evictionCounter, _failureCounter;
     private readonly Histogram<double> _loadDuration;
-    private long _hits;
-    private long _misses;
-    private long _reloadFailures;
+    private long _bytes, _hits, _misses, _reloadFailures;
+    private bool _disposed;
     private string? _lastError;
-
-    public ConfigurationSnapshotCache(
-        IOptions<ConfigurationCacheOptions> options,
-        ILogger<ConfigurationSnapshotCache> logger)
+    public ConfigurationCacheOptions Options { get; }
+    public long Hits => Interlocked.Read(ref _hits);
+    public long Misses => Interlocked.Read(ref _misses);
+    public long ReloadFailures => Interlocked.Read(ref _reloadFailures);
+    public string? LastError { get { lock (_sync) return _lastError; } }
+    public int EntryCount { get { lock (_sync) return _entries.Count; } }
+    public int ActiveLoads { get { lock (_sync) return _loads.Count; } }
+    public long EstimatedBytes { get { lock (_sync) return _bytes; } }
+    public ConfigurationVersionsSnapshot Versions
     {
-        _options = options.Value;
+        get { lock (_sync) return new(_versions.GetValueOrDefault(ConfigurationScopes.Rules),
+            _versions.GetValueOrDefault(ConfigurationScopes.Firewall), _versions.GetValueOrDefault(ConfigurationScopes.Settings)); }
+    }
+    public ConfigurationSnapshotCache(IOptions<ConfigurationCacheOptions> options, ILogger<ConfigurationSnapshotCache> logger)
+    {
+        Options = options.Value;
         _logger = logger;
-        _cache = new MemoryCache(new MemoryCacheOptions { SizeLimit = Math.Max(1, _options.SizeLimitBytes) });
-        _loadLimit = new SemaphoreSlim(Math.Clamp(_options.MaximumConcurrentLoads, 1, 32));
+        _loadLimit = new(Math.Clamp(Options.MaximumConcurrentLoads, 1, 32));
         _hitCounter = _meter.CreateCounter<long>("mailserver.config_cache.hits");
         _missCounter = _meter.CreateCounter<long>("mailserver.config_cache.misses");
         _evictionCounter = _meter.CreateCounter<long>("mailserver.config_cache.evictions");
         _failureCounter = _meter.CreateCounter<long>("mailserver.config_cache.reload_failures");
         _loadDuration = _meter.CreateHistogram<double>("mailserver.config_cache.load_duration_ms");
         _meter.CreateObservableGauge("mailserver.config_cache.snapshot_age_seconds", () =>
-            _entries.IsEmpty ? 0 : _entries.Values.Max(x => Math.Max(0, (DateTimeOffset.UtcNow - x.LoadedAt).TotalSeconds)));
-        foreach (var scope in ConfigurationScopes.All) _versions[scope] = 0;
+        {
+            lock (_sync) return _entries.Count == 0 ? 0 : _entries.Values.Max(x => (DateTimeOffset.UtcNow - x.LoadedAt).TotalSeconds);
+        });
     }
-
-    public ConfigurationCacheOptions Options => _options;
-    public long Hits => Interlocked.Read(ref _hits);
-    public long Misses => Interlocked.Read(ref _misses);
-    public long ReloadFailures => Interlocked.Read(ref _reloadFailures);
-    public string? LastError => Volatile.Read(ref _lastError);
-    public int EntryCount => _entries.Count;
-    public long EstimatedBytes => _entries.Values.Sum(x => x.Size);
-    public ConfigurationVersionsSnapshot Versions => new(
-        _versions.GetValueOrDefault(ConfigurationScopes.Rules),
-        _versions.GetValueOrDefault(ConfigurationScopes.Firewall),
-        _versions.GetValueOrDefault(ConfigurationScopes.Settings));
-
     public void ObserveVersions(ConfigurationVersionsSnapshot versions)
     {
-        _versions[ConfigurationScopes.Rules] = versions.Rules;
-        _versions[ConfigurationScopes.Firewall] = versions.Firewall;
-        _versions[ConfigurationScopes.Settings] = versions.Settings;
-    }
-
-    public void ObserveCommittedVersion(string scope, long version) => _versions[scope] = version;
-
-    public async Task<T> GetAsync<T>(
-        string key,
-        string scope,
-        Func<CancellationToken, Task<(T Value, long Size)>> loader,
-        CancellationToken cancellationToken)
-        where T : class
-    {
-        if (!_options.Enabled)
+        lock (_sync)
         {
-            var uncached = await loader(cancellationToken);
-            return uncached.Value;
+            _versions[ConfigurationScopes.Rules] = Math.Max(versions.Rules, _versions.GetValueOrDefault(ConfigurationScopes.Rules));
+            _versions[ConfigurationScopes.Firewall] = Math.Max(versions.Firewall, _versions.GetValueOrDefault(ConfigurationScopes.Firewall));
+            _versions[ConfigurationScopes.Settings] = Math.Max(versions.Settings, _versions.GetValueOrDefault(ConfigurationScopes.Settings));
         }
-
-        var expectedVersion = _versions.GetValueOrDefault(scope);
-        CacheValue? stale = null;
-        if (_cache.TryGetValue(key, out CacheValue? existing) && existing is not null)
+    }
+    public void ObserveCommittedVersion(string scope, long version)
+    {
+        lock (_sync) _versions[scope] = Math.Max(version, _versions.GetValueOrDefault(scope));
+    }
+    public void Resize(long size, long entrySize)
+    {
+        lock (_sync)
         {
-            stale = existing;
-            if (existing.Version == expectedVersion
-                && DateTimeOffset.UtcNow - existing.LoadedAt < TimeSpan.FromSeconds(Math.Max(1, _options.AbsoluteRefreshSeconds)))
+            Options.SizeLimitBytes = Math.Max(0, size);
+            Options.MaximumEntryBytes = Math.Max(0, Math.Min(size, entrySize));
+            foreach (var key in _entries.Where(x => x.Value.Size > Options.MaximumEntryBytes).Select(x => x.Key).ToArray()) Remove(key);
+            while (_bytes > Options.SizeLimitBytes && _lru.First is not null) Remove(_lru.First.Value);
+        }
+    }
+    private void Remove(string key)
+    {
+        if (!_entries.Remove(key, out var entry)) return;
+        _bytes -= entry.Size;
+        _lru.Remove(_nodes[key]);
+        _nodes.Remove(key);
+        _evictionCounter.Add(1);
+    }
+    public async Task<T> GetAsync<T>(string key, string scope,
+        Func<CancellationToken, Task<(T Value, long Size)>> loader, CancellationToken cancellationToken) where T : class
+    {
+        if (!Options.Enabled || ConfigurationCacheBypass.IsActive) return (await loader(cancellationToken)).Value;
+        cancellationToken.ThrowIfCancellationRequested();
+        CacheValue? stale;
+        TaskCompletionSource<CacheValue> source;
+        bool owner = false;
+        long version;
+        lock (_sync)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            version = _versions.GetValueOrDefault(scope);
+            _entries.TryGetValue(key, out stale);
+            if (stale is not null && stale.Version == version
+                && DateTimeOffset.UtcNow - stale.LoadedAt < TimeSpan.FromSeconds(Math.Max(1, Options.AbsoluteRefreshSeconds)))
             {
+                _lru.Remove(_nodes[key]);
+                _lru.AddLast(_nodes[key]);
                 Interlocked.Increment(ref _hits);
-                _hitCounter.Add(1, new KeyValuePair<string, object?>("scope", scope));
-                return (T)existing.Value;
+                _hitCounter.Add(1);
+                return (T)stale.Value;
+            }
+            if (_failures.TryGetValue(scope, out var failure) && DateTimeOffset.UtcNow < failure.RetryAt)
+            {
+                if (stale is not null) return (T)stale.Value;
+                throw new InvalidOperationException("Configuration temporarily unavailable; retry later.", failure.Error);
+            }
+            Interlocked.Increment(ref _misses);
+            _missCounter.Add(1);
+            if (!_loads.TryGetValue(key, out source!))
+            {
+                source = new(TaskCreationOptions.RunContinuationsAsynchronously);
+                _loads.Add(key, source);
+                owner = true;
+                // Observe faults even if all request waiters cancel before the load finishes.
+                _ = source.Task.ContinueWith(t => { _ = t.Exception; }, CancellationToken.None,
+                    TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
             }
         }
-
-        Interlocked.Increment(ref _misses);
-        _missCounter.Add(1, new KeyValuePair<string, object?>("scope", scope));
-        var task = _loads.GetOrAdd(key, _ => LoadAsync(key, scope, expectedVersion, loader, cancellationToken));
-        try
+        if (owner) _ = LoadAsync(key, scope, version, loader, source);
+        try { return (T)(await source.Task.WaitAsync(cancellationToken)).Value; }
+        catch (Exception error) when (error is not OperationCanceledException && stale is not null)
         {
-            return (T)(await task.WaitAsync(cancellationToken)).Value;
-        }
-        catch (Exception exception) when (exception is not OperationCanceledException && stale is not null)
-        {
-            _logger.LogError(exception, "Configuration snapshot {CacheKey} could not be refreshed; using version {Version}.", key, stale.Version);
             return (T)stale.Value;
         }
-        finally
-        {
-            if (task.IsCompleted) _loads.TryRemove(new KeyValuePair<string, Task<CacheValue>>(key, task));
-        }
     }
-
-    private async Task<CacheValue> LoadAsync<T>(
-        string key,
-        string scope,
-        long version,
-        Func<CancellationToken, Task<(T Value, long Size)>> loader,
-        CancellationToken cancellationToken)
-        where T : class
+    private async Task LoadAsync<T>(string key, string scope, long version,
+        Func<CancellationToken, Task<(T Value, long Size)>> loader, TaskCompletionSource<CacheValue> source) where T : class
     {
-        await _loadLimit.WaitAsync(cancellationToken);
+        bool entered = false;
         var stopwatch = Stopwatch.StartNew();
         try
         {
-            var loaded = await loader(cancellationToken);
-            var size = Math.Max(1, loaded.Size);
-            var value = new CacheValue(loaded.Value, version, DateTimeOffset.UtcNow, size);
-            if (size <= _options.MaximumEntryBytes && size <= _options.SizeLimitBytes)
+            await _loadLimit.WaitAsync(_lifetime.Token);
+            entered = true;
+            var loaded = await loader(_lifetime.Token);
+            var value = new CacheValue(loaded.Value, version, DateTimeOffset.UtcNow, Math.Max(1, loaded.Size));
+            lock (_sync)
             {
-                var token = new object();
-                var options = new MemoryCacheEntryOptions().SetSize(size).RegisterPostEvictionCallback((cacheKey, _, _, _) =>
+                if (!_disposed && value.Size <= Options.MaximumEntryBytes && value.Size <= Options.SizeLimitBytes)
                 {
-                    if (cacheKey is string text
-                        && _entries.TryGetValue(text, out var current)
-                        && ReferenceEquals(current.Token, token))
-                    {
-                        _entries.TryRemove(text, out _);
-                    }
-                    _evictionCounter.Add(1, new KeyValuePair<string, object?>("scope", scope));
-                });
-                _entries[key] = new EntryInfo(size, token, value.LoadedAt);
-                _cache.Set(key, value, options);
+                    Remove(key);
+                    while (_bytes + value.Size > Options.SizeLimitBytes && _lru.First is not null) Remove(_lru.First.Value);
+                    _entries[key] = value;
+                    _nodes[key] = _lru.AddLast(key);
+                    _bytes += value.Size;
+                }
+                _failures.Remove(scope);
+                _lastError = _failures.Values.FirstOrDefault()?.Error.Message;
+                _loads.Remove(key);
+                source.TrySetResult(value);
             }
-            Volatile.Write(ref _lastError, null);
-            return value;
         }
-        catch (Exception exception) when (exception is not OperationCanceledException)
+        catch (OperationCanceledException)
+        {
+            lock (_sync) { _loads.Remove(key); source.TrySetCanceled(); }
+        }
+        catch (Exception error)
         {
             Interlocked.Increment(ref _reloadFailures);
-            _failureCounter.Add(1, new KeyValuePair<string, object?>("scope", scope));
-            Volatile.Write(ref _lastError, exception.Message);
-            throw;
+            _failureCounter.Add(1);
+            lock (_sync)
+            {
+                var count = Math.Min(5, (_failures.GetValueOrDefault(scope)?.Count ?? 0) + 1);
+                _failures[scope] = new(count, DateTimeOffset.UtcNow.AddSeconds(Math.Min(30, 3 * Math.Pow(2, count - 1))), error);
+                _lastError = error.Message;
+                _loads.Remove(key);
+                source.TrySetException(error);
+            }
+            _logger.LogWarning(error, "Configuration reload failed for {Scope}; retry is backed off.", scope);
         }
         finally
         {
-            stopwatch.Stop();
-            _loadDuration.Record(stopwatch.Elapsed.TotalMilliseconds, new KeyValuePair<string, object?>("scope", scope));
-            _loadLimit.Release();
+            if (entered) _loadLimit.Release();
+            _loadDuration.Record(stopwatch.Elapsed.TotalMilliseconds);
         }
     }
-
     public void Dispose()
     {
-        _cache.Dispose();
-        _loadLimit.Dispose();
+        lock (_sync) { _disposed = true; _entries.Clear(); _nodes.Clear(); _lru.Clear(); _bytes = 0; }
+        _lifetime.Cancel();
+        // In-flight loads own the semaphore until they complete.
         _meter.Dispose();
     }
 }
@@ -303,12 +335,40 @@ public sealed class ConfigurationCacheMonitor(
     IDbContextFactory<MailDbContext> dbFactory,
     ConfigurationVersionService versions,
     ConfigurationSnapshotCache cache,
-    IConfiguration configuration,
     IOptions<ConfigurationCacheOptions> options,
-    ILogger<ConfigurationCacheMonitor> logger) : BackgroundService
+    ILogger<ConfigurationCacheMonitor> logger,
+    ResourceSettingsService resources,
+    ResourceRuntime runtime) : BackgroundService
 {
     private readonly string _processId = $"{Environment.MachineName}:{Environment.ProcessId}:{Guid.NewGuid():N}";
     private readonly DateTimeOffset _startedAt = DateTimeOffset.UtcNow;
+    private long _settingsVersion = -1;
+    private DateTimeOffset _lastResourceRead = DateTimeOffset.MinValue;
+    private bool _heartbeatRequested;
+
+    public override async Task StartAsync(CancellationToken cancellationToken)
+    {
+        try { await RefreshAsync(cancellationToken); }
+        catch (Exception error) when (error is not OperationCanceledException)
+        {
+            runtime.MarkFailed();
+            logger.LogWarning(error, "Resource settings unavailable during startup; configured limits remain active.");
+        }
+        await base.StartAsync(cancellationToken);
+    }
+
+    private async Task RefreshAsync(CancellationToken token)
+    {
+        var current = await versions.ReadAsync(token);
+        if (current.Settings != _settingsVersion || DateTimeOffset.UtcNow - _lastResourceRead >= TimeSpan.FromSeconds(60))
+        {
+            runtime.Apply((await resources.ReadAsync(token)).ProfileId, cache);
+            _heartbeatRequested = true;
+            _settingsVersion = current.Settings;
+            _lastResourceRead = DateTimeOffset.UtcNow;
+        }
+        cache.ObserveVersions(current);
+    }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -318,16 +378,22 @@ public sealed class ConfigurationCacheMonitor(
         {
             try
             {
-                cache.ObserveVersions(await versions.ReadAsync(stoppingToken));
-                if (DateTimeOffset.UtcNow >= nextHeartbeat)
+                await RefreshAsync(stoppingToken);
+                if (_heartbeatRequested || DateTimeOffset.UtcNow >= nextHeartbeat)
                 {
                     await WriteHeartbeatAsync(stoppingToken);
+                    _heartbeatRequested = false;
                     nextHeartbeat = DateTimeOffset.UtcNow.AddSeconds(Math.Max(5, options.Value.StatusHeartbeatSeconds));
                 }
             }
             catch (Exception exception) when (exception is not OperationCanceledException)
             {
+                runtime.MarkFailed();
+                _settingsVersion = -1;
                 logger.LogError(exception, "Configuration version polling failed; existing snapshots remain active.");
+                try { await WriteHeartbeatAsync(stoppingToken); }
+                catch (Exception heartbeatError) when (heartbeatError is not OperationCanceledException)
+                { logger.LogDebug(heartbeatError, "Unable to report resource state."); }
             }
             await Task.Delay(poll, stoppingToken);
         }
@@ -354,6 +420,7 @@ public sealed class ConfigurationCacheMonitor(
         status.Misses = cache.Misses;
         status.ReloadFailures = cache.ReloadFailures;
         status.LastError = cache.LastError;
+        status.ResourceStatusJson = System.Text.Json.JsonSerializer.Serialize(runtime.Snapshot());
         var cutoff = now.AddHours(-Math.Max(1, options.Value.ProcessRetentionHours));
         await db.ConfigurationProcessStatuses.Where(x => x.LastSeenAt < cutoff).ExecuteDeleteAsync(cancellationToken);
         await db.SaveChangesAsync(cancellationToken);
@@ -361,12 +428,6 @@ public sealed class ConfigurationCacheMonitor(
 
     private string ResolveRoles()
     {
-        var name = AppDomain.CurrentDomain.FriendlyName;
-        if (name.Contains("Api", StringComparison.OrdinalIgnoreCase))
-            return configuration.GetValue("RunAll:Enabled", false) ? "api,smtp,imap,worker" : "api";
-        if (name.Contains("Smtp", StringComparison.OrdinalIgnoreCase)) return "smtp";
-        if (name.Contains("Imap", StringComparison.OrdinalIgnoreCase)) return "imap";
-        if (name.Contains("Worker", StringComparison.OrdinalIgnoreCase)) return "worker";
-        return "unknown";
+        return runtime.Role == "all" ? "smtp,imap,worker" : runtime.Role;
     }
 }

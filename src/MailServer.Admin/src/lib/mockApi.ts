@@ -501,23 +501,15 @@ const previewSettings: Record<string, Record<string, unknown>> = {
     availableMailHostNames: ['mail.northwind.cn', 'mx.acme-mail.com'],
     effectiveDefaultMailHostName: 'mail.northwind.cn',
   },
-  '/settings/cache-status': {
-    savedVersions: { rules: 14, firewall: 6, settings: 9 },
-    sizeLimitBytes: 4_194_304,
-    processStaleSeconds: 90,
-    processes: [
-      {
-        processId: 'preview-api-4120', instanceName: 'preview-host', roles: ['api'],
-        lastSeenAt: '2026-09-27T04:30:00Z', appliedVersions: { rules: 14, firewall: 6, settings: 9 },
-        estimatedCacheBytes: 786_432, entryCount: 18, hits: 1842, misses: 31, reloadFailures: 0,
-        lastError: null, state: 'current',
-      },
-      {
-        processId: 'preview-worker-4124', instanceName: 'preview-host', roles: ['worker'],
-        lastSeenAt: '2026-09-27T04:29:48Z', appliedVersions: { rules: 14, firewall: 6, settings: 9 },
-        estimatedCacheBytes: 344_064, entryCount: 8, hits: 926, misses: 12, reloadFailures: 1,
-        lastError: '上一次设置刷新失败，当前继续使用已有快照。', state: 'current',
-      },
+  '/settings/resources': {
+    profileId: '1gb',
+    profiles: [
+      { id: '512mb', label: '极小 · 512 MB', cacheBytes: 4194304, entryBytes: 524288, deliveryConcurrency: 1, smtpConnections: 8, imapConnections: 16 },
+      { id: '1gb', label: '小型 · 1 GB', cacheBytes: 8388608, entryBytes: 1048576, deliveryConcurrency: 2, smtpConnections: 16, imapConnections: 32 },
+      { id: '2gb', label: '轻量 · 2 GB', cacheBytes: 16777216, entryBytes: 2097152, deliveryConcurrency: 4, smtpConnections: 32, imapConnections: 64 },
+      { id: '4gb', label: '标准 · 4 GB', cacheBytes: 33554432, entryBytes: 4194304, deliveryConcurrency: 8, smtpConnections: 64, imapConnections: 128 },
+      { id: '8gb', label: '增强 · 8 GB', cacheBytes: 67108864, entryBytes: 8388608, deliveryConcurrency: 16, smtpConnections: 128, imapConnections: 256 },
+      { id: '16gb', label: '大型 · 16 GB 以上', cacheBytes: 134217728, entryBytes: 16777216, deliveryConcurrency: 32, smtpConnections: 256, imapConnections: 512 },
     ],
   },
   '/settings/message-templates': { senderDisplayName: '邮件投递系统', permanentFailureSubject: '邮件投递失败', permanentFailureBody: '<p>收件人：{recipient}</p><p>失败原因：{reason}</p>', retryExhaustedSubject: '邮件重试次数已用尽', retryExhaustedBody: '<p>向 {recipient} 投递已尝试 {attempts} 次。</p><p>{reason}</p>', quotaExceededSubject: '邮件投递失败：收件方容量超限', quotaExceededBody: '<p>收件人：{recipient}</p><p>{reason}</p><p>请您手动联系收件人，请其清理邮箱或增加容量后再重新发送邮件。</p>' },
@@ -1376,6 +1368,19 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
     })
     return { renderedSubject: replace(request.subject, false), renderedHtml: replace(request.body, true) } as T
   }
+  if (url.pathname === '/settings/resources/status' && method === 'GET') {
+    const settings = previewSettings['/settings/resources']!
+    const profile = (settings.profiles as import('./resources').ResourceProfile[]).find(x => x.id === settings.profileId)!
+    return {
+      totalCacheBudgetBytes: profile.cacheBytes,
+      processes: [{
+        processId: 'preview-all', instanceName: 'preview-host', roles: ['smtp', 'imap', 'worker'],
+        lastSeenAt: new Date().toISOString(), estimatedCacheBytes: 344064, state: 'applied', message: null,
+        usage: { profileId: profile.id, cacheBudgetBytes: profile.cacheBytes, deliveryLimit: profile.deliveryConcurrency,
+          smtpLimit: profile.smtpConnections, imapLimit: profile.imapConnections, activeDeliveries: 1, activeSmtp: 2, activeImap: 3 },
+      }],
+    } as T
+  }
   if (previewSettings[url.pathname]) {
     if (method === 'PUT') {
       const input = JSON.parse(String(init.body)) as Record<string, unknown>
@@ -1408,6 +1413,10 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
           detail: '更新永久失败、重试耗尽与超限退信模板', remoteAddress: '127.0.0.1', requestId: `req-template-${Date.now()}`,
           createdAt: new Date().toISOString(), changes: [],
         })
+      } else if (url.pathname === '/settings/resources') {
+        const current = previewSettings[url.pathname]!
+        if (!(current.profiles as import('./resources').ResourceProfile[]).some(x => x.id === input.profileId)) throw new Error('请选择有效的内存档位。')
+        previewSettings[url.pathname] = { ...current, profileId: input.profileId }
       } else if (url.pathname === '/settings/delivery') {
         const batchSize = Number(input.batchSize)
         const leaseSeconds = Number(input.leaseSeconds)

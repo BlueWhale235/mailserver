@@ -3,11 +3,13 @@ import { defineComponent, nextTick } from 'vue'
 import { flushPromises, shallowMount } from '@vue/test-utils'
 import SystemSettingsView from './SystemSettingsView.vue'
 import { api } from '../../lib/api'
+import { mockApi } from '../../lib/mockApi'
 
 let leaveGuard: (() => boolean | Promise<boolean>) | undefined
+let canManage = true
 
 vi.mock('../../lib/api', () => ({ api: vi.fn(), jsonBody: (value: unknown) => JSON.stringify(value) }))
-vi.mock('../../composables/usePermission', () => ({ usePermission: () => ({ can: () => true }) }))
+vi.mock('../../composables/usePermission', () => ({ usePermission: () => ({ can: () => canManage }) }))
 vi.mock('vue-router', () => ({
   onBeforeRouteLeave: (guard: () => boolean | Promise<boolean>) => { leaveGuard = guard },
 }))
@@ -70,9 +72,11 @@ function mountView() {
 const delivery = { batchSize: 20, leaseSeconds: 120, maximumAttempts: 5, pollIntervalSeconds: 5 }
 
 beforeEach(() => {
+  canManage = true
   leaveGuard = undefined
   vi.mocked(api).mockReset()
   vi.mocked(api).mockImplementation(async path => {
+    if (path.startsWith('/settings/resources')) return mockApi(path) as never
     if (path === '/settings/delivery') return { ...delivery } as never
     if (path === '/settings/smtp') return { commandTimeoutSeconds: 300 } as never
     if (path === '/settings/mailboxes') return { defaultFolders: ['INBOX', 'Sent', 'Drafts', 'Trash', 'Junk', 'Archives'] } as never
@@ -91,6 +95,56 @@ afterEach(() => {
 })
 
 describe('system settings safeguards', () => {
+  it('shows six memory profiles, previews limits, supports undo and saves only the selection', async () => {
+    const previous = vi.mocked(api).getMockImplementation()!
+    vi.mocked(api).mockImplementation(async (path, init) => {
+      if (path.startsWith('/settings/resources')) return mockApi(path, init) as never
+      return previous(path, init)
+    })
+    const wrapper = mountView()
+    await flushPromises()
+    await wrapper.findAll('.settings-nav button').find(x => x.text().includes('资源与性能'))!.trigger('click')
+    expect(wrapper.findAll('[role="radio"]')).toHaveLength(6)
+    expect(wrapper.text()).not.toContain('命中统计')
+    expect(wrapper.text()).not.toContain('规则版本')
+    await wrapper.findAll('[role="radio"]').find(x => x.text().includes('16 GB'))!.trigger('click')
+    expect(wrapper.find('.cache-summary').text()).toContain('128.00 MiB')
+    expect(wrapper.text()).toContain('当前分区有未保存修改')
+    await wrapper.findAll('button').find(x => x.text() === '撤销当前修改')!.trigger('click')
+    expect(wrapper.text()).not.toContain('当前分区有未保存修改')
+    await wrapper.findAll('[role="radio"]').find(x => x.text().includes('16 GB'))!.trigger('click')
+    await wrapper.findAll('button').find(x => x.text() === '保存当前设置')!.trigger('click')
+    await flushPromises()
+    expect(api).toHaveBeenCalledWith('/settings/resources', { method: 'PUT', body: JSON.stringify({ profileId: '16gb' }) })
+    expect(wrapper.text()).toContain('资源与性能已保存')
+    wrapper.unmount()
+  })
+
+  it('keeps resource editing available when status reporting fails', async () => {
+    const previous = vi.mocked(api).getMockImplementation()!
+    vi.mocked(api).mockImplementation(async (path, init) => {
+      if (path === '/settings/resources/status') throw new Error('database details must not be displayed')
+      return previous(path, init)
+    })
+    const wrapper = mountView()
+    await flushPromises()
+    await wrapper.findAll('.settings-nav button').find(x => x.text().includes('资源与性能'))!.trigger('click')
+    expect(wrapper.findAll('[role="radio"]')).toHaveLength(6)
+    expect(wrapper.text()).toContain('暂时无法获取服务状态')
+    expect(wrapper.text()).not.toContain('database details')
+    wrapper.unmount()
+  })
+
+  it('does not allow read-only administrators to change the resource profile', async () => {
+    canManage = false
+    const wrapper = mountView()
+    await flushPromises()
+    await wrapper.findAll('.settings-nav button').find(x => x.text().includes('资源与性能'))!.trigger('click')
+    expect(wrapper.findAll('[role="radio"]').every(x => x.attributes('disabled') !== undefined)).toBe(true)
+    expect(wrapper.findAll('button').some(x => x.text() === '保存当前设置')).toBe(false)
+    wrapper.unmount()
+  })
+
   it('uses an in-page confirmation dialog when leaving with unsaved settings', async () => {
     const confirm = vi.spyOn(globalThis, 'confirm')
     const wrapper = mountView()
@@ -111,6 +165,7 @@ describe('system settings safeguards', () => {
   it('locks section navigation while saving and keeps the success label tied to the saved section', async () => {
     const pendingSave = deferred<typeof delivery>()
     vi.mocked(api).mockImplementation(async (path, init) => {
+      if (path.startsWith('/settings/resources')) return mockApi(path, init) as never
       if (path === '/settings/delivery' && init?.method === 'PUT') return pendingSave.promise as never
       if (path === '/settings/delivery') return { ...delivery } as never
       if (path === '/settings/smtp') return { commandTimeoutSeconds: 300 } as never

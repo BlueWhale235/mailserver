@@ -3,11 +3,9 @@ x-mailserver-common: &mailserver-common
   depends_on:
     mysql:
       condition: service_healthy
-  environment:
+  environment: &mailserver-environment
     Database__Provider: ${DATABASE_PROVIDER:-MySql}
     ConnectionStrings__MailDatabase: ${MAIL_DATABASE_CONNECTION:-Server=mysql;Port=3306;Database=mailserver;User=mailserver;Password=mailserver}
-    ConfigurationCache__SizeLimitBytes: ${CONFIG_CACHE_PROCESS_BYTES:-1048576}
-    ConfigurationCache__MaximumEntryBytes: ${CONFIG_CACHE_ENTRY_BYTES:-524288}
     MAILSERVER_CONFIG: /app/mailserver.json
     Storage__RootPath: /data/messages
     Plugins__Path: /app/plugins
@@ -22,10 +20,7 @@ services:
       args:
         PROJECT: MailServer.Api
     environment:
-      Database__Provider: ${DATABASE_PROVIDER:-MySql}
-      ConnectionStrings__MailDatabase: ${MAIL_DATABASE_CONNECTION:-Server=mysql;Port=3306;Database=mailserver;User=mailserver;Password=mailserver}
-      Storage__RootPath: /data/messages
-      Plugins__Path: /app/plugins
+      <<: *mailserver-environment
       AdminServer__BindAddress: 0.0.0.0
       AdminServer__Http__Enabled: ${ADMIN_HTTP_ENABLED:-true}
       AdminServer__Http__Port: ${ADMIN_HTTP_PORT:-8080}
@@ -53,10 +48,7 @@ services:
       args:
         PROJECT: MailServer.Smtp
     environment:
-      Database__Provider: ${DATABASE_PROVIDER:-MySql}
-      ConnectionStrings__MailDatabase: ${MAIL_DATABASE_CONNECTION:-Server=mysql;Port=3306;Database=mailserver;User=mailserver;Password=mailserver}
-      Storage__RootPath: /data/messages
-      Plugins__Path: /app/plugins
+      <<: *mailserver-environment
       Smtp__HostName: ${MAIL_HOSTNAME}
     volumes:
       - message-data:/data/messages
@@ -75,10 +67,7 @@ services:
       args:
         PROJECT: MailServer.Imap
     environment:
-      Database__Provider: ${DATABASE_PROVIDER:-MySql}
-      ConnectionStrings__MailDatabase: ${MAIL_DATABASE_CONNECTION:-Server=mysql;Port=3306;Database=mailserver;User=mailserver;Password=mailserver}
-      Storage__RootPath: /data/messages
-      Plugins__Path: /app/plugins
+      <<: *mailserver-environment
       Imap__HostName: ${MAIL_HOSTNAME}
     volumes:
       - message-data:/data/messages
@@ -96,10 +85,7 @@ services:
       args:
         PROJECT: MailServer.Worker
     environment:
-      Database__Provider: ${DATABASE_PROVIDER:-MySql}
-      ConnectionStrings__MailDatabase: ${MAIL_DATABASE_CONNECTION:-Server=mysql;Port=3306;Database=mailserver;User=mailserver;Password=mailserver}
-      Storage__RootPath: /data/messages
-      Plugins__Path: /app/plugins
+      <<: *mailserver-environment
       Worker__HostName: ${MAIL_HOSTNAME}
     volumes:
       - message-data:/data/messages

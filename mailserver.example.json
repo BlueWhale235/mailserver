@@ -70,7 +70,6 @@
   "Smtp": {
     "HostName": "mail.localhost",
     "CommandTimeoutSeconds": 300,
-    "MaximumConnections": 200,
     "MaximumRecipients": 100,
     "MaximumMessageBytes": 52428800,
     "Endpoints": [
@@ -94,7 +93,6 @@
   "Imap": {
     "HostName": "mail.localhost",
     "CommandTimeoutSeconds": 1800,
-    "MaximumConnections": 200,
     "MaximumAppendBytes": 52428800,
     "IdlePollSeconds": 15,
     "AuthenticationMechanisms": [ "LOGIN", "PLAIN", "XOAUTH2", "OAUTHBEARER" ],

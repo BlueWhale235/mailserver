@@ -93,7 +93,7 @@ public sealed class DeliveryQueue(
         {
             var tracked = await db.DeliveryJobs.SingleOrDefaultAsync(x => x.Id == lease.Job.Id, cancellationToken);
             if (tracked is null || tracked.Status != DeliveryStatus.Processing
-                || tracked.LeaseOwner != lease.Owner || tracked.Attempts != lease.Attempt)
+                || tracked.LeaseOwner != lease.Owner || tracked.Attempts != lease.Attempt || tracked.LeaseUntil <= now)
                 return false;
             tracked.LeaseUntil = now.Add(duration);
             tracked.UpdatedAt = now;
@@ -103,7 +103,7 @@ public sealed class DeliveryQueue(
         var changed = await db.DeliveryJobs.Where(x => x.Id == lease.Job.Id
                 && x.Status == DeliveryStatus.Processing
                 && x.LeaseOwner == lease.Owner
-                && x.Attempts == lease.Attempt)
+                && x.Attempts == lease.Attempt && x.LeaseUntil > now)
             .ExecuteUpdateAsync(setters => setters
                 .SetProperty(x => x.LeaseUntil, now.Add(duration))
                 .SetProperty(x => x.UpdatedAt, now), cancellationToken);
@@ -118,10 +118,11 @@ public sealed class DeliveryQueue(
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         await using var transaction = db.Database.IsRelational()
             ? await db.Database.BeginTransactionAsync(cancellationToken) : null;
+        var completionTime = DateTimeOffset.UtcNow;
         var job = await db.DeliveryJobs.SingleOrDefaultAsync(x => x.Id == lease.Job.Id
             && x.Status == DeliveryStatus.Processing
             && x.LeaseOwner == lease.Owner
-            && x.Attempts == lease.Attempt, cancellationToken);
+            && x.Attempts == lease.Attempt && x.LeaseUntil > completionTime, cancellationToken);
         if (job is null)
         {
             logger.LogWarning(
@@ -174,6 +175,22 @@ public sealed class DeliveryQueue(
             attempt.NextRetryAt = job.NextAttemptAt;
         }
 
+        if (db.Database.IsRelational())
+        {
+            // The read above is not a lock on MySQL: recheck ownership in the write itself.
+            var now = DateTimeOffset.UtcNow;
+            var applied = await db.DeliveryJobs.Where(x => x.Id == job.Id && x.Status == DeliveryStatus.Processing
+                    && x.LeaseOwner == lease.Owner && x.Attempts == lease.Attempt && x.LeaseUntil > now)
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(x => x.Status, job.Status)
+                    .SetProperty(x => x.LeaseOwner, (string?)null)
+                    .SetProperty(x => x.LeaseUntil, (DateTimeOffset?)null)
+                    .SetProperty(x => x.LastError, job.LastError)
+                    .SetProperty(x => x.UpdatedAt, job.UpdatedAt)
+                    .SetProperty(x => x.NextAttemptAt, job.NextAttemptAt), cancellationToken);
+            if (applied == 0) return new DeliveryCompletion(false, null, false);
+            db.Entry(job).State = EntityState.Unchanged;
+        }
         await db.SaveChangesAsync(cancellationToken);
         if (transaction is not null) await transaction.CommitAsync(cancellationToken);
         logger.LogInformation(

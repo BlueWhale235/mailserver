@@ -269,6 +269,10 @@ namespace MailServer.Migrations.Sqlite.Migrations
                     b.Property<long>("ReloadFailures")
                         .HasColumnType("INTEGER");
 
+                    b.Property<string>("ResourceStatusJson")
+                        .HasMaxLength(8192)
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("Roles")
                         .IsRequired()
                         .HasMaxLength(128)

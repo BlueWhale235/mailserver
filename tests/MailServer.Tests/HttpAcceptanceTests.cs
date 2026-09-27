@@ -20,6 +20,59 @@ namespace MailServer.Tests;
 public sealed class HttpAcceptanceTests
 {
     [Fact]
+    public async Task ResourceProfilesPropagateFromIndependentProcessToRunAll()
+    {
+        await using var host = await AcceptanceHost.StartAsync(runAll: true);
+        foreach (var profileId in new[] { "4gb", "512mb" })
+        {
+            // This service writes from the test process; the mail host has its own cache and monitor.
+            await host.SaveResourceProfileAsync(profileId);
+            var applied = false;
+            for (var attempt = 0; attempt < 100; attempt++)
+            {
+                var status = await host.JsonAsync(HttpMethod.Get, "/api/v1/settings/resources/status");
+                applied = status.GetProperty("processes").EnumerateArray().Any(x =>
+                    x.GetProperty("state").GetString() == "applied"
+                    && x.GetProperty("usage").GetProperty("profileId").GetString() == profileId);
+                if (applied)
+                {
+                    Assert.Equal(ResourceProfiles.Get(profileId).CacheBytes,
+                        status.GetProperty("totalCacheBudgetBytes").GetInt64());
+                    break;
+                }
+                await Task.Delay(100);
+            }
+            Assert.True(applied, $"Independent mail host did not apply {profileId}.");
+        }
+    }
+
+    [Fact]
+    public async Task ResourceSettingsAreValidatedPersistedAndPermissionProtected()
+    {
+        await using var host = await AcceptanceHost.StartAsync();
+        const string path = "/api/v1/settings/resources";
+        var original = await host.JsonAsync(HttpMethod.Get, path);
+        Assert.Equal(6, original.GetProperty("profiles").GetArrayLength());
+        await host.JsonAsync(HttpMethod.Put, path, new { profileId = "invalid" }, 400);
+        await host.JsonAsync(HttpMethod.Put, path, new { profileId = "4gb" });
+        Assert.Equal("4gb", (await host.JsonAsync(HttpMethod.Get, path)).GetProperty("profileId").GetString());
+        var status = await host.JsonAsync(HttpMethod.Get, path + "/status");
+        Assert.Empty(status.GetProperty("processes").EnumerateArray());
+        using var anonymous = await host.Anonymous.GetAsync(path);
+        Assert.Equal(HttpStatusCode.Unauthorized, anonymous.StatusCode);
+        await host.JsonAsync(HttpMethod.Post, "/api/v1/admins", new { userName = "resources-reader", password = AcceptanceHost.Password,
+            isEnabled = true, grants = new[] { new { permissionCode = "settings.read", resourceType = "", resourceKey = "" } } }, 201);
+        using var reader = await host.LoginAsync("resources-reader");
+        using var read = await reader.GetAsync(path);
+        Assert.Equal(HttpStatusCode.OK, read.StatusCode);
+        using var forbidden = await reader.PutAsJsonAsync(path, new { profileId = "16gb" });
+        Assert.Equal(HttpStatusCode.Forbidden, forbidden.StatusCode);
+        await using var db = await host.Factory.CreateDbContextAsync();
+        Assert.Equal("4gb", (await db.SystemSettings.SingleAsync(x => x.Key == ResourceSettingsService.Key)).Value);
+        Assert.True(await db.AuditRecords.AnyAsync(x => x.Action == "settings.resources.update"));
+    }
+
+    [Fact]
     public async Task QuotaTemplateEndpointsPreserveLegacyUpdatesAndPreviewQuotaReason()
     {
         await using var host = await AcceptanceHost.StartAsync();
@@ -579,7 +632,10 @@ public sealed class HttpAcceptanceTests
             process.ErrorDataReceived += (_, args) => { if (args.Data is { } line) lock (logs) logs.Add(line); };
         }
 
-        public static async Task<AcceptanceHost> StartAsync()
+        public Task<ResourceSettingsView> SaveResourceProfileAsync(string id) =>
+            services.GetRequiredService<ResourceSettingsService>().SaveAsync(id, "independent-process", CancellationToken.None);
+
+        public static async Task<AcceptanceHost> StartAsync(bool runAll = false)
         {
             var root = Path.Combine(Path.GetTempPath(), "mailserver-http-acceptance-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(root);
@@ -596,7 +652,11 @@ public sealed class HttpAcceptanceTests
                 ["AdminServer:BindAddress"] = "127.0.0.1", ["AdminServer:Http:Enabled"] = "true",
                 ["AdminServer:Http:Port"] = port.ToString(), ["AdminServer:Https:Enabled"] = "false",
                 ["Jwt:SigningKey"] = "acceptance-only-signing-key-" + Guid.NewGuid().ToString("N"),
-                ["RunAll:Enabled"] = "false", ["MailServerLogging:File:Enabled"] = "false",
+                ["RunAll:Enabled"] = runAll.ToString(), ["MailServerLogging:File:Enabled"] = "false",
+                ["Smtp:Endpoints:0:Address"] = "127.0.0.1", ["Smtp:Endpoints:0:Port"] = "0",
+                ["Smtp:Endpoints:0:Security"] = "Plain",
+                ["Imap:Endpoints:0:Address"] = "127.0.0.1", ["Imap:Endpoints:0:Port"] = "0",
+                ["Imap:Endpoints:0:Security"] = "Plain",
                 ["Logging:LogLevel:Default"] = "Warning"
             };
             var config = new ConfigurationBuilder().AddInMemoryCollection(values).Build();

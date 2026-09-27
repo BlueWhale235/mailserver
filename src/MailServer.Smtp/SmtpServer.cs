@@ -80,18 +80,19 @@ public sealed class SmtpServerService(
     ILogger<SmtpServerService> logger,
     IpFirewallService? firewall = null,
     IOptions<SmtpAbuseOptions>? abuseOptions = null,
-    SystemSettingsService? systemSettings = null) : BackgroundService
+    SystemSettingsService? systemSettings = null,
+    ResourceRuntime? resources = null) : BackgroundService
 {
     private readonly SmtpServerOptions _options = options.Value;
     private readonly List<TcpListener> _listeners = [];
     private readonly List<Task> _acceptLoops = [];
-    private SemaphoreSlim _connectionLimit = null!;
+    private AdjustableConcurrencyLimit _connectionLimit = null!;
     private readonly SmtpAuthFailureLimiter _authFailures = new(abuseOptions?.Value ?? new SmtpAbuseOptions());
     private volatile bool _stopping;
 
     protected override Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        _connectionLimit = new SemaphoreSlim(_options.MaximumConnections);
+        _connectionLimit = resources?.Smtp ?? new AdjustableConcurrencyLimit(_options.MaximumConnections);
         foreach (var endpoint in _options.Endpoints)
         {
             if (!IPAddress.TryParse(endpoint.Address, out var bindAddress))
@@ -167,13 +168,31 @@ public sealed class SmtpServerService(
             }
 
             // 这里用信号量做进程级连接上限；每个会话独立运行，结束时释放名额。
-            await _connectionLimit.WaitAsync(cancellationToken);
-            _ = HandleClientAsync(client, endpoint, cancellationToken).ContinueWith(
-                _ => _connectionLimit.Release(),
-                CancellationToken.None,
-                TaskContinuationOptions.ExecuteSynchronously,
-                TaskScheduler.Default);
+            var permit = _connectionLimit.TryAcquire();
+            if (permit is null)
+            {
+                using (client)
+                {
+                    if (endpoint.EffectiveSecurity != ConnectionSecurity.ImplicitTls)
+                    {
+                        try
+                        {
+                            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                            timeout.CancelAfter(TimeSpan.FromSeconds(2));
+                            await client.GetStream().WriteAsync("421 4.3.2 Server busy; retry later.\r\n"u8.ToArray(), timeout.Token);
+                        }
+                        catch (Exception error) when (error is IOException or SocketException or OperationCanceledException) { }
+                    }
+                }
+                continue;
+            }
+            _ = HandleLimitedAsync(client, endpoint, permit, cancellationToken);
         }
+    }
+
+    private async Task HandleLimitedAsync(TcpClient client, SmtpEndpointOptions endpoint, IDisposable permit, CancellationToken token)
+    {
+        using (permit) await HandleClientAsync(client, endpoint, token);
     }
 
     private async Task HandleClientAsync(
@@ -202,7 +221,7 @@ public sealed class SmtpServerService(
 
                 var smtpSettings = systemSettings is null
                     ? new SmtpSettingsView(_options.CommandTimeoutSeconds)
-                    : await systemSettings.GetSmtpSettingsAsync(serverCancellationToken);
+                    : await systemSettings.GetSmtpSettingsAsync(serverCancellationToken, useCache: true);
                 await using var connection = new SmtpConnection(
                     stream,
                     TimeSpan.FromSeconds(smtpSettings.CommandTimeoutSeconds),

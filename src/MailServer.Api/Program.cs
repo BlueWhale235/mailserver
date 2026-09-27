@@ -156,6 +156,11 @@ var app = builder.Build();
 app.UseExceptionHandler();
 app.Use(async (context, next) =>
 {
+    using var bypass = new ConfigurationCacheBypass();
+    await next(context);
+});
+app.Use(async (context, next) =>
+{
     try
     {
         await next();
@@ -2106,6 +2111,17 @@ api.MapGet("/settings/delivery", async (
     CancellationToken cancellationToken) =>
     Results.Ok(await administration.GetDeliverySettingsAsync(cancellationToken)))
     .RequirePermission(PermissionCodes.SettingsDetail);
+
+api.MapGet("/settings/resources", async (ResourceSettingsService resources, CancellationToken token) =>
+    Results.Ok(await resources.ReadAsync(token))).RequirePermission(PermissionCodes.SettingsDetail);
+api.MapPut("/settings/resources", async (ResourceSelection request, ResourceSettingsService resources,
+    HttpContext http, CancellationToken token) =>
+{
+    try { return Results.Ok(await resources.SaveAsync(request.ProfileId ?? "", Actor(http), token)); }
+    catch (ArgumentException error) { return Results.BadRequest(new { error = error.Message }); }
+}).RequirePermission(PermissionCodes.SettingsUpdate);
+api.MapGet("/settings/resources/status", async (ResourceSettingsService resources, CancellationToken token) =>
+    Results.Ok(await resources.StatusAsync(token))).RequirePermission(PermissionCodes.SettingsDetail);
 
 api.MapGet("/settings/cache-status", async (
     ConfigurationVersionService configurationVersions,

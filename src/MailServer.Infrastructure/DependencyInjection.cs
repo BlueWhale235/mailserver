@@ -16,7 +16,8 @@ public static class DependencyInjection
 {
     public static IServiceCollection AddMailServerInfrastructure(
         this IServiceCollection services,
-        IConfiguration configuration)
+        IConfiguration configuration,
+        string role = "api")
     {
         var database = configuration.GetSection(DatabaseOptions.SectionName).Get<DatabaseOptions>() ?? new DatabaseOptions();
         var connectionString = configuration.GetConnectionString("MailDatabase")
@@ -29,6 +30,10 @@ public static class DependencyInjection
         services.Configure<MailboxDefaultsOptions>(configuration.GetSection(MailboxDefaultsOptions.SectionName));
         services.Configure<MailRulesOptions>(configuration.GetSection(MailRulesOptions.SectionName));
         services.Configure<ConfigurationCacheOptions>(configuration.GetSection(ConfigurationCacheOptions.SectionName));
+        var runtime = new ResourceRuntime(configuration.GetValue("RunAll:Enabled", false) ? "all" : role, configuration);
+        services.AddSingleton(runtime);
+        if (!runtime.UsesCache) services.PostConfigure<ConfigurationCacheOptions>(value => value.Enabled = false);
+        services.AddSingleton<ResourceSettingsService>();
         services.Configure<ForwardingOptions>(configuration.GetSection(ForwardingOptions.SectionName));
         services.Configure<PluginOptions>(configuration.GetSection(PluginOptions.SectionName));
         services.Configure<SecurityAssetsOptions>(configuration.GetSection(SecurityAssetsOptions.SectionName));
@@ -94,7 +99,7 @@ public static class DependencyInjection
         services.AddSingleton<MailRuleService>();
         services.AddSingleton<ConfigurationSnapshotCache>();
         services.AddSingleton<ConfigurationVersionService>();
-        services.AddHostedService<ConfigurationCacheMonitor>();
+        if (runtime.UsesCache) services.AddHostedService<ConfigurationCacheMonitor>();
         services.AddSingleton<SrsService>();
         services.AddSingleton<SentCopyService>();
         services.AddSingleton<IpFirewallService>();

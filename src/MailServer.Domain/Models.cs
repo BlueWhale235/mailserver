@@ -550,6 +550,7 @@ public sealed class ConfigurationVersion
 /// </summary>
 public sealed class ConfigurationProcessStatus
 {
+    public string? ResourceStatusJson { get; set; }
     public required string ProcessId { get; set; }
     public required string InstanceName { get; set; }
     public required string Roles { get; set; }

@@ -101,7 +101,7 @@ public sealed class SystemSettingsService(
 
     public async Task<DeliveryOptions> GetDeliveryOptionsAsync(CancellationToken cancellationToken)
     {
-        var settings = await GetDeliverySettingsAsync(cancellationToken);
+        var settings = await GetDeliverySettingsAsync(cancellationToken, useCache: true);
         return new DeliveryOptions
         {
             BatchSize = settings.BatchSize,
@@ -111,9 +111,9 @@ public sealed class SystemSettingsService(
         };
     }
 
-    public async Task<DeliverySettingsView> GetDeliverySettingsAsync(CancellationToken cancellationToken)
+    public async Task<DeliverySettingsView> GetDeliverySettingsAsync(CancellationToken cancellationToken, bool useCache = false)
     {
-        if (cache is not null)
+        if (useCache && cache is not null)
         {
             return await cache.GetAsync(
                 "settings:delivery",
@@ -156,9 +156,9 @@ public sealed class SystemSettingsService(
         return settings;
     }
 
-    public async Task<SmtpSettingsView> GetSmtpSettingsAsync(CancellationToken cancellationToken)
+    public async Task<SmtpSettingsView> GetSmtpSettingsAsync(CancellationToken cancellationToken, bool useCache = false)
     {
-        if (cache is not null)
+        if (useCache && cache is not null)
         {
             return await cache.GetAsync(
                 "settings:smtp",
@@ -193,9 +193,9 @@ public sealed class SystemSettingsService(
         return settings;
     }
 
-    public async Task<MailboxSettingsView> GetMailboxSettingsAsync(CancellationToken cancellationToken)
+    public async Task<MailboxSettingsView> GetMailboxSettingsAsync(CancellationToken cancellationToken, bool useCache = false)
     {
-        if (cache is not null)
+        if (useCache && cache is not null)
         {
             return await cache.GetAsync(
                 "settings:mailbox:global",
@@ -242,9 +242,9 @@ public sealed class SystemSettingsService(
 
     public async Task<MailboxSettingsView> GetDomainMailboxSettingsAsync(
         Guid domainId,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, bool useCache = false)
     {
-        if (cache is not null)
+        if (useCache && cache is not null)
         {
             return await cache.GetAsync(
                 $"settings:mailbox:domain:{domainId:N}",

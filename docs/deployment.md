@@ -19,6 +19,8 @@ docker compose --profile tools run --rm cli admin create admin --password 'repla
 docker compose up --build -d api smtp imap worker
 ```
 
+新安装在首次 `db update` 时写入 1 GB 资源档位；已有数据库迁移后保留原设置。部署后可在“全局设置 → 资源与性能”选择运行环境的档位并查看 SMTP、IMAP、Worker 的实际应用状态。Compose 将相同数据库连接配置传给所有服务；不要在 `.env` 中覆盖缓存预算，否则会与档位冲突。详细档位与上限见[服务配置](configuration.md#资源与性能)。
+
 上线前用 `/api/v1/health/ready` 检查数据库、迁移、邮件存储及安全资产状态，再验证 `/admin` 深层路由、登录与 CSRF、SMTP／IMAP 连接和 Direct MX 出站 TCP/25。正式运行前还需完成清单中的 MySQL 实库并发验证和独立进程监控验收。
 
 数据库类型、连接字符串、后台端口、邮件端口和 PEM 路径均可用环境变量覆盖。

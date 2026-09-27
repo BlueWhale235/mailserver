@@ -112,6 +112,7 @@ public sealed class MailDbContext(DbContextOptions<MailDbContext> options) : DbC
             entity.Property(x => x.InstanceName).HasMaxLength(128);
             entity.Property(x => x.Roles).HasMaxLength(128);
             entity.Property(x => x.LastError).HasMaxLength(2048);
+            entity.Property(x => x.ResourceStatusJson).HasMaxLength(8192);
         });
 
         modelBuilder.Entity<DomainCertificate>(entity =>

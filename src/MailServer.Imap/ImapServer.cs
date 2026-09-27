@@ -62,7 +62,8 @@ public sealed partial class ImapServerService(
     IOptions<ImapServerOptions> options,
     DomainCertificateProvider certificateProvider,
     ILogger<ImapServerService> logger,
-    IpFirewallService? firewall = null) : BackgroundService
+    IpFirewallService? firewall = null,
+    ResourceRuntime? resources = null) : BackgroundService
 {
     private const int MaximumBodyStructureDepth = 64;
     private const int MaximumBodyStructureParts = 2048;
@@ -70,12 +71,12 @@ public sealed partial class ImapServerService(
     private readonly ImapServerOptions _options = options.Value;
     private readonly List<TcpListener> _listeners = [];
     private readonly List<Task> _acceptLoops = [];
-    private SemaphoreSlim _connectionLimit = null!;
+    private AdjustableConcurrencyLimit _connectionLimit = null!;
     private volatile bool _stopping;
 
     protected override Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        _connectionLimit = new SemaphoreSlim(_options.MaximumConnections);
+        _connectionLimit = resources?.Imap ?? new AdjustableConcurrencyLimit(_options.MaximumConnections);
         foreach (var endpoint in _options.Endpoints)
         {
             if (!IPAddress.TryParse(endpoint.Address, out var bindAddress))
@@ -143,13 +144,31 @@ public sealed partial class ImapServerService(
             }
 
             // 与 SMTP 一样使用进程级并发上限，避免长连接客户端耗尽资源。
-            await _connectionLimit.WaitAsync(cancellationToken);
-            _ = HandleClientAsync(client, endpoint, cancellationToken).ContinueWith(
-                _ => _connectionLimit.Release(),
-                CancellationToken.None,
-                TaskContinuationOptions.ExecuteSynchronously,
-                TaskScheduler.Default);
+            var permit = _connectionLimit.TryAcquire();
+            if (permit is null)
+            {
+                using (client)
+                {
+                    if (endpoint.Security != ConnectionSecurity.ImplicitTls)
+                    {
+                        try
+                        {
+                            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                            timeout.CancelAfter(TimeSpan.FromSeconds(2));
+                            await client.GetStream().WriteAsync("* BYE [UNAVAILABLE] Server busy; retry later.\r\n"u8.ToArray(), timeout.Token);
+                        }
+                        catch (Exception error) when (error is IOException or SocketException or OperationCanceledException) { }
+                    }
+                }
+                continue;
+            }
+            _ = HandleLimitedAsync(client, endpoint, permit, cancellationToken);
         }
+    }
+
+    private async Task HandleLimitedAsync(TcpClient client, ImapEndpointOptions endpoint, IDisposable permit, CancellationToken token)
+    {
+        using (permit) await HandleClientAsync(client, endpoint, token);
     }
 
     private async Task HandleClientAsync(

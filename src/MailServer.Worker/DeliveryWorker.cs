@@ -17,54 +17,85 @@ public sealed class DeliveryWorker(
     BounceService bounceService,
     SystemSettingsService settings,
     IOptions<DeliveryOptions> deliveryDefaults,
-    ILogger<DeliveryWorker> logger) : BackgroundService
+    ILogger<DeliveryWorker> logger,
+    ResourceRuntime? resources = null) : BackgroundService
 {
     private readonly string _owner = $"{Environment.MachineName}:{Environment.ProcessId}:{Guid.NewGuid():N}";
+    private readonly AdjustableConcurrencyLimit _deliveryLimit = resources?.Delivery ?? new(8);
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        while (!stoppingToken.IsCancellationRequested)
+        var running = new List<Task>();
+        try
         {
-            DeliveryOptions options;
-            try
+            while (!stoppingToken.IsCancellationRequested)
             {
-                options = await settings.GetDeliveryOptionsAsync(stoppingToken);
-            }
-            catch (Exception exception) when (exception is not OperationCanceledException)
-            {
-                logger.LogError(exception, "Unable to read delivery settings; using configured defaults for this poll.");
-                options = deliveryDefaults.Value;
-            }
-            IReadOnlyList<DeliveryLease> jobs;
-            try
-            {
-                jobs = await queue.LeaseAsync(
-                    _owner,
-                    options.BatchSize,
-                    TimeSpan.FromSeconds(options.LeaseSeconds),
-                    stoppingToken);
-            }
-            catch (Exception exception) when (exception is not OperationCanceledException)
-            {
-                logger.LogError(exception, "Unable to lease delivery jobs.");
-                await Task.Delay(TimeSpan.FromSeconds(options.PollIntervalSeconds), stoppingToken);
-                continue;
-            }
+                running.RemoveAll(task => task.IsCompleted);
+                if (_deliveryLimit.Available == 0)
+                {
+                    await Task.WhenAny(running.Append(Task.Delay(250, stoppingToken)));
+                    continue;
+                }
+                DeliveryOptions options;
+                try
+                {
+                    options = await settings.GetDeliveryOptionsAsync(stoppingToken);
+                }
+                catch (Exception exception) when (exception is not OperationCanceledException)
+                {
+                    logger.LogError(exception, "Unable to read delivery settings; using configured defaults for this poll.");
+                    options = deliveryDefaults.Value;
+                }
+                IReadOnlyList<DeliveryLease> jobs;
+                var permits = new List<IDisposable>();
+                try
+                {
+                    for (var index = 0; index < Math.Max(1, options.BatchSize); index++)
+                    {
+                        var permit = _deliveryLimit.TryAcquire();
+                        if (permit is null) break;
+                        permits.Add(permit);
+                    }
+                    if (permits.Count == 0) continue;
+                    jobs = await queue.LeaseAsync(
+                        _owner,
+                        permits.Count,
+                        TimeSpan.FromSeconds(options.LeaseSeconds),
+                        stoppingToken);
+                }
+                catch (Exception exception)
+                {
+                    foreach (var permit in permits) permit.Dispose();
+                    if (stoppingToken.IsCancellationRequested) break;
+                    logger.LogError(exception, "Unable to lease delivery jobs.");
+                    await Task.Delay(TimeSpan.FromSeconds(options.PollIntervalSeconds), stoppingToken);
+                    continue;
+                }
+                foreach (var permit in permits.Skip(jobs.Count)) permit.Dispose();
 
-            if (jobs.Count == 0)
-            {
-                await Task.Delay(TimeSpan.FromSeconds(options.PollIntervalSeconds), stoppingToken);
-                continue;
-            }
+                if (jobs.Count == 0)
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(options.PollIntervalSeconds), stoppingToken);
+                    continue;
+                }
 
-            logger.LogInformation(
-                "Delivery worker leased {Count} job(s).",
-                jobs.Count);
-            // 单批最多 8 个并发，避免 DNS/SMTP 连接风暴；更高吞吐应通过多实例和队列租约扩展。
-            await Parallel.ForEachAsync(
-                jobs,
-                new ParallelOptions { MaxDegreeOfParallelism = Math.Min(options.BatchSize, 8), CancellationToken = stoppingToken },
-                (lease, cancellationToken) => ProcessAsync(lease, options, cancellationToken));
+                logger.LogInformation(
+                    "Delivery worker leased {Count} job(s).",
+                    jobs.Count);
+                for (var index = 0; index < jobs.Count; index++)
+                    running.Add(ProcessLimitedAsync(jobs[index], options, permits[index], stoppingToken));
+            }
+        }
+        finally { await Task.WhenAll(running); }
+    }
+
+    private async Task ProcessLimitedAsync(DeliveryLease lease, DeliveryOptions options, IDisposable permit, CancellationToken token)
+    {
+        using (permit)
+        {
+            try { await ProcessAsync(lease, options, token); }
+            catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+            catch (Exception error) { logger.LogError(error, "Delivery task {JobId} failed without stopping the worker.", lease.Id); }
         }
     }
 
@@ -81,118 +112,127 @@ public sealed class DeliveryWorker(
             TimeSpan.FromSeconds(options.LeaseSeconds),
             attemptCancellation,
             () => Interlocked.Exchange(ref leaseLost, 1));
-        DeliveryResult result;
         try
         {
-            logger.LogInformation(
-                "Direct MX delivery job {JobId} started: sender={Sender}, recipient={Recipient}, attempt={Attempt}.",
-                job.Id,
-                job.Sender,
-                job.Recipient,
-                job.Attempts);
-            var decision = await pipeline.OnDeliveryAsync(
-                new DeliveryContext(job.Id, job.Sender, job.Recipient, job.Attempts),
-                attemptCancellation.Token);
-            if (decision.Kind != PluginDecisionKind.Continue)
+            DeliveryResult result;
+            try
             {
-                // 投递插件在真正连接远端前运行，可用于合规拦截、维护窗口暂停或自定义路由禁用。
                 logger.LogInformation(
-                    "Delivery job {JobId} was handled by plugin policy: decision={Decision}, message={Message}.",
-                    job.Id,
-                    decision.Kind,
-                    decision.Message ?? string.Empty);
-                result = decision.Kind == PluginDecisionKind.Defer
-                    ? DeliveryResult.Temporary(decision.Message ?? "Deferred by delivery policy.")
-                    : DeliveryResult.Permanent(decision.Message ?? "Rejected by delivery policy.");
-            }
-            else
-            {
-                // 传输实现只负责一次投递尝试；成功/失败、退避和退信由队列和 Worker 统一处理。
-                await using var content = await contentStore.OpenReadAsync(job.Message.ContentKey, attemptCancellation.Token);
-                result = await transport.DeliverAsync(job, content, attemptCancellation.Token);
-            }
-        }
-        catch (OperationCanceledException) when (Volatile.Read(ref leaseLost) == 1 && !cancellationToken.IsCancellationRequested)
-        {
-            logger.LogWarning("Delivery job {JobId} stopped because its lease was lost.", job.Id);
-            attemptCancellation.Cancel();
-            await renewal;
-            return;
-        }
-        catch (Exception exception) when (exception is not OperationCanceledException)
-        {
-            logger.LogError(exception, "Unexpected failure processing delivery job {JobId}.", job.Id);
-            result = DeliveryResult.Temporary(exception.Message);
-        }
-
-        DeliveryCompletion completion;
-        try
-        {
-            completion = await queue.CompleteAsync(lease, result, cancellationToken);
-        }
-        catch (Exception exception) when (exception is not OperationCanceledException)
-        {
-            logger.LogError(exception, "Unable to complete delivery job {JobId}; the lease will be allowed to expire.", job.Id);
-            attemptCancellation.Cancel();
-            await renewal;
-            return;
-        }
-        attemptCancellation.Cancel();
-        await renewal;
-        if (!completion.Applied) return;
-        try
-        {
-            await pipeline.OnDeliveryCompletedAsync(
-                new DeliveryCompletedContext(
+                    "Direct MX delivery job {JobId} started: sender={Sender}, recipient={Recipient}, attempt={Attempt}.",
                     job.Id,
                     job.Sender,
                     job.Recipient,
-                    job.Attempts,
-                    result.Succeeded,
-                    result.PermanentFailure,
-                    result.Response,
-                    result.RemoteHost),
-                cancellationToken);
-        }
-        catch (Exception exception) when (exception is not OperationCanceledException)
-        {
-            logger.LogError(exception, "Delivery completion plugin failed for job {JobId}.", job.Id);
-        }
-        if (result.Succeeded)
-        {
-            logger.LogInformation(
-                "Delivery job {JobId} succeeded: recipient={Recipient}, remoteHost={RemoteHost}, response={Response}.",
-                job.Id,
-                job.Recipient,
-                result.RemoteHost ?? string.Empty,
-                result.Response);
-        }
-        else
-        {
-            logger.LogInformation(
-                "Delivery job {JobId} did not succeed: recipient={Recipient}, permanentFailure={PermanentFailure}, response={Response}.",
-                job.Id,
-                job.Recipient,
-                result.PermanentFailure,
-                result.Response);
-        }
-
-        if (!result.Succeeded && completion.FinalFailure)
-        {
-            // 最终失败才生成退信，避免临时网络故障时提前通知发件人。
-            logger.LogWarning(
-                "Delivery job {JobId} reached final failure state; creating bounce for sender={Sender}, recipient={Recipient}.",
-                job.Id,
-                job.Sender,
-                job.Recipient);
-            try
+                    job.Attempts);
+                var decision = await pipeline.OnDeliveryAsync(
+                    new DeliveryContext(job.Id, job.Sender, job.Recipient, job.Attempts),
+                    attemptCancellation.Token);
+                if (decision.Kind != PluginDecisionKind.Continue)
+                {
+                    // 投递插件在真正连接远端前运行，可用于合规拦截、维护窗口暂停或自定义路由禁用。
+                    logger.LogInformation(
+                        "Delivery job {JobId} was handled by plugin policy: decision={Decision}, message={Message}.",
+                        job.Id,
+                        decision.Kind,
+                        decision.Message ?? string.Empty);
+                    result = decision.Kind == PluginDecisionKind.Defer
+                        ? DeliveryResult.Temporary(decision.Message ?? "Deferred by delivery policy.")
+                        : DeliveryResult.Permanent(decision.Message ?? "Rejected by delivery policy.");
+                }
+                else
+                {
+                    // 传输实现只负责一次投递尝试；成功/失败、退避和退信由队列和 Worker 统一处理。
+                    await using var content = await contentStore.OpenReadAsync(job.Message.ContentKey, attemptCancellation.Token);
+                    result = await transport.DeliverAsync(job, content, attemptCancellation.Token);
+                }
+            }
+            catch (OperationCanceledException) when (Volatile.Read(ref leaseLost) == 1 && !cancellationToken.IsCancellationRequested)
             {
-                await bounceService.CreateAsync(job, result.Response, result.PermanentFailure, cancellationToken, result.Diagnostic?.EnhancedStatusCode);
+                logger.LogWarning("Delivery job {JobId} stopped because its lease was lost.", job.Id);
+                attemptCancellation.Cancel();
+                await renewal;
+                return;
             }
             catch (Exception exception) when (exception is not OperationCanceledException)
             {
-                logger.LogError(exception, "Unable to create final bounce for delivery job {JobId}.", job.Id);
+                logger.LogError(exception, "Unexpected failure processing delivery job {JobId}.", job.Id);
+                result = DeliveryResult.Temporary(exception.Message);
             }
+
+            DeliveryCompletion completion;
+            if (Volatile.Read(ref leaseLost) == 1) return;
+            try
+            {
+                completion = await queue.CompleteAsync(lease, result, attemptCancellation.Token);
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                logger.LogError(exception, "Unable to complete delivery job {JobId}; the lease will be allowed to expire.", job.Id);
+                attemptCancellation.Cancel();
+                await renewal;
+                return;
+            }
+            attemptCancellation.Cancel();
+            await renewal;
+            if (!completion.Applied) return;
+            try
+            {
+                await pipeline.OnDeliveryCompletedAsync(
+                    new DeliveryCompletedContext(
+                        job.Id,
+                        job.Sender,
+                        job.Recipient,
+                        job.Attempts,
+                        result.Succeeded,
+                        result.PermanentFailure,
+                        result.Response,
+                        result.RemoteHost),
+                    cancellationToken);
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                logger.LogError(exception, "Delivery completion plugin failed for job {JobId}.", job.Id);
+            }
+            if (result.Succeeded)
+            {
+                logger.LogInformation(
+                    "Delivery job {JobId} succeeded: recipient={Recipient}, remoteHost={RemoteHost}, response={Response}.",
+                    job.Id,
+                    job.Recipient,
+                    result.RemoteHost ?? string.Empty,
+                    result.Response);
+            }
+            else
+            {
+                logger.LogInformation(
+                    "Delivery job {JobId} did not succeed: recipient={Recipient}, permanentFailure={PermanentFailure}, response={Response}.",
+                    job.Id,
+                    job.Recipient,
+                    result.PermanentFailure,
+                    result.Response);
+            }
+
+            if (!result.Succeeded && completion.FinalFailure)
+            {
+                // 最终失败才生成退信，避免临时网络故障时提前通知发件人。
+                logger.LogWarning(
+                    "Delivery job {JobId} reached final failure state; creating bounce for sender={Sender}, recipient={Recipient}.",
+                    job.Id,
+                    job.Sender,
+                    job.Recipient);
+                try
+                {
+                    await bounceService.CreateAsync(job, result.Response, result.PermanentFailure, cancellationToken, result.Diagnostic?.EnhancedStatusCode);
+                }
+                catch (Exception exception) when (exception is not OperationCanceledException)
+                {
+                    logger.LogError(exception, "Unable to create final bounce for delivery job {JobId}.", job.Id);
+                }
+            }
+        }
+        finally
+        {
+            attemptCancellation.Cancel();
+            await renewal;
         }
     }
 

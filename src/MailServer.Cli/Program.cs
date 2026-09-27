@@ -201,7 +201,7 @@ internal static class MailServerCli
         if (action == "update")
         {
             // 迁移命令显式执行，服务启动阶段只校验 schema，避免生产启动时意外改库。
-            await db.Database.MigrateAsync();
+            await ApplyMigrationsAsync(services);
             Console.WriteLine("Database schema updated.");
             return 0;
         }
@@ -368,7 +368,10 @@ internal static class MailServerCli
     {
         var factory = services.GetRequiredService<IDbContextFactory<MailDbContext>>();
         await using var db = await factory.CreateDbContextAsync();
+        var isNewInstallation = !(await db.Database.GetAppliedMigrationsAsync()).Any();
         await db.Database.MigrateAsync();
+        if (isNewInstallation)
+            await services.GetRequiredService<ResourceSettingsService>().InitializeNewInstallationAsync(CancellationToken.None);
     }
 
     private static IConfigurationRoot LoadConfiguration(string path)
@@ -551,7 +554,6 @@ internal static class MailServerCli
             {
                 HostName = "mail.localhost",
                 CommandTimeoutSeconds = 300,
-                MaximumConnections = 200,
                 MaximumRecipients = 100,
                 MaximumMessageBytes = 52_428_800,
                 Endpoints = new object[]
@@ -565,7 +567,6 @@ internal static class MailServerCli
             {
                 HostName = "mail.localhost",
                 CommandTimeoutSeconds = 1800,
-                MaximumConnections = 200,
                 MaximumAppendBytes = 52_428_800,
                 IdlePollSeconds = 15,
                 Endpoints = new object[]

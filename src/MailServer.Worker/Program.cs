@@ -4,7 +4,7 @@ using MailServer.Worker;
 var builder = Host.CreateApplicationBuilder(args);
 builder.Configuration.AddPortableConfiguration();
 builder.Logging.AddMailServerLogging(builder.Configuration);
-builder.Services.AddMailServerInfrastructure(builder.Configuration);
+builder.Services.AddMailServerInfrastructure(builder.Configuration, "worker");
 builder.Services.AddMailServerPlugins(builder.Configuration, "worker");
 builder.Services.AddSingleton<BounceService>();
 builder.Services.AddHostedService<DeliveryWorker>();
