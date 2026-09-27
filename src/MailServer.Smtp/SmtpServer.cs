@@ -640,6 +640,37 @@ public sealed class SmtpServerService(
                                         data,
                                         serverCancellationToken);
                                 }
+                                catch (Exception exception) when (exception is MailboxQuotaExceededException or DomainQuotaExceededException)
+                                {
+                                    var sender = state.Sender;
+                                    var authenticatedAccountId = state.AuthenticatedAccountId;
+                                    var recipients = state.Recipients.ToArray();
+                                    var quotaRecipient = exception is MailboxQuotaExceededException mailboxQuota
+                                        ? mailboxQuota.Address : ((DomainQuotaExceededException)exception).Address;
+                                    var quotaType = exception is MailboxQuotaExceededException ? "mailbox" : "domain";
+                                    var response = exception is MailboxQuotaExceededException
+                                        ? "552 5.2.2 Mailbox full; please contact the recipient manually"
+                                        : "552 5.2.2 Mailbox storage quota exceeded; please contact the recipient manually";
+                                    logger.LogInformation("SMTP DATA from {Remote} rejected: {QuotaType} quota exceeded for {Recipient}.",
+                                        remote, quotaType, quotaRecipient);
+                                    await connection.ReplyAsync(response, serverCancellationToken);
+                                    state.ResetTransaction();
+                                    if (authenticatedAccountId is not null && !string.IsNullOrWhiteSpace(sender))
+                                    {
+                                        var notifications = scope.ServiceProvider.GetRequiredService<DeliveryNotificationService>();
+                                        await notifications.CreateAsync(sender, string.Join(", ", recipients),
+                                            $"{response}. 超限目标：{quotaRecipient}；本次邮件事务的所有收件人均未投递成功。",
+                                            "未入队", 1, DeliveryNotificationKind.QuotaExceeded, serverCancellationToken);
+                                    }
+                                    break;
+                                }
+                                catch (Exception exception) when (DatabaseFailurePolicy.IsConcurrencyConflict(exception))
+                                {
+                                    logger.LogInformation(exception, "SMTP DATA from {Remote} deferred because storage has a concurrency conflict.", remote);
+                                    await connection.ReplyAsync("451 4.3.0 Temporary storage concurrency conflict", serverCancellationToken);
+                                    state.ResetTransaction();
+                                    break;
+                                }
                                 catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
                                 {
                                     logger.LogError(

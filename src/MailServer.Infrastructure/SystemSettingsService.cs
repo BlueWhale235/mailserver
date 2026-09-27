@@ -22,7 +22,9 @@ public sealed record MessageTemplateSettingsView(
     string PermanentFailureSubject,
     string PermanentFailureBody,
     string RetryExhaustedSubject,
-    string RetryExhaustedBody);
+    string RetryExhaustedBody,
+    string? QuotaExceededSubject = null,
+    string? QuotaExceededBody = null);
 
 public static class MessageTemplateDefaults
 {
@@ -48,6 +50,16 @@ public static class MessageTemplateDefaults
           <p><strong>Last error</strong></p>
           <pre style="white-space:pre-wrap;background:#f8fafc;border:1px solid #e2e8f0;padding:12px;border-radius:6px">{reason}</pre>
           <p>Original queue id: <code>{queueId}</code></p>
+        </section>
+        """,
+        "邮件投递失败：收件方容量超限",
+        """
+        <section style="font-family:Arial,sans-serif;line-height:1.6;color:#0f172a">
+          <h2>收件方容量超限</h2>
+          <p>邮件未能投递给：<strong>{recipient}</strong>。</p>
+          <p>失败原因：{reason}</p>
+          <p>请您通过电话、即时通信或其他方式手动联系收件人，请其清理邮箱或联系管理员增加容量后，再重新发送邮件。</p>
+          <p>原邮件队列编号：{queueId}；尝试次数：{attempts}。</p>
         </section>
         """);
 }
@@ -79,6 +91,8 @@ public sealed class SystemSettingsService(
     private const string TemplatePermanentFailureBodyKey = "permanent-failure-body";
     private const string TemplateRetryExhaustedSubjectKey = "retry-exhausted-subject";
     private const string TemplateRetryExhaustedBodyKey = "retry-exhausted-body";
+    private const string TemplateQuotaExceededSubjectKey = "quota-exceeded-subject";
+    private const string TemplateQuotaExceededBodyKey = "quota-exceeded-body";
 
     private readonly DeliveryOptions _deliveryDefaults = deliveryDefaults.Value;
     private readonly MailboxDefaultsOptions _mailboxDefaults = mailboxDefaults.Value;
@@ -275,21 +289,30 @@ public sealed class SystemSettingsService(
             ReadString(values, TemplateSenderNameKey, defaults.SenderDisplayName),
             ReadString(values, TemplatePermanentFailureSubjectKey, legacySubject),
             ReadString(values, TemplatePermanentFailureBodyKey, defaults.PermanentFailureBody),
-            ReadString(values, TemplateRetryExhaustedSubjectKey, legacySubject),
-            ReadString(values, TemplateRetryExhaustedBodyKey, defaults.RetryExhaustedBody));
+            ReadString(values, TemplateRetryExhaustedSubjectKey, ReadString(values, TemplateFailureSubjectKey, defaults.RetryExhaustedSubject)),
+            ReadString(values, TemplateRetryExhaustedBodyKey, defaults.RetryExhaustedBody),
+            ReadString(values, TemplateQuotaExceededSubjectKey, defaults.QuotaExceededSubject!),
+            ReadString(values, TemplateQuotaExceededBodyKey, defaults.QuotaExceededBody!));
     }
 
     public async Task<MessageTemplateSettingsView> SaveMessageTemplateSettingsAsync(
         MessageTemplateSettingsView settings,
         CancellationToken cancellationToken)
     {
-        var normalized = Normalize(settings);
+        var current = await GetMessageTemplateSettingsAsync(cancellationToken);
+        var normalized = Normalize(settings with
+        {
+            QuotaExceededSubject = settings.QuotaExceededSubject ?? current.QuotaExceededSubject,
+            QuotaExceededBody = settings.QuotaExceededBody ?? current.QuotaExceededBody
+        });
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         await UpsertAsync(db, TemplatePrefix, TemplateSenderNameKey, normalized.SenderDisplayName, cancellationToken);
         await UpsertAsync(db, TemplatePrefix, TemplatePermanentFailureSubjectKey, normalized.PermanentFailureSubject, cancellationToken);
         await UpsertAsync(db, TemplatePrefix, TemplatePermanentFailureBodyKey, normalized.PermanentFailureBody, cancellationToken);
         await UpsertAsync(db, TemplatePrefix, TemplateRetryExhaustedSubjectKey, normalized.RetryExhaustedSubject, cancellationToken);
         await UpsertAsync(db, TemplatePrefix, TemplateRetryExhaustedBodyKey, normalized.RetryExhaustedBody, cancellationToken);
+        await UpsertAsync(db, TemplatePrefix, TemplateQuotaExceededSubjectKey, normalized.QuotaExceededSubject!, cancellationToken);
+        await UpsertAsync(db, TemplatePrefix, TemplateQuotaExceededBodyKey, normalized.QuotaExceededBody!, cancellationToken);
         await db.SaveChangesAsync(cancellationToken);
         return normalized;
     }
@@ -455,7 +478,14 @@ public sealed class SystemSettingsService(
             throw new ArgumentOutOfRangeException(nameof(settings), "Message template bodies must contain between 1 and 8000 characters.");
         MessageTemplateHtmlPolicy.Validate(permanentBody);
         MessageTemplateHtmlPolicy.Validate(retryBody);
-        return new MessageTemplateSettingsView(senderName, permanentSubject, permanentBody, retrySubject, retryBody);
+        var quotaSubject = settings.QuotaExceededSubject?.Trim() ?? string.Empty;
+        var quotaBody = settings.QuotaExceededBody?.Trim() ?? string.Empty;
+        if (quotaSubject.Length is < 1 or > 200 || quotaBody.Length is < 1 or > 8000)
+            throw new ArgumentOutOfRangeException(nameof(settings), "Quota template subject or body length is invalid.");
+        if (quotaSubject.Contains('\r') || quotaSubject.Contains('\n'))
+            throw new FormatException("Template subjects cannot contain line breaks.");
+        MessageTemplateHtmlPolicy.Validate(quotaBody);
+        return new MessageTemplateSettingsView(senderName, permanentSubject, permanentBody, retrySubject, retryBody, quotaSubject, quotaBody);
     }
 
     private static string? NormalizeHostNameOrNull(string? hostName)

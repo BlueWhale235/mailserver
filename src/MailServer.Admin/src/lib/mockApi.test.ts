@@ -1,6 +1,31 @@
 import { describe, expect, it } from 'vitest'
 import { enablePreviewMode, mockApi, mockApiDownload } from './mockApi'
 
+describe('quota template preview API', () => {
+  it('keeps quota fields after saving and legacy updates, and previews the quota status', async () => {
+    const original = await mockApi<Record<string, string>>('/settings/message-templates')
+    try {
+      const defaults = await mockApi<Record<string, string>>('/settings/message-templates/defaults')
+      const saved = await mockApi<Record<string, string>>('/settings/message-templates', {
+        method: 'PUT', body: JSON.stringify({ ...defaults, quotaExceededSubject: '保存后的超限主题' }),
+      })
+      expect(saved.quotaExceededSubject).toBe('保存后的超限主题')
+      expect(saved.quotaExceededBody).toBe(defaults.quotaExceededBody)
+      const legacy = Object.fromEntries(Object.entries(saved).filter(([key]) => !key.startsWith('quotaExceeded')))
+      const updated = await mockApi<Record<string, string>>('/settings/message-templates', { method: 'PUT', body: JSON.stringify(legacy) })
+      expect(updated.quotaExceededSubject).toBe(saved.quotaExceededSubject)
+      expect(updated.quotaExceededBody).toBe(saved.quotaExceededBody)
+      const preview = await mockApi<{ renderedHtml: string }>('/settings/message-templates/preview', {
+        method: 'POST', body: JSON.stringify({ subject: saved.quotaExceededSubject, body: saved.quotaExceededBody, templateKind: 'quota' }),
+      })
+      expect(preview.renderedHtml).toContain('552 5.2.2')
+      expect(preview.renderedHtml).toContain('手动联系收件人')
+    } finally {
+      await mockApi('/settings/message-templates', { method: 'PUT', body: JSON.stringify(original) })
+    }
+  })
+})
+
 interface PagedResult<T> {
   items: T[]
   totalCount: number
@@ -360,7 +385,7 @@ describe('message-template preview API', () => {
       method: 'PUT',
       body: JSON.stringify(input),
     })
-    expect(saved).toEqual({
+    expect(saved).toMatchObject({
       senderDisplayName: 'MailServer 投递中心',
       permanentFailureSubject: '投递失败',
       permanentFailureBody: '<p>{recipient}：{reason}</p>',

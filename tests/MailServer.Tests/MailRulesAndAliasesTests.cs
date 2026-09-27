@@ -758,7 +758,7 @@ public sealed class MailRulesAndAliasesTests
         }
 
         await using var message = MessageStream("domain-quota", "alice@example.com", "Quota check");
-        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+        var exception = await Assert.ThrowsAsync<DomainQuotaExceededException>(() =>
             environment.Services.GetRequiredService<IInboundMessageService>().AcceptAsync(
                 new InboundEnvelope("sender@origin.test", ["alice@example.com"], null, "127.0.0.1", "test"),
                 message,

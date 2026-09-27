@@ -2249,7 +2249,7 @@ api.MapPost("/settings/message-templates/preview", (
         var values = new Dictionary<string, string>
         {
             ["recipient"] = "customer@example.net",
-            ["reason"] = "550 5.1.1 收件人不存在",
+            ["reason"] = request.TemplateKind == "quota" ? "552 5.2.2 收件方容量超限，请手动联系收件人" : "550 5.1.1 收件人不存在",
             ["queueId"] = "8f5d1b62-0b36-42d8-9bb5-1a81d9d12e40",
             ["attempts"] = "5"
         };
@@ -2281,7 +2281,9 @@ api.MapPut("/settings/message-templates", async (
                 request.PermanentFailureSubject,
                 request.PermanentFailureBody,
                 request.RetryExhaustedSubject,
-                request.RetryExhaustedBody),
+                request.RetryExhaustedBody,
+                request.QuotaExceededSubject,
+                request.QuotaExceededBody),
             Actor(http),
             cancellationToken));
     }
@@ -2444,8 +2446,10 @@ public sealed record MessageTemplateSettingsRequest(
     string PermanentFailureSubject,
     string PermanentFailureBody,
     string RetryExhaustedSubject,
-    string RetryExhaustedBody);
-public sealed record MessageTemplatePreviewRequest(string Subject, string Body);
+    string RetryExhaustedBody,
+    string? QuotaExceededSubject = null,
+    string? QuotaExceededBody = null);
+public sealed record MessageTemplatePreviewRequest(string Subject, string Body, string? TemplateKind = null);
 public sealed record CertificateSelectionSettingsRequest(
     string? DefaultMailHostName,
     bool AllowSingleCertificateFallback);

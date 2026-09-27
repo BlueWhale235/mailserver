@@ -24,6 +24,7 @@ const initial = {
   senderDisplayName: '投递系统', permanentFailureSubject: '失败：{recipient}',
   permanentFailureBody: '<p>{reason}</p>', retryExhaustedSubject: '重试耗尽',
   retryExhaustedBody: '<p>{attempts}</p>',
+  quotaExceededSubject: '超限：{recipient}', quotaExceededBody: '<p>{reason}；请手动联系收件人</p>',
 }
 
 function mountView() {
@@ -54,6 +55,25 @@ beforeEach(() => {
 })
 
 describe('message template editor', () => {
+  it('edits, previews and saves the quota template separately', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+    await wrapper.findAll('[role="tab"]').find(tab => tab.text().includes('超限退信'))!.trigger('click')
+    expect(wrapper.findAllComponents(TextField)[1]!.props('modelValue')).toBe(initial.quotaExceededSubject)
+    expect(wrapper.text()).toContain('552 5.2.2')
+    wrapper.findAllComponents(TextField)[1]!.vm.$emit('update:modelValue', '自定义超限主题')
+    await nextTick()
+    await button(wrapper, '服务端预览').trigger('click')
+    await flushPromises()
+    const preview = vi.mocked(api).mock.calls.find(([path]) => path === '/settings/message-templates/preview')!
+    expect(JSON.parse(String(preview[1]?.body))).toEqual({ subject: '自定义超限主题', body: initial.quotaExceededBody, templateKind: 'quota' })
+    await button(wrapper, '保存模板').trigger('click')
+    await flushPromises()
+    const save = vi.mocked(api).mock.calls.find(([, init]) => init?.method === 'PUT')!
+    expect(JSON.parse(String(save[1]?.body))).toEqual({ ...initial, quotaExceededSubject: '自定义超限主题' })
+    expect(wrapper.text()).toContain('退信消息模板已保存')
+    wrapper.unmount()
+  })
   it('confirms undo and preserves the draft when cancelled', async () => {
     const wrapper = mountView()
     await flushPromises()

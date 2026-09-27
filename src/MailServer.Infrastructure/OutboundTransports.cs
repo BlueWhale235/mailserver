@@ -26,6 +26,13 @@ public sealed class DirectMxTransport(
     TransportSecurityPolicyService transportSecurity,
     ILogger<DirectMxTransport> logger) : IOutboundTransport
 {
+    internal static string? ExtractEnhancedStatusCode(string response)
+    {
+        var match = System.Text.RegularExpressions.Regex.Match(response, @"(?<![\d.])[245]\.\d{1,3}\.\d{1,3}(?![\d.])",
+            System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+        return match.Success ? match.Value : null;
+    }
+
     internal const int DeliveryPort = 25;
     internal const SecureSocketOptions DeliverySecurity = SecureSocketOptions.StartTlsWhenAvailable;
 
@@ -205,10 +212,10 @@ public sealed class DirectMxTransport(
                     job.Recipient);
                 if ((int)exception.StatusCode >= 500)
                 {
-                    return DeliveryResult.Permanent(exception.Message, $"{host}:{DeliveryPort}", new DeliveryDiagnostic("SMTP", RemoteAddress: remoteAddress?.ToString(), SmtpStatusCode: ((int)exception.StatusCode).ToString(), DurationMilliseconds: stopwatch.ElapsedMilliseconds, FailureCategory: "smtp-permanent", SessionSummary: exception.Message));
+                    return DeliveryResult.Permanent(exception.Message, $"{host}:{DeliveryPort}", new DeliveryDiagnostic("SMTP", RemoteAddress: remoteAddress?.ToString(), SmtpStatusCode: ((int)exception.StatusCode).ToString(), EnhancedStatusCode: ExtractEnhancedStatusCode(exception.Message), DurationMilliseconds: stopwatch.ElapsedMilliseconds, FailureCategory: "smtp-permanent", SessionSummary: exception.Message));
                 }
 
-                return DeliveryResult.Temporary(exception.Message, $"{host}:{DeliveryPort}", new DeliveryDiagnostic("SMTP", RemoteAddress: remoteAddress?.ToString(), SmtpStatusCode: ((int)exception.StatusCode).ToString(), DurationMilliseconds: stopwatch.ElapsedMilliseconds, FailureCategory: "smtp-temporary", SessionSummary: exception.Message));
+                return DeliveryResult.Temporary(exception.Message, $"{host}:{DeliveryPort}", new DeliveryDiagnostic("SMTP", RemoteAddress: remoteAddress?.ToString(), SmtpStatusCode: ((int)exception.StatusCode).ToString(), EnhancedStatusCode: ExtractEnhancedStatusCode(exception.Message), DurationMilliseconds: stopwatch.ElapsedMilliseconds, FailureCategory: "smtp-temporary", SessionSummary: exception.Message));
             }
             catch (Exception exception) when (exception is not OperationCanceledException)
             {

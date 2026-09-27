@@ -37,6 +37,7 @@ public static class DependencyInjection
         services.Configure<MaintenanceOptions>(configuration.GetSection(MaintenanceOptions.SectionName));
         services.AddHttpContextAccessor();
         services.AddSingleton<AuditStampInterceptor>();
+        services.AddSingleton<DeliveryNotificationService>();
         services.AddPooledDbContextFactory<MailDbContext>((provider, options) =>
         {
             options.AddInterceptors(provider.GetRequiredService<AuditStampInterceptor>());

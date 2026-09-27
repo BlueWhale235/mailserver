@@ -501,7 +501,7 @@ const previewSettings: Record<string, Record<string, unknown>> = {
     availableMailHostNames: ['mail.northwind.cn', 'mx.acme-mail.com'],
     effectiveDefaultMailHostName: 'mail.northwind.cn',
   },
-  '/settings/message-templates': { senderDisplayName: '邮件投递系统', permanentFailureSubject: '邮件投递失败', permanentFailureBody: '<p>收件人：{recipient}</p><p>失败原因：{reason}</p>', retryExhaustedSubject: '邮件重试次数已用尽', retryExhaustedBody: '<p>向 {recipient} 投递已尝试 {attempts} 次。</p><p>{reason}</p>' },
+  '/settings/message-templates': { senderDisplayName: '邮件投递系统', permanentFailureSubject: '邮件投递失败', permanentFailureBody: '<p>收件人：{recipient}</p><p>失败原因：{reason}</p>', retryExhaustedSubject: '邮件重试次数已用尽', retryExhaustedBody: '<p>向 {recipient} 投递已尝试 {attempts} 次。</p><p>{reason}</p>', quotaExceededSubject: '邮件投递失败：收件方容量超限', quotaExceededBody: '<p>收件人：{recipient}</p><p>{reason}</p><p>请您手动联系收件人，请其清理邮箱或增加容量后再重新发送邮件。</p>' },
 }
 const previewPlugins: MockPlugin[] = [
   {
@@ -751,6 +751,8 @@ function createDnsCheck(domain: MockDomain): MockDnsCheck {
   }
 }
 const previewTemplateDefaults = {
+  quotaExceededSubject: '邮件投递失败：收件方容量超限',
+  quotaExceededBody: '<p>收件人：{recipient}</p><p>{reason}</p><p>请您通过电话、即时通信或其他方式手动联系收件人，请其清理邮箱或联系管理员增加容量后，再重新发送邮件。</p>',
   senderDisplayName: 'Mail Delivery Subsystem',
   permanentFailureSubject: 'Delivery Status Notification (Failure)',
   permanentFailureBody: '<section><h2>Delivery failed</h2><p>Delivery to <strong>{recipient}</strong> failed permanently.</p><pre>{reason}</pre><p>Original queue id: <code>{queueId}</code></p></section>',
@@ -1346,9 +1348,9 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
   }
   if (url.pathname === '/settings/message-templates/defaults' && method === 'GET') return structuredClone(previewTemplateDefaults) as T
   if (url.pathname === '/settings/message-templates/preview' && method === 'POST') {
-    const request = JSON.parse(String(init.body)) as { subject: string; body: string }
+    const request = JSON.parse(String(init.body)) as { subject: string; body: string; templateKind?: string }
     if (!request.subject?.trim() || !request.body?.trim() || /<script\b|\son\w+\s*=|(?:javascript|data)\s*:/i.test(request.body)) throw new Error('消息模板包含不安全的 HTML')
-    const values: Record<string, string> = { recipient: 'customer@example.net', reason: '550 5.1.1 收件人不存在', queueid: '8f5d1b62-0b36-42d8-9bb5-1a81d9d12e40', attempts: '5' }
+    const values: Record<string, string> = { recipient: 'customer@example.net', reason: request.templateKind === 'quota' ? '552 5.2.2 收件方容量超限，请手动联系收件人' : '550 5.1.1 收件人不存在', queueid: '8f5d1b62-0b36-42d8-9bb5-1a81d9d12e40', attempts: '5' }
     const replace = (value: string, encode: boolean) => value.replace(/\{(recipient|reason|queueId|attempts)\}/gi, (_, key: string) => {
       const sample = values[key.toLowerCase()] ?? ''
       return encode ? sample.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;') : sample
@@ -1364,6 +1366,11 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
         const retrySubject = String(input.retryExhaustedSubject ?? '').trim()
         const permanentBody = String(input.permanentFailureBody ?? '').trim()
         const retryBody = String(input.retryExhaustedBody ?? '').trim()
+        const current = previewSettings[url.pathname] as Record<string, unknown>
+        const quotaSubject = String(input.quotaExceededSubject ?? current.quotaExceededSubject).trim()
+        const quotaBody = String(input.quotaExceededBody ?? current.quotaExceededBody).trim()
+        if (!quotaSubject || quotaSubject.length > 200 || /[\r\n]/.test(quotaSubject) || !quotaBody || quotaBody.length > 8000) throw new Error('超限退信主题或正文无效')
+        if (/<script\b|\son\w+\s*=|(?:javascript|data)\s*:/i.test(quotaBody)) throw new Error('超限退信包含不安全的 HTML')
         if (senderName.length < 1 || senderName.length > 120) throw new Error('发件人显示名称必须为 1 至 120 个字符')
         if (permanentSubject.length < 1 || permanentSubject.length > 200 || retrySubject.length < 1 || retrySubject.length > 200) throw new Error('模板主题必须为 1 至 200 个字符')
         if (permanentBody.length < 1 || permanentBody.length > 8000 || retryBody.length < 1 || retryBody.length > 8000) throw new Error('消息模板正文必须为 1 至 8000 个字符')
@@ -1374,10 +1381,12 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
           permanentFailureBody: permanentBody,
           retryExhaustedSubject: retrySubject,
           retryExhaustedBody: retryBody,
+          quotaExceededSubject: quotaSubject,
+          quotaExceededBody: quotaBody,
         }
         addPreviewAudit({
           content: '更新退信消息模板', category: 'Update', status: 'Succeeded', actor: 'preview-admin', action: 'settings.message-templates.update', resource: 'settings:message-templates',
-          detail: '更新永久失败与重试耗尽模板', remoteAddress: '127.0.0.1', requestId: `req-template-${Date.now()}`,
+          detail: '更新永久失败、重试耗尽与超限退信模板', remoteAddress: '127.0.0.1', requestId: `req-template-${Date.now()}`,
           createdAt: new Date().toISOString(), changes: [],
         })
       } else if (url.pathname === '/settings/delivery') {

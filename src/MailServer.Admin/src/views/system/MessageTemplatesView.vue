@@ -11,9 +11,11 @@ interface TemplateSettings {
   permanentFailureBody: string
   retryExhaustedSubject: string
   retryExhaustedBody: string
+  quotaExceededSubject: string
+  quotaExceededBody: string
 }
 
-type TemplateKind = 'permanent' | 'retry'
+type TemplateKind = 'permanent' | 'retry' | 'quota'
 
 const { can } = usePermission()
 const settings = ref<TemplateSettings>({
@@ -22,6 +24,8 @@ const settings = ref<TemplateSettings>({
   permanentFailureBody: '',
   retryExhaustedSubject: '',
   retryExhaustedBody: '',
+  quotaExceededSubject: '',
+  quotaExceededBody: '',
 })
 const baseline = ref('')
 const ready = ref(false)
@@ -39,12 +43,12 @@ const serverPreview = ref<{ key: string; renderedSubject: string; renderedHtml: 
 let resolvePendingLeave: ((allow: boolean) => void) | null = null
 let previewVersion = 0
 
-const placeholders = [
+const placeholders = computed(() => [
   { token: '{recipient}', label: '收件人', sample: 'customer@example.net' },
-  { token: '{reason}', label: '失败原因', sample: '550 5.1.1 收件人不存在' },
+  { token: '{reason}', label: '失败原因', sample: activeTemplate.value === 'quota' ? '552 5.2.2 收件方容量超限，请手动联系收件人' : '550 5.1.1 收件人不存在' },
   { token: '{queueId}', label: '队列编号', sample: '8f5d1b62-0b36-42d8-9bb5-1a81d9d12e40' },
   { token: '{attempts}', label: '尝试次数', sample: '5' },
-]
+])
 
 const dirty = computed(() => ready.value && JSON.stringify(settings.value) !== baseline.value)
 const senderError = computed(() => lengthError(settings.value.senderDisplayName, 120, '发件人显示名称'))
@@ -52,39 +56,37 @@ const permanentSubjectError = computed(() => lengthError(settings.value.permanen
 const retrySubjectError = computed(() => lengthError(settings.value.retryExhaustedSubject, 200, '重试耗尽主题'))
 const permanentBodyError = computed(() => lengthError(settings.value.permanentFailureBody, 8000, '永久失败正文'))
 const retryBodyError = computed(() => lengthError(settings.value.retryExhaustedBody, 8000, '重试耗尽正文'))
-const valid = computed(() => !senderError.value && !permanentSubjectError.value && !retrySubjectError.value && !permanentBodyError.value && !retryBodyError.value)
-
+const quotaSubjectError = computed(() => lengthError(settings.value.quotaExceededSubject, 200, '超限退信主题'))
+const quotaBodyError = computed(() => lengthError(settings.value.quotaExceededBody, 8000, '超限退信正文'))
+const valid = computed(() => !senderError.value && !permanentSubjectError.value && !retrySubjectError.value && !permanentBodyError.value && !retryBodyError.value && !quotaSubjectError.value && !quotaBodyError.value)
+const templateFields = {
+  permanent: { subject: 'permanentFailureSubject', body: 'permanentFailureBody', label: '永久失败' },
+  retry: { subject: 'retryExhaustedSubject', body: 'retryExhaustedBody', label: '重试耗尽' },
+  quota: { subject: 'quotaExceededSubject', body: 'quotaExceededBody', label: '超限退信' },
+} as const
 const currentSubject = computed({
-  get: () => activeTemplate.value === 'permanent' ? settings.value.permanentFailureSubject : settings.value.retryExhaustedSubject,
-  set: value => {
-    if (activeTemplate.value === 'permanent') settings.value.permanentFailureSubject = value
-    else settings.value.retryExhaustedSubject = value
-  },
+  get: () => settings.value[templateFields[activeTemplate.value].subject],
+  set: value => { settings.value[templateFields[activeTemplate.value].subject] = value },
 })
-
 const currentBody = computed({
-  get: () => activeTemplate.value === 'permanent' ? settings.value.permanentFailureBody : settings.value.retryExhaustedBody,
-  set: value => {
-    if (activeTemplate.value === 'permanent') settings.value.permanentFailureBody = value
-    else settings.value.retryExhaustedBody = value
-  },
+  get: () => settings.value[templateFields[activeTemplate.value].body],
+  set: value => { settings.value[templateFields[activeTemplate.value].body] = value },
 })
-
-const currentSubjectError = computed(() => activeTemplate.value === 'permanent' ? permanentSubjectError.value : retrySubjectError.value)
-const currentBodyError = computed(() => activeTemplate.value === 'permanent' ? permanentBodyError.value : retryBodyError.value)
+const currentSubjectError = computed(() => ({ permanent: permanentSubjectError.value, retry: retrySubjectError.value, quota: quotaSubjectError.value })[activeTemplate.value])
+const currentBodyError = computed(() => ({ permanent: permanentBodyError.value, retry: retryBodyError.value, quota: quotaBodyError.value })[activeTemplate.value])
 const renderedSubject = computed(() => renderText(currentSubject.value))
 const renderedBody = computed(() => renderHtml(currentBody.value))
-const previewKey = computed(() => JSON.stringify([currentSubject.value, currentBody.value]))
+const previewKey = computed(() => JSON.stringify([activeTemplate.value, currentSubject.value, currentBody.value]))
 const previewVerified = computed(() => serverPreview.value?.key === previewKey.value)
 const previewSubject = computed(() => previewVerified.value ? serverPreview.value!.renderedSubject : renderedSubject.value)
 const previewBody = computed(() => previewVerified.value ? serverPreview.value!.renderedHtml : renderedBody.value)
 const previewDocument = computed(() => `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:"><style>body{margin:0;padding:28px;color:#25364a;background:#fff;font:14px/1.7 system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}a{color:#2563eb}table{max-width:100%;border-collapse:collapse}img{max-width:100%}code{padding:2px 5px;border-radius:4px;background:#f1f5f9}</style></head><body>${previewBody.value}</body></html>`)
 const unknownTokens = computed(() => {
-  const matches = `${settings.value.permanentFailureSubject} ${settings.value.permanentFailureBody} ${settings.value.retryExhaustedSubject} ${settings.value.retryExhaustedBody}`.match(/\{[a-zA-Z][a-zA-Z0-9]*\}/g) ?? []
-  const known = new Set(placeholders.map(item => item.token.toLowerCase()))
+  const matches = `${settings.value.permanentFailureSubject} ${settings.value.permanentFailureBody} ${settings.value.retryExhaustedSubject} ${settings.value.retryExhaustedBody} ${settings.value.quotaExceededSubject} ${settings.value.quotaExceededBody}`.match(/\{[a-zA-Z][a-zA-Z0-9]*\}/g) ?? []
+  const known = new Set(placeholders.value.map(item => item.token.toLowerCase()))
   return Array.from(new Set(matches.filter(token => !known.has(token.toLowerCase()))))
 })
-const riskyMarkup = computed(() => /<script\b|\son\w+\s*=|javascript\s*:/i.test(`${settings.value.permanentFailureBody} ${settings.value.retryExhaustedBody}`))
+const riskyMarkup = computed(() => /<script\b|\son\w+\s*=|javascript\s*:/i.test(`${settings.value.permanentFailureBody} ${settings.value.retryExhaustedBody} ${settings.value.quotaExceededBody}`))
 
 function lengthError(value: string, maximum: number, label: string) {
   const length = value.trim().length
@@ -99,7 +101,7 @@ function htmlEncode(value: string) {
 
 function replaceTokens(value: string, encode: boolean) {
   let result = value
-  for (const placeholder of placeholders) {
+  for (const placeholder of placeholders.value) {
     const replacement = encode ? htmlEncode(placeholder.sample) : placeholder.sample
     const expression = new RegExp(`\\${placeholder.token[0]}${placeholder.token.slice(1, -1)}\\}`, 'gi')
     result = result.replace(expression, replacement)
@@ -161,7 +163,7 @@ async function verifyPreview() {
   previewError.value = ''
   try {
     const result = await api<{ renderedSubject: string; renderedHtml: string }>('/settings/message-templates/preview', {
-      method: 'POST', body: jsonBody({ subject: currentSubject.value, body: currentBody.value }),
+      method: 'POST', body: jsonBody({ subject: currentSubject.value, body: currentBody.value, templateKind: activeTemplate.value }),
     })
     if (version === previewVersion && key === previewKey.value) serverPreview.value = { key, ...result }
   } catch (cause) {
@@ -239,7 +241,7 @@ onBeforeUnmount(() => {
     <span>消息模板</span>
   </div>
 
-  <PageHeader title="消息模板" description="编辑永久失败与重试耗尽时发送给原发件人的退信">
+  <PageHeader title="消息模板" description="编辑永久失败、重试耗尽及容量超限时发送给原发件人的退信">
     <v-btn v-if="can('settings.manage')" variant="outlined" prepend-icon="mdi-restore" :disabled="saving || loading" @click="defaultsConfirmOpen = true">恢复系统默认值</v-btn>
     <v-btn v-if="can('settings.manage')" variant="outlined" prepend-icon="mdi-undo" :disabled="!dirty || saving" @click="resetConfirmOpen = true">撤销修改</v-btn>
     <v-btn v-if="can('settings.manage')" color="primary" prepend-icon="mdi-content-save-outline" :loading="saving" :disabled="!dirty || !valid || riskyMarkup" @click="save">保存模板</v-btn>
@@ -262,6 +264,9 @@ onBeforeUnmount(() => {
       <button :class="{ active: activeTemplate === 'retry' }" role="tab" :aria-selected="activeTemplate === 'retry'" @click="activeTemplate = 'retry'">
         <v-icon size="19">mdi-email-clock-outline</v-icon><span><b>重试耗尽</b><small>达到最大尝试次数后生成退信</small></span>
       </button>
+      <button :class="{ active: activeTemplate === 'quota' }" role="tab" :aria-selected="activeTemplate === 'quota'" @click="activeTemplate = 'quota'">
+        <v-icon size="19">mdi-email-alert-outline</v-icon><span><b>超限退信</b><small>收件方容量不足，提示手动联系收件人</small></span>
+      </button>
     </div>
 
     <v-alert v-if="unknownTokens.length" type="warning" variant="tonal" density="compact" class="mb-4">
@@ -274,7 +279,7 @@ onBeforeUnmount(() => {
 
     <div class="editor-layout">
       <v-card flat class="panel editor-panel">
-        <div class="panel-heading"><div><h2>编辑内容</h2><p>HTML 正文中的占位符值会在服务端进行转义。</p></div><v-chip size="small" variant="tonal">{{ activeTemplate === 'permanent' ? '永久失败' : '重试耗尽' }}</v-chip></div>
+        <div class="panel-heading"><div><h2>编辑内容</h2><p>HTML 正文中的占位符值会在服务端进行转义。</p></div><v-chip size="small" variant="tonal">{{ templateFields[activeTemplate].label }}</v-chip></div>
         <div class="editor-fields">
           <v-text-field v-model="currentSubject" label="邮件主题" counter="200" :error-messages="currentSubjectError" :readonly="saving || !can('settings.manage')" hide-details="auto" />
           <div class="placeholder-bar">
@@ -316,7 +321,7 @@ onBeforeUnmount(() => {
 .sender-panel { display: grid; grid-template-columns: minmax(260px, .7fr) minmax(420px, 1.3fr); align-items: center; gap: 38px; padding: 20px; }
 .sender-panel h2, .panel-heading h2 { margin: 0 0 3px; font-size: 16px; }
 .sender-panel p, .panel-heading p { margin: 0; color: var(--text-muted); font-size: 12px; }
-.template-tabs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-bottom: 16px; }
+.template-tabs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-bottom: 16px; }
 .template-tabs button { display: flex; align-items: center; gap: 12px; padding: 14px 16px; border: 1px solid var(--border); border-radius: 9px; color: var(--text-secondary); background: #fff; text-align: left; cursor: pointer; }
 .template-tabs button:hover { border-color: #a9bdd6; }
 .template-tabs button.active { border-color: #5d8dd6; color: #175cb8; background: #f4f8ff; box-shadow: inset 0 0 0 1px #5d8dd6; }

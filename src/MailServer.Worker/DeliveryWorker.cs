@@ -3,8 +3,6 @@ using MailServer.Infrastructure;
 using MailServer.PluginSdk;
 using MailServer.PluginSdk.Delivery;
 using Microsoft.Extensions.Options;
-using MimeKit;
-using MimeKit.Utils;
 
 namespace MailServer.Worker;
 
@@ -141,7 +139,7 @@ public sealed class DeliveryWorker(
                 job.Id,
                 job.Sender,
                 job.Recipient);
-            await bounceService.CreateAsync(job, result.Response, result.PermanentFailure, cancellationToken);
+            await bounceService.CreateAsync(job, result.Response, result.PermanentFailure, cancellationToken, result.Diagnostic?.EnhancedStatusCode);
         }
     }
 }
@@ -149,72 +147,10 @@ public sealed class DeliveryWorker(
 /// <summary>
 /// 退信生成服务。退信重新走入站链路，保证它也会被存储、规则处理和审计记录。
 /// </summary>
-public sealed class BounceService(
-    IInboundMessageService inbound,
-    SystemSettingsService settings,
-    IConfiguration configuration,
-    ILogger<BounceService> logger)
+public sealed class BounceService(DeliveryNotificationService notifications)
 {
-    public async Task CreateAsync(
-        DeliveryJob failedJob,
-        string reason,
-        bool permanentFailure,
-        CancellationToken cancellationToken)
-    {
-        if (string.IsNullOrWhiteSpace(failedJob.Sender))
-        {
-            return;
-        }
-
-        var hostName = configuration["Worker:HostName"] ?? "mail.localhost";
-        var templates = await settings.GetMessageTemplateSettingsAsync(cancellationToken);
-        var variables = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-        {
-            ["recipient"] = failedJob.Recipient,
-            ["reason"] = reason,
-            ["queueId"] = failedJob.Id.ToString("N"),
-            ["attempts"] = failedJob.Attempts.ToString()
-        };
-        var bodyTemplate = permanentFailure
-            ? templates.PermanentFailureBody
-            : templates.RetryExhaustedBody;
-        var subjectTemplate = permanentFailure
-            ? templates.PermanentFailureSubject
-            : templates.RetryExhaustedSubject;
-        var htmlBody = SystemSettingsService.RenderHtmlTemplate(bodyTemplate, variables);
-        var message = new MimeMessage
-        {
-            Sender = new MailboxAddress(templates.SenderDisplayName, $"postmaster@{hostName}"),
-            From = { new MailboxAddress(templates.SenderDisplayName, $"postmaster@{hostName}") },
-            To = { MailboxAddress.Parse(failedJob.Sender) },
-            Subject = SystemSettingsService.RenderTemplate(subjectTemplate, variables),
-            MessageId = MimeUtils.GenerateMessageId(hostName),
-            Date = DateTimeOffset.UtcNow,
-            Body = new BodyBuilder
-            {
-                TextBody = SystemSettingsService.HtmlToPlainText(htmlBody),
-                HtmlBody = htmlBody
-            }.ToMessageBody()
-        };
-
-        await using var memory = new MemoryStream();
-        await message.WriteToAsync(memory, cancellationToken);
-        memory.Position = 0;
-        try
-        {
-            await inbound.AcceptAsync(
-                new InboundEnvelope(
-                    string.Empty,
-                    [failedJob.Sender],
-                    "system",
-                    "local",
-                    hostName),
-                memory,
-                cancellationToken);
-        }
-        catch (Exception exception) when (exception is not OperationCanceledException)
-        {
-            logger.LogError(exception, "Unable to create bounce for delivery job {JobId}.", failedJob.Id);
-        }
-    }
+    public Task CreateAsync(DeliveryJob failedJob, string reason, bool permanentFailure,
+        CancellationToken cancellationToken, string? enhancedStatusCode = null) =>
+        notifications.CreateAsync(failedJob.Sender, failedJob.Recipient, reason, failedJob.Id.ToString("N"),
+            failedJob.Attempts, DeliveryNotificationService.SelectKind(permanentFailure, enhancedStatusCode), cancellationToken);
 }

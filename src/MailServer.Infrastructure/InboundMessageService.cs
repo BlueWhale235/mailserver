@@ -208,10 +208,18 @@ public sealed class InboundMessageService(
                 descriptor.Key);
             return new InboundAcceptance(storedMessage.Id, descriptor.Key, counters.Local, counters.Queued);
         }
-        catch
+        catch (Exception failure)
         {
             // 只要事务失败，就尝试删除还没有任何数据库引用的内容文件，避免孤儿附件堆积。
-            await contentStore.DeleteIfUnreferencedAsync(descriptor.Key, cancellationToken);
+            try
+            {
+                await contentStore.DeleteIfUnreferencedAsync(descriptor.Key, cancellationToken);
+            }
+            catch (Exception cleanupFailure) when (failure is MailboxQuotaExceededException or DomainQuotaExceededException
+                && cleanupFailure is not OperationCanceledException)
+            {
+                logger.LogWarning(cleanupFailure, "Unable to clean up rejected quota message content {ContentKey}.", descriptor.Key);
+            }
             throw;
         }
     }
@@ -350,9 +358,9 @@ public sealed class InboundMessageService(
         CancellationToken cancellationToken)
     {
         if (account.UsedBytes + descriptor.Size > account.QuotaBytes)
-            throw new InvalidOperationException($"Mailbox quota exceeded for {account.LocalPart}@{account.Domain.Name}.");
+            throw new MailboxQuotaExceededException($"{account.LocalPart}@{account.Domain.Name}");
         if (account.Domain.UsedBytes + descriptor.Size > account.Domain.QuotaBytes)
-            throw new InvalidOperationException($"Domain quota exceeded for {account.Domain.Name}.");
+            throw new DomainQuotaExceededException(account.Domain.Name, $"{account.LocalPart}@{account.Domain.Name}");
 
         var facts = MailRuleService.BuildFacts(
             mimeMessage,
@@ -464,7 +472,7 @@ public sealed class InboundMessageService(
                 });
                 counters.Queued++;
             }
-            catch (Exception exception) when (exception is FormatException or InvalidOperationException)
+            catch (Exception exception) when (exception is FormatException or InvalidOperationException or MailboxQuotaExceededException or DomainQuotaExceededException)
             {
                 logger.LogWarning(
                     exception,
@@ -538,7 +546,7 @@ public sealed class InboundMessageService(
                 });
                 counters.Queued++;
             }
-            catch (Exception exception) when (exception is FormatException or InvalidOperationException)
+            catch (Exception exception) when (exception is FormatException or InvalidOperationException or MailboxQuotaExceededException or DomainQuotaExceededException)
             {
                 logger.LogWarning(
                     exception,

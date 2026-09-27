@@ -20,6 +20,33 @@ namespace MailServer.Tests;
 public sealed class HttpAcceptanceTests
 {
     [Fact]
+    public async Task QuotaTemplateEndpointsPreserveLegacyUpdatesAndPreviewQuotaReason()
+    {
+        await using var host = await AcceptanceHost.StartAsync();
+        const string path = "/api/v1/settings/message-templates";
+        var defaults = await host.JsonAsync(HttpMethod.Get, path + "/defaults");
+        Assert.Contains("手动联系收件人", defaults.GetProperty("quotaExceededBody").GetString());
+        var settings = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(defaults.GetRawText())!;
+        settings["quotaExceededSubject"] = JsonSerializer.SerializeToElement("自定义超限退信");
+        var saved = await host.JsonAsync(HttpMethod.Put, path, settings);
+        Assert.Equal("自定义超限退信", saved.GetProperty("quotaExceededSubject").GetString());
+        settings.Remove("quotaExceededSubject");
+        settings.Remove("quotaExceededBody");
+        settings["senderDisplayName"] = JsonSerializer.SerializeToElement("Legacy client");
+        var legacy = await host.JsonAsync(HttpMethod.Put, path, settings);
+        Assert.Equal("自定义超限退信", legacy.GetProperty("quotaExceededSubject").GetString());
+        Assert.Equal(defaults.GetProperty("quotaExceededBody").GetString(), legacy.GetProperty("quotaExceededBody").GetString());
+        var reloaded = await host.JsonAsync(HttpMethod.Get, path);
+        Assert.Equal("自定义超限退信", reloaded.GetProperty("quotaExceededSubject").GetString());
+        var preview = await host.JsonAsync(HttpMethod.Post, path + "/preview",
+            new { subject = "超限：{recipient}", body = "<p>{reason}</p>", templateKind = "quota" });
+        Assert.Contains("552 5.2.2", preview.GetProperty("renderedHtml").GetString());
+        Assert.Contains("手动联系收件人", preview.GetProperty("renderedHtml").GetString());
+        var oldPreview = await host.JsonAsync(HttpMethod.Post, path + "/preview", new { subject = "Failure", body = "<p>{reason}</p>" });
+        Assert.Contains("550 5.1.1", oldPreview.GetProperty("renderedHtml").GetString());
+    }
+
+    [Fact]
     public async Task DomainDnsSettingsCanBeSavedFromGetResponse()
     {
         await using var host = await AcceptanceHost.StartAsync();
