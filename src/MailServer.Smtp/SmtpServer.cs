@@ -81,7 +81,8 @@ public sealed class SmtpServerService(
     IpFirewallService? firewall = null,
     IOptions<SmtpAbuseOptions>? abuseOptions = null,
     SystemSettingsService? systemSettings = null,
-    ResourceRuntime? resources = null) : BackgroundService
+    ResourceRuntime? resources = null,
+    ConnectionProtection? protection = null) : BackgroundService
 {
     private readonly SmtpServerOptions _options = options.Value;
     private readonly List<TcpListener> _listeners = [];
@@ -146,6 +147,20 @@ public sealed class SmtpServerService(
                 break;
             }
 
+            var peer = (client.Client.RemoteEndPoint as IPEndPoint)?.Address;
+            IDisposable? sourcePermit = null;
+            if (protection is not null && peer is not null)
+            {
+                var group = endpoint.RequireAuthentication
+                    ? ProtectedConnectionGroup.SmtpSubmission : ProtectedConnectionGroup.SmtpInbound;
+                var banned = endpoint.RequireAuthentication
+                    && protection.IsAuthBlocked(ProtectedLoginProtocol.Smtp, peer, DateTimeOffset.UtcNow);
+                if (banned || !protection.TryAcquire(group, peer, DateTimeOffset.UtcNow, out sourcePermit))
+                {
+                    await RejectBusyAsync(client, endpoint, cancellationToken, banned);
+                    continue;
+                }
+            }
             // 连接级防火墙在欢迎语之前执行，避免被拒绝来源确认服务器能力。
             try
             {
@@ -157,6 +172,7 @@ public sealed class SmtpServerService(
                         "SMTP connection from {RemoteAddress} was closed by firewall before banner.",
                         remoteEndPoint.Address);
                     client.Dispose();
+                    sourcePermit?.Dispose();
                     continue;
                 }
             }
@@ -164,6 +180,7 @@ public sealed class SmtpServerService(
             {
                 logger.LogError(exception, "SMTP firewall evaluation failed; closing only the current connection.");
                 client.Dispose();
+                sourcePermit?.Dispose();
                 continue;
             }
 
@@ -171,28 +188,34 @@ public sealed class SmtpServerService(
             var permit = _connectionLimit.TryAcquire();
             if (permit is null)
             {
-                using (client)
-                {
-                    if (endpoint.EffectiveSecurity != ConnectionSecurity.ImplicitTls)
-                    {
-                        try
-                        {
-                            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                            timeout.CancelAfter(TimeSpan.FromSeconds(2));
-                            await client.GetStream().WriteAsync("421 4.3.2 Server busy; retry later.\r\n"u8.ToArray(), timeout.Token);
-                        }
-                        catch (Exception error) when (error is IOException or SocketException or OperationCanceledException) { }
-                    }
-                }
+                sourcePermit?.Dispose();
+                await RejectBusyAsync(client, endpoint, cancellationToken);
                 continue;
             }
-            _ = HandleLimitedAsync(client, endpoint, permit, cancellationToken);
+            _ = HandleLimitedAsync(client, endpoint, permit, sourcePermit, cancellationToken);
         }
     }
 
-    private async Task HandleLimitedAsync(TcpClient client, SmtpEndpointOptions endpoint, IDisposable permit, CancellationToken token)
+    private static async Task RejectBusyAsync(TcpClient client, SmtpEndpointOptions endpoint, CancellationToken token, bool banned = false)
     {
-        using (permit) await HandleClientAsync(client, endpoint, token);
+        using (client)
+        {
+            if (endpoint.EffectiveSecurity == ConnectionSecurity.ImplicitTls) return;
+            try
+            {
+                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
+                timeout.CancelAfter(TimeSpan.FromSeconds(2));
+                var reply = banned ? "421 4.7.0 Too many authentication failures\r\n"
+                    : "421 4.3.2 Server busy; retry later.\r\n";
+                await client.GetStream().WriteAsync(Encoding.ASCII.GetBytes(reply), timeout.Token);
+            }
+            catch (Exception error) when (error is IOException or SocketException or OperationCanceledException) { }
+        }
+    }
+
+    private async Task HandleLimitedAsync(TcpClient client, SmtpEndpointOptions endpoint, IDisposable permit, IDisposable? sourcePermit, CancellationToken token)
+    {
+        using (permit) using (sourcePermit) await HandleClientAsync(client, endpoint, token);
     }
 
     private async Task HandleClientAsync(
@@ -204,6 +227,9 @@ public sealed class SmtpServerService(
         var endpointName = $"{endpoint.Address}:{endpoint.Port}";
         using (client)
         {
+            using var preAuthentication = CancellationTokenSource.CreateLinkedTokenSource(serverCancellationToken);
+            if (endpoint.RequireAuthentication)
+                preAuthentication.CancelAfter(TimeSpan.FromSeconds(protection?.Settings.PreAuthenticationSeconds ?? 120));
             try
             {
                 client.NoDelay = true;
@@ -215,7 +241,7 @@ public sealed class SmtpServerService(
                 var isTls = false;
                 if (endpoint.EffectiveSecurity == ConnectionSecurity.ImplicitTls)
                 {
-                    stream = await UpgradeTlsAsync(stream, serverCancellationToken);
+                    stream = await UpgradeTlsBoundedAsync(stream, preAuthentication.Token);
                     isTls = true;
                 }
 
@@ -255,7 +281,9 @@ public sealed class SmtpServerService(
 
                 while (!serverCancellationToken.IsCancellationRequested)
                 {
-                    var line = await connection.ReadLineAsync(serverCancellationToken);
+                    var readToken = endpoint.RequireAuthentication && state.AuthenticatedAccountId is null
+                        ? preAuthentication.Token : serverCancellationToken;
+                    var line = await connection.ReadLineAsync(readToken);
                     if (line is null) break;
                     if (line.Length == 0)
                     {
@@ -344,7 +372,7 @@ public sealed class SmtpServerService(
                             }
 
                             await connection.ReplyAsync("220 2.0.0 Ready to start TLS", serverCancellationToken);
-                            stream = await UpgradeTlsAsync(connection.Detach(), serverCancellationToken);
+                            stream = await UpgradeTlsBoundedAsync(connection.Detach(), preAuthentication.Token);
                             connection.Attach(stream);
                             isTls = true;
                             // RFC 要求 STARTTLS 后丢弃之前的 EHLO/MAIL 状态，客户端必须重新 EHLO。
@@ -397,24 +425,37 @@ public sealed class SmtpServerService(
                                 await connection.ReplyAsync("503 5.5.1 AUTH not permitted during a mail transaction", serverCancellationToken);
                                 break;
                             }
-                            if (_authFailures.IsBlocked(remote, DateTimeOffset.UtcNow))
+                            var authPeer = IpFirewallRules.TryParseRemoteAddress(remote);
+                            if ((protection is not null && authPeer is not null
+                                    && protection.IsAuthBlocked(ProtectedLoginProtocol.Smtp, authPeer, DateTimeOffset.UtcNow))
+                                || (protection is null && _authFailures.IsBlocked(remote, DateTimeOffset.UtcNow)))
                             {
                                 // 连续认证失败直接关闭会话，减少密码爆破时的资源占用。
                                 await connection.ReplyAsync("421 4.7.0 Too many authentication failures", serverCancellationToken);
                                 return;
                             }
 
-                            var authenticated = await AuthenticateAsync(
-                                connection, state, arguments, remote, endpoint, isTls, serverCancellationToken);
-                            if (authenticated)
+                            state.CredentialRejected = false;
+                            var blockedAfterAttempt = false;
+                            bool authenticated;
+                            try
                             {
-                                _authFailures.Clear(remote);
+                                authenticated = await AuthenticateAsync(
+                                    connection, state, arguments, remote, endpoint, isTls, preAuthentication.Token);
                             }
-                            else if (_authFailures.RecordFailure(remote, DateTimeOffset.UtcNow))
+                            finally
+                            {
+                                if (state.CredentialRejected)
+                                    blockedAfterAttempt = protection is not null && authPeer is not null
+                                        ? protection.RecordAuthFailure(ProtectedLoginProtocol.Smtp, authPeer, DateTimeOffset.UtcNow)
+                                        : _authFailures.RecordFailure(remote, DateTimeOffset.UtcNow);
+                            }
+                            if (!authenticated && blockedAfterAttempt)
                             {
                                 await connection.ReplyAsync("421 4.7.0 Too many authentication failures", serverCancellationToken);
                                 return;
                             }
+                            if (authenticated && protection is null) _authFailures.Clear(remote);
                             break;
                         case "MAIL":
                             await HandleMailFromAsync(
@@ -553,6 +594,7 @@ public sealed class SmtpServerService(
                             await using (data)
                             using (var scope = scopeFactory.CreateScope())
                             {
+                                using var ruleEvaluation = MailRuleService.BeginEvaluationScope();
                                 if (!await ValidateAuthenticatedMessageHeadersAsync(
                                         connection,
                                         data,
@@ -746,6 +788,10 @@ public sealed class SmtpServerService(
             catch (TimeoutException)
             {
                 logger.LogInformation("SMTP client {Remote} timed out.", remote);
+            }
+            catch (OperationCanceledException) when (!serverCancellationToken.IsCancellationRequested)
+            {
+                logger.LogInformation("SMTP client {Remote} exceeded the authentication or TLS deadline.", remote);
             }
             catch (InvalidDataException exception)
             {
@@ -1172,6 +1218,7 @@ public sealed class SmtpServerService(
             cancellationToken);
         if (result.Status != AuthenticationStatus.Success || string.IsNullOrWhiteSpace(result.Identity))
         {
+            state.CredentialRejected = result.Status == AuthenticationStatus.Failure;
             await connection.ReplyAsync(
                 result.Status == AuthenticationStatus.NotHandled
                     ? "504 5.5.4 Authentication mechanism is not available"
@@ -1183,6 +1230,7 @@ public sealed class SmtpServerService(
         var accountId = await authenticator.ResolveMailboxIdentityAsync(result.Identity, cancellationToken);
         if (accountId is null)
         {
+            state.CredentialRejected = true;
             await connection.ReplyAsync("535 5.7.8 Authentication identity is not an active mailbox", cancellationToken);
             return false;
         }
@@ -1272,6 +1320,7 @@ public sealed class SmtpServerService(
         var accountId = await authenticator.AuthenticateMailboxAsync(userName, password, cancellationToken);
         if (accountId is null)
         {
+            state.CredentialRejected = true;
             logger.LogInformation(
                 "SMTP authentication failed for {UserName} from {Remote}.",
                 userName,
@@ -1375,6 +1424,13 @@ public sealed class SmtpServerService(
         {
             await connection.ReplyAsync(line, cancellationToken);
         }
+    }
+
+    private async Task<Stream> UpgradeTlsBoundedAsync(Stream stream, CancellationToken cancellationToken)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(protection?.Settings.TlsHandshakeSeconds ?? 10));
+        return await UpgradeTlsAsync(stream, timeout.Token);
     }
 
     private async Task<Stream> UpgradeTlsAsync(Stream stream, CancellationToken cancellationToken)
@@ -1511,6 +1567,7 @@ internal sealed class SmtpAuthFailureLimiter(SmtpAbuseOptions options)
 
 internal sealed class SmtpSessionState
 {
+    public bool CredentialRejected { get; set; }
     public string? HeloName { get; set; }
     public bool Extended { get; set; }
     public Guid? AuthenticatedAccountId { get; set; }

@@ -6,7 +6,25 @@ using Microsoft.Extensions.Configuration;
 namespace MailServer.Infrastructure;
 
 public sealed record ResourceProfile(string Id, string Label, long CacheBytes, long EntryBytes,
-    int DeliveryConcurrency, int SmtpConnections, int ImapConnections);
+    int DeliveryConcurrency, int SmtpConnections, int ImapConnections)
+{
+    public ResourceValues Values => new(CacheBytes, EntryBytes, DeliveryConcurrency, SmtpConnections,
+        ImapConnections, 3, 60, 2, 64);
+}
+
+public sealed record ResourceValues(long CacheBytes, long EntryBytes, int DeliveryConcurrency,
+    int SmtpConnections, int ImapConnections, int VersionPollSeconds, int AbsoluteRefreshSeconds,
+    int MaximumConcurrentLoads, int RuleFallbackBatchSize)
+{
+    public void Validate()
+    {
+        if (CacheBytes <= 0 || EntryBytes <= 0 || EntryBytes > CacheBytes
+            || DeliveryConcurrency <= 0 || SmtpConnections <= 0 || ImapConnections <= 0
+            || VersionPollSeconds <= 0 || AbsoluteRefreshSeconds < VersionPollSeconds
+            || MaximumConcurrentLoads is < 1 or > 32 || RuleFallbackBatchSize is < 1 or > 512)
+            throw new ArgumentException("资源参数必须为有效正整数，单项预算不得超过总预算，强制刷新不得早于检查周期。");
+    }
+}
 
 public static class ResourceProfiles
 {
@@ -54,18 +72,25 @@ public sealed class AdjustableConcurrencyLimit(int limit)
     }
 }
 
-public sealed record ResourceSelection(string? ProfileId);
-public sealed record ResourceSettingsView(string? ProfileId, IReadOnlyList<ResourceProfile> Profiles);
+public sealed record ResourceSelection(string? ProfileId, ResourceValues? Values = null);
+public sealed record ResourceSettingsView(string? ProfileId, IReadOnlyList<ResourceProfile> Profiles,
+    ResourceValues? Values = null)
+{
+    public string ConfigurationId => JsonSerializer.Serialize(new { ProfileId, Values });
+}
 public sealed record ResourceUsage(string? ProfileId, long CacheBudgetBytes, int DeliveryLimit,
-    int SmtpLimit, int ImapLimit, int ActiveDeliveries, int ActiveSmtp, int ActiveImap, bool ApplyFailed);
+    int SmtpLimit, int ImapLimit, int ActiveDeliveries, int ActiveSmtp, int ActiveImap, bool ApplyFailed,
+    string? ConfigurationId = null, string? ProtectionConfigurationId = null, int ProtectedSources = 0);
 public sealed record ResourceProcessView(string ProcessId, string InstanceName, string[] Roles,
     DateTimeOffset LastSeenAt, long EstimatedCacheBytes, ResourceUsage? Usage, string State, string? Message);
-public sealed record ResourceStatusView(long TotalCacheBudgetBytes, IReadOnlyList<ResourceProcessView> Processes);
+public sealed record ResourceStatusView(long TotalCacheBudgetBytes, IReadOnlyList<ResourceProcessView> Processes,
+    string? ProfileId, ResourceValues? Values, long TotalEstimatedCacheBytes);
 
 public sealed class ResourceRuntime(string role, IConfiguration configuration)
 {
     private readonly object _sync = new();
     private string? _profileId;
+    private string? _configurationId;
     private long _cacheBudget;
     private bool _applyFailed;
     public string Role { get; } = role;
@@ -76,25 +101,30 @@ public sealed class ResourceRuntime(string role, IConfiguration configuration)
     public ResourceUsage Snapshot()
     {
         lock (_sync) return new(_profileId, _cacheBudget, Delivery.Limit, Smtp.Limit, Imap.Limit,
-            Delivery.Active, Smtp.Active, Imap.Active, _applyFailed);
+            Delivery.Active, Smtp.Active, Imap.Active, _applyFailed, _configurationId);
     }
     public void MarkFailed() { lock (_sync) _applyFailed = true; }
-    public void Apply(string? profileId, ConfigurationSnapshotCache cache)
+    public void Apply(string? profileId, ConfigurationSnapshotCache cache) =>
+        Apply(new ResourceSettingsView(profileId, ResourceProfiles.All,
+            profileId is null ? null : ResourceProfiles.Get(profileId).Values), cache);
+    public void Apply(ResourceSettingsView settings, ConfigurationSnapshotCache cache)
     {
         lock (_sync)
         {
-            if (profileId is not null)
+            if (settings.Values is { } values)
             {
-                var profile = ResourceProfiles.Get(profileId);
-                var budget = Role switch { "all" => profile.CacheBytes, "smtp" => profile.CacheBytes / 2,
-                    "imap" or "worker" => profile.CacheBytes / 4, _ => 0 };
-                cache.Resize(budget, Math.Min(profile.EntryBytes, budget));
-                Smtp.Resize(Math.Min(profile.SmtpConnections, configuration.GetValue<int?>("Smtp:MaximumConnections") ?? int.MaxValue));
-                Imap.Resize(Math.Min(profile.ImapConnections, configuration.GetValue<int?>("Imap:MaximumConnections") ?? int.MaxValue));
-                Delivery.Resize(profile.DeliveryConcurrency);
+                values.Validate();
+                var budget = Role switch { "all" => values.CacheBytes, "smtp" => values.CacheBytes / 2,
+                    "imap" or "worker" => values.CacheBytes / 4, _ => 0 };
+                cache.Reconfigure(budget, Math.Min(values.EntryBytes, budget), values.VersionPollSeconds,
+                    values.AbsoluteRefreshSeconds, values.MaximumConcurrentLoads, values.RuleFallbackBatchSize);
+                Smtp.Resize(Math.Min(values.SmtpConnections, configuration.GetValue<int?>("Smtp:MaximumConnections") ?? int.MaxValue));
+                Imap.Resize(Math.Min(values.ImapConnections, configuration.GetValue<int?>("Imap:MaximumConnections") ?? int.MaxValue));
+                Delivery.Resize(values.DeliveryConcurrency);
             }
             _cacheBudget = UsesCache && cache.Options.Enabled ? cache.Options.SizeLimitBytes : 0;
-            _profileId = profileId;
+            _profileId = settings.ProfileId;
+            _configurationId = settings.ConfigurationId;
             _applyFailed = false;
         }
     }
@@ -108,25 +138,41 @@ public sealed class ResourceSettingsService(IDbContextFactory<MailDbContext> fac
     {
         await using var db = await factory.CreateDbContextAsync(token);
         var id = await db.SystemSettings.AsNoTracking().Where(x => x.Key == Key).Select(x => x.Value).SingleOrDefaultAsync(token);
-        if (id is not null) ResourceProfiles.Get(id);
-        return new(id, ResourceProfiles.All);
+        if (id is null) return new(null, ResourceProfiles.All);
+        if (id.StartsWith('{'))
+        {
+            var saved = JsonSerializer.Deserialize<ResourceSelection>(id, new JsonSerializerOptions(JsonSerializerDefaults.Web))
+                ?? throw new FormatException("资源设置无效。");
+            if (saved.ProfileId is not null) ResourceProfiles.Get(saved.ProfileId);
+            var values = saved.Values ?? (saved.ProfileId is null ? null : ResourceProfiles.Get(saved.ProfileId).Values);
+            values?.Validate();
+            return new(saved.ProfileId, ResourceProfiles.All, values);
+        }
+        return new(id, ResourceProfiles.All, ResourceProfiles.Get(id).Values);
     }
-    public async Task<ResourceSettingsView> SaveAsync(string profileId, string actor, CancellationToken token)
+    public Task<ResourceSettingsView> SaveAsync(string profileId, string actor, CancellationToken token) =>
+        SaveAsync(new ResourceSelection(profileId), actor, token);
+    public async Task<ResourceSettingsView> SaveAsync(ResourceSelection selection, string actor, CancellationToken token)
     {
+        var profileId = selection.ProfileId ?? throw new ArgumentException("请选择有效的内存档位。");
+        var values = selection.Values ?? ResourceProfiles.Get(profileId).Values;
         ResourceProfiles.Get(profileId);
+        values.Validate();
         await using var db = await factory.CreateDbContextAsync(token);
         await using var transaction = db.Database.IsRelational() ? await db.Database.BeginTransactionAsync(token) : null;
         // Lock the fixed version row before reading settings to serialize concurrent saves.
         var version = await ConfigurationVersionService.BumpAsync(db, ConfigurationScopes.Settings, token);
         var setting = await db.SystemSettings.SingleOrDefaultAsync(x => x.Key == Key, token);
-        if (setting is null) db.SystemSettings.Add(new SystemSetting { Key = Key, Value = profileId });
-        else setting.Value = profileId;
+        var serialized = JsonSerializer.Serialize(new ResourceSelection(profileId, values),
+            new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        if (setting is null) db.SystemSettings.Add(new SystemSetting { Key = Key, Value = serialized });
+        else setting.Value = serialized;
         db.AuditRecords.Add(new AuditRecord { Actor = actor, Action = "settings.resources.update",
             Resource = "settings:resources", Detail = profileId });
         await db.SaveChangesAsync(token);
         if (transaction is not null) await transaction.CommitAsync(token);
         cache.ObserveCommittedVersion(ConfigurationScopes.Settings, version);
-        return new(profileId, ResourceProfiles.All);
+        return new(profileId, ResourceProfiles.All, values);
     }
     public async Task InitializeNewInstallationAsync(CancellationToken token)
     {
@@ -148,10 +194,12 @@ public sealed class ResourceSettingsService(IDbContextFactory<MailDbContext> fac
                 try { if (x.ResourceStatusJson is not null) usage = JsonSerializer.Deserialize<ResourceUsage>(x.ResourceStatusJson); }
                 catch (JsonException) { }
                 var state = x.LastSeenAt < cutoff || usage is null ? "unreported"
-                    : usage.ApplyFailed ? "failed" : usage.ProfileId != desired.ProfileId ? "applying" : "applied";
+                    : usage.ApplyFailed ? "failed" : usage.ConfigurationId != desired.ConfigurationId ? "applying" : "applied";
                 return new ResourceProcessView(x.ProcessId, x.InstanceName, x.Roles.Split(','), x.LastSeenAt,
                     x.EstimatedCacheBytes, usage, state, state == "failed" ? "暂时无法读取或应用设置，服务继续使用此前的配置。" : null);
             }).ToArray();
-        return new(processes.Where(x => x.State != "unreported").Sum(x => x.Usage?.CacheBudgetBytes ?? 0), processes);
+        var online = processes.Where(x => x.State != "unreported").ToArray();
+        return new(online.Sum(x => x.Usage?.CacheBudgetBytes ?? 0), processes,
+            desired.ProfileId, desired.Values, online.Sum(x => x.EstimatedCacheBytes));
     }
 }

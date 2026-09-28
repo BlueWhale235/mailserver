@@ -7,7 +7,18 @@ export interface ResourceProfile {
   smtpConnections: number
   imapConnections: number
 }
-export interface ResourceSettings { profileId: string | null; profiles: ResourceProfile[] }
+export interface ResourceValues {
+  cacheBytes: number
+  entryBytes: number
+  deliveryConcurrency: number
+  smtpConnections: number
+  imapConnections: number
+  versionPollSeconds: number
+  absoluteRefreshSeconds: number
+  maximumConcurrentLoads: number
+  ruleFallbackBatchSize: number
+}
+export interface ResourceSettings { profileId: string | null; profiles: ResourceProfile[]; values: ResourceValues | null }
 export interface ResourceUsage {
   profileId: string | null
   cacheBudgetBytes: number
@@ -28,4 +39,10 @@ export interface ResourceProcess {
   state: 'applied' | 'applying' | 'failed' | 'unreported'
   message: string | null
 }
-export interface ResourceStatus { totalCacheBudgetBytes: number; processes: ResourceProcess[] }
+export interface ResourceStatus {
+  totalCacheBudgetBytes: number
+  totalEstimatedCacheBytes: number
+  profileId: string | null
+  values: ResourceValues | null
+  processes: ResourceProcess[]
+}

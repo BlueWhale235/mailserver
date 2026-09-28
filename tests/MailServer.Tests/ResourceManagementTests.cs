@@ -16,6 +16,63 @@ namespace MailServer.Tests;
 
 public sealed class ResourceManagementTests
 {
+    [Fact]
+    public async Task OversizedFirewallMarkerIsCachedAndBatchedRulesStillMatch()
+    {
+        await using var fixture = new SqliteFixture();
+        await fixture.InitializeAsync();
+        await using (var db = await fixture.Factory.CreateDbContextAsync())
+        {
+            db.FirewallRules.AddRange(
+                new FirewallRule { Cidr = "192.0.2.0/25" },
+                new FirewallRule { Cidr = "2001:db8::/33" });
+            await db.SaveChangesAsync();
+        }
+        using var cache = Cache();
+        cache.Resize(4096, 512); // Estimate exceeds one entry; the marker itself still fits.
+        var firewall = new IpFirewallService(fixture.Factory, NullLogger<IpFirewallService>.Instance, cache);
+        Assert.True(await firewall.IsBlockedAsync(System.Net.IPAddress.Parse("192.0.2.100"), CancellationToken.None));
+        Assert.Equal(1, cache.EntryCount);
+        Assert.Equal(256, cache.EstimatedBytes);
+        Assert.True(await firewall.IsBlockedAsync(System.Net.IPAddress.Parse("2001:db8:1000::1"), CancellationToken.None));
+        Assert.False(await firewall.IsBlockedAsync(System.Net.IPAddress.Parse("192.0.2.200"), CancellationToken.None));
+        Assert.Equal(1, cache.EntryCount);
+    }
+
+    [Fact]
+    public async Task ConnectionProtectionStatusUsesAppliedConfigurationAndHeartbeatAge()
+    {
+        await using var fixture = new SqliteFixture();
+        await fixture.InitializeAsync();
+        using var cache = Cache();
+        var config = new ConfigurationBuilder().Build();
+        var settings = new ConnectionProtectionSettingsService(fixture.Factory, cache, config);
+        var desired = await settings.SaveAsync(ConnectionProtectionSettings.Default with
+        { ImapLogin = new LoginProtection(10, 3, 20) }, "test", CancellationToken.None);
+        var runtime = new ResourceRuntime("imap", config);
+        await using (var db = await fixture.Factory.CreateDbContextAsync())
+        {
+            db.ConfigurationProcessStatuses.Add(new ConfigurationProcessStatus
+            {
+                ProcessId = "imap-status", InstanceName = "mail-1", Roles = "imap",
+                LastSeenAt = DateTimeOffset.UtcNow.AddMinutes(-2),
+                ResourceStatusJson = JsonSerializer.Serialize(runtime.Snapshot() with
+                { ProtectionConfigurationId = JsonSerializer.Serialize(desired) })
+            });
+            await db.SaveChangesAsync();
+        }
+        Assert.Equal("offline", (await settings.StatusAsync(CancellationToken.None)).Processes.Single().State);
+        await using (var db = await fixture.Factory.CreateDbContextAsync())
+        {
+            var process = await db.ConfigurationProcessStatuses.SingleAsync();
+            process.LastSeenAt = DateTimeOffset.UtcNow;
+            await db.SaveChangesAsync();
+        }
+        Assert.Equal("applied", (await settings.StatusAsync(CancellationToken.None)).Processes.Single().State);
+        await settings.SaveAsync(desired with { MaximumTrackedSources = 256 }, "test", CancellationToken.None);
+        Assert.Equal("applying", (await settings.StatusAsync(CancellationToken.None)).Processes.Single().State);
+    }
+
     [Theory]
     [InlineData("512mb", 4, 1, 8, 16)]
     [InlineData("1gb", 8, 2, 16, 32)]
@@ -82,6 +139,30 @@ public sealed class ResourceManagementTests
         Assert.All(await Task.WhenAll(waiting), value => Assert.Equal("cached", value));
         Assert.Equal(1, calls);
         Assert.Equal(0, cache.ActiveLoads);
+    }
+
+    [Fact]
+    public async Task ChangingLoadConcurrencyAdmitsNewWorkWithoutCancellingExistingLoad()
+    {
+        using var cache = new ConfigurationSnapshotCache(Options.Create(new ConfigurationCacheOptions
+            { MaximumConcurrentLoads = 1 }), NullLogger<ConfigurationSnapshotCache>.Instance);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var secondStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var first = cache.GetAsync("first", "rules", async _ =>
+        { started.SetResult(); await release.Task; return ("first", 100L); }, CancellationToken.None);
+        await started.Task;
+        var second = cache.GetAsync("second", "rules", _ =>
+        { secondStarted.SetResult(); return Task.FromResult(("second", 100L)); }, CancellationToken.None);
+        Assert.False(secondStarted.Task.IsCompleted);
+        cache.Reconfigure(4 * 1024 * 1024, 1024 * 1024, 5, 90, 2, 32);
+        Assert.Equal("second", await second.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.False(first.IsCompleted);
+        Assert.Equal(5, cache.Options.VersionPollSeconds);
+        Assert.Equal(90, cache.Options.AbsoluteRefreshSeconds);
+        Assert.Equal(32, cache.Options.RuleFallbackBatchSize);
+        release.SetResult();
+        Assert.Equal("first", await first);
     }
 
     [Fact]
@@ -172,6 +253,68 @@ public sealed class ResourceManagementTests
         Assert.Equal(0, stale.TotalCacheBudgetBytes);
         await Assert.ThrowsAsync<ArgumentException>(() => service.SaveAsync("bad", "test", CancellationToken.None));
         Assert.Equal("4gb", (await restarted.ReadAsync(CancellationToken.None)).ProfileId);
+    }
+
+    [Fact]
+    public async Task CustomValuesStoredAsJsonSurviveRestartAndDistinguishSameProfileChanges()
+    {
+        await using var fixture = new SqliteFixture();
+        await fixture.InitializeAsync();
+        await using (var db = await fixture.Factory.CreateDbContextAsync())
+        {
+            db.SystemSettings.Add(new SystemSetting { Key = ResourceSettingsService.Key,
+                Value = "{\"profileId\":\"1gb\",\"values\":{\"cacheBytes\":12582912,\"entryBytes\":1048576,\"deliveryConcurrency\":3,\"smtpConnections\":16,\"imapConnections\":32,\"versionPollSeconds\":4,\"absoluteRefreshSeconds\":80,\"maximumConcurrentLoads\":3,\"ruleFallbackBatchSize\":32}}" });
+            await db.SaveChangesAsync();
+        }
+        using var cache = Cache();
+        var service = new ResourceSettingsService(fixture.Factory, cache);
+        var selection = await service.ReadAsync(CancellationToken.None);
+        Assert.Equal("1gb", selection.ProfileId);
+        Assert.Equal(12582912, selection.Values?.CacheBytes);
+        Assert.Equal(4, selection.Values?.VersionPollSeconds);
+        var runtime = new ResourceRuntime("all", new ConfigurationBuilder().Build());
+        runtime.Apply(selection, cache);
+        Assert.Equal(12582912, runtime.Snapshot().CacheBudgetBytes);
+        Assert.Equal(3, runtime.Delivery.Limit);
+        Assert.Equal(4, cache.Options.VersionPollSeconds);
+    }
+
+    [Fact]
+    public async Task SameProfileCustomChangeRequiresEachProcessToApplyCompleteConfiguration()
+    {
+        await using var fixture = new SqliteFixture();
+        await fixture.InitializeAsync();
+        using var cache = Cache();
+        var service = new ResourceSettingsService(fixture.Factory, cache);
+        var original = await service.SaveAsync("1gb", "test", CancellationToken.None);
+        var runtime = new ResourceRuntime("worker", new ConfigurationBuilder().Build());
+        runtime.Apply(original, cache);
+        await using (var db = await fixture.Factory.CreateDbContextAsync())
+        {
+            db.ConfigurationProcessStatuses.Add(new ConfigurationProcessStatus {
+                ProcessId = "worker-custom", InstanceName = "test", Roles = "worker", LastSeenAt = DateTimeOffset.UtcNow,
+                ResourceStatusJson = JsonSerializer.Serialize(runtime.Snapshot()) });
+            await db.SaveChangesAsync();
+        }
+        var initialStatus = await service.StatusAsync(CancellationToken.None);
+        Assert.Equal("applied", initialStatus.Processes.Single().State);
+        Assert.Equal("1gb", initialStatus.ProfileId);
+        Assert.Equal(2, initialStatus.Values?.DeliveryConcurrency);
+        var custom = original.Values! with { DeliveryConcurrency = 3, VersionPollSeconds = 4 };
+        await service.SaveAsync(new ResourceSelection("1gb", custom), "test", CancellationToken.None);
+        Assert.Equal("applying", (await service.StatusAsync(CancellationToken.None)).Processes.Single().State);
+        runtime.Apply(await service.ReadAsync(CancellationToken.None), cache);
+        await using (var db = await fixture.Factory.CreateDbContextAsync())
+        {
+            var process = await db.ConfigurationProcessStatuses.SingleAsync();
+            process.ResourceStatusJson = JsonSerializer.Serialize(runtime.Snapshot());
+            await db.SaveChangesAsync();
+        }
+        Assert.Equal("applied", (await service.StatusAsync(CancellationToken.None)).Processes.Single().State);
+        Assert.Equal(3, runtime.Delivery.Limit);
+        Assert.Equal(4, cache.Options.VersionPollSeconds);
+        await Assert.ThrowsAsync<ArgumentException>(() => service.SaveAsync(new ResourceSelection("1gb",
+            custom with { EntryBytes = custom.CacheBytes + 1 }), "test", CancellationToken.None));
     }
 
     [Theory]

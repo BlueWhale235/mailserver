@@ -54,17 +54,43 @@ public sealed record MailRuleView(
 
 public sealed record RuleFolderCoverage(string Name, int AvailableAccounts, int TotalAccounts);
 
-public sealed record MailRuleFacts(
-    IReadOnlyList<string> Senders,
-    IReadOnlyList<string> SenderDomains,
-    IReadOnlyList<string> Recipients,
-    IReadOnlyList<string> Cc,
-    string Subject,
-    string Body,
-    IReadOnlyList<string> AttachmentNames,
-    long MessageSize,
-    DateTimeOffset MessageTime,
-    bool HasAttachment);
+public sealed class MailRuleFacts
+{
+    private readonly Lazy<string> _body;
+    private readonly Lazy<IReadOnlyList<string>> _attachments;
+    private bool? _hasAttachmentOverride;
+    public IReadOnlyList<string> Senders { get; }
+    public IReadOnlyList<string> SenderDomains { get; }
+    public IReadOnlyList<string> Recipients { get; }
+    public IReadOnlyList<string> Cc { get; }
+    public string Subject { get; }
+    public string Body => _body.Value;
+    public IReadOnlyList<string> AttachmentNames => _attachments.Value;
+    public long MessageSize { get; }
+    public DateTimeOffset MessageTime { get; }
+    public bool HasAttachment => _hasAttachmentOverride ?? _attachments.Value.Count > 0;
+    public MailRuleFacts(IReadOnlyList<string> senders, IReadOnlyList<string> senderDomains,
+        IReadOnlyList<string> recipients, IReadOnlyList<string> cc, string subject,
+        Func<string> body, Func<IReadOnlyList<string>> attachments, long messageSize,
+        DateTimeOffset messageTime)
+        : this(senders, senderDomains, recipients, cc, subject, new Lazy<string>(body),
+            new Lazy<IReadOnlyList<string>>(attachments), messageSize, messageTime) { }
+    internal MailRuleFacts(IReadOnlyList<string> senders, IReadOnlyList<string> senderDomains,
+        IReadOnlyList<string> recipients, IReadOnlyList<string> cc, string subject,
+        Lazy<string> body, Lazy<IReadOnlyList<string>> attachments, long messageSize,
+        DateTimeOffset messageTime)
+    {
+        Senders = senders; SenderDomains = senderDomains; Recipients = recipients; Cc = cc;
+        Subject = subject; MessageSize = messageSize; MessageTime = messageTime;
+        _body = body; _attachments = attachments;
+    }
+    public MailRuleFacts(IReadOnlyList<string> senders, IReadOnlyList<string> senderDomains,
+        IReadOnlyList<string> recipients, IReadOnlyList<string> cc, string subject,
+        string body, IReadOnlyList<string> attachments, long messageSize,
+        DateTimeOffset messageTime, bool hasAttachment)
+        : this(senders, senderDomains, recipients, cc, subject, () => body,
+            () => attachments, messageSize, messageTime) { _hasAttachmentOverride = hasAttachment; }
+}
 
 public sealed record MailRuleMatch(
     Guid RuleId,
@@ -84,8 +110,36 @@ public sealed partial class MailRuleService(
     ConfigurationVersionService? versions = null)
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    private static readonly AsyncLocal<EvaluationScope?> CurrentScope = new();
+    private sealed class EvaluationScope
+    {
+        public readonly Dictionary<(Guid DomainId, MailRuleDirection Direction), RuleSnapshot> Snapshots = new();
+        public readonly Dictionary<(Guid DomainId, MailRuleDirection Direction, MailRuleFacts Facts), MailRuleMatch?> Matches = new();
+        public readonly Dictionary<(Guid AccountId, MailRuleFacts Facts), MailRuleRejection?> Rejections = new();
+        public readonly Dictionary<MimeMessage, (Lazy<string> Body, Lazy<IReadOnlyList<string>> Attachments)> MimeContent = new();
+        public readonly Dictionary<(MimeMessage Message, string Sender, string Recipients, long Size, DateTimeOffset Time), MailRuleFacts> Facts = new();
+        public long? Version;
+        public void CheckVersion(long version)
+        {
+            if (Version is { } previous && previous != version)
+                throw new InvalidOperationException("Mail rules changed during message evaluation; retry later.");
+            Version = version;
+        }
+    }
+    private sealed class ScopeLease(EvaluationScope? previous, bool created) : IDisposable
+    {
+        public void Dispose() { if (created) CurrentScope.Value = previous; }
+    }
+    public static IDisposable BeginEvaluationScope()
+    {
+        var previous = CurrentScope.Value;
+        if (previous is null) CurrentScope.Value = new EvaluationScope();
+        return new ScopeLease(previous, previous is null);
+    }
     private sealed record CompiledPattern(string Text, Regex? Wildcard);
-    private sealed record CompiledCondition(MailRuleField Field, MailRuleOperator Operator, IReadOnlyList<CompiledPattern> Values);
+    private sealed record CompiledCondition(MailRuleField Field, MailRuleOperator Operator,
+        IReadOnlyList<CompiledPattern> Values, long? Number, DateTimeOffset? FirstTime,
+        DateTimeOffset? SecondTime, bool? Boolean);
     private sealed record CompiledRule(
         Guid Id,
         string Name,
@@ -300,13 +354,19 @@ public sealed partial class MailRuleService(
         MailRuleFacts facts,
         CancellationToken cancellationToken)
     {
+        var evaluation = CurrentScope.Value;
+        var resultKey = (domainId, direction, facts);
+        if (evaluation is not null && evaluation.Matches.TryGetValue(resultKey, out var prior)) return prior;
         var snapshot = await GetSnapshotAsync(domainId, direction, cancellationToken);
         if (snapshot.Oversized)
-            return await MatchBatchedAsync(domainId, direction, facts, rejectionOnly: false, cancellationToken) as MailRuleMatch;
+        {
+            var batched = await MatchBatchedAsync(domainId, direction, facts, rejectionOnly: false, cancellationToken) as MailRuleMatch;
+            if (evaluation is not null) evaluation.Matches[resultKey] = batched;
+            return batched;
+        }
         foreach (var rule in snapshot.Rules)
         {
-            var results = rule.Conditions.Select(x => Matches(x, facts)).ToArray();
-            var matched = rule.MatchMode == MailRuleMatchMode.All ? results.All(x => x) : results.Any(x => x);
+            var matched = RuleMatches(rule, facts);
             if (matched)
             {
                 logger.LogInformation(
@@ -320,10 +380,13 @@ public sealed partial class MailRuleService(
                 {
                     actions = [new MailRuleActionView(Guid.Empty, MailRuleActionKind.MoveToFolder, [rule.TargetMailboxName], 0)];
                 }
-                return new MailRuleMatch(rule.Id, rule.Name, rule.TargetMailboxName, actions);
+                var match = new MailRuleMatch(rule.Id, rule.Name, rule.TargetMailboxName, actions);
+                if (evaluation is not null) evaluation.Matches[resultKey] = match;
+                return match;
             }
         }
 
+        if (evaluation is not null) evaluation.Matches[resultKey] = null;
         return null;
     }
 
@@ -336,6 +399,9 @@ public sealed partial class MailRuleService(
         MailRuleFacts facts,
         CancellationToken cancellationToken)
     {
+        var evaluation = CurrentScope.Value;
+        var resultKey = (accountId, facts);
+        if (evaluation is not null && evaluation.Rejections.TryGetValue(resultKey, out var prior)) return prior;
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         var domainId = await db.Accounts.Where(x => x.Id == accountId)
             .Select(x => (Guid?)x.DomainId)
@@ -343,11 +409,14 @@ public sealed partial class MailRuleService(
         if (domainId is null) return null;
         var snapshot = await GetSnapshotAsync(domainId.Value, MailRuleDirection.Outgoing, cancellationToken);
         if (snapshot.Oversized)
-            return await MatchBatchedAsync(domainId.Value, MailRuleDirection.Outgoing, facts, rejectionOnly: true, cancellationToken) as MailRuleRejection;
+        {
+            var batched = await MatchBatchedAsync(domainId.Value, MailRuleDirection.Outgoing, facts, rejectionOnly: true, cancellationToken) as MailRuleRejection;
+            if (evaluation is not null) evaluation.Rejections[resultKey] = batched;
+            return batched;
+        }
         foreach (var rule in snapshot.Rules)
         {
-            var results = rule.Conditions.Select(x => Matches(x, facts)).ToArray();
-            var matched = rule.MatchMode == MailRuleMatchMode.All ? results.All(x => x) : results.Any(x => x);
+            var matched = RuleMatches(rule, facts);
             if (!matched) continue;
             var reject = rule.Actions.FirstOrDefault(x => x.Kind == MailRuleActionKind.Reject);
             if (reject is null) continue;
@@ -357,9 +426,12 @@ public sealed partial class MailRuleService(
                 rule.Id,
                 domainId,
                 reason ?? string.Empty);
-            return new MailRuleRejection(rule.Id, rule.Name, reason);
+            var rejection = new MailRuleRejection(rule.Id, rule.Name, reason);
+            if (evaluation is not null) evaluation.Rejections[resultKey] = rejection;
+            return rejection;
         }
 
+        if (evaluation is not null) evaluation.Rejections[resultKey] = null;
         return null;
     }
 
@@ -368,12 +440,17 @@ public sealed partial class MailRuleService(
         MailRuleDirection direction,
         CancellationToken cancellationToken)
     {
-        if (cache is null) return (await LoadSnapshotAsync(domainId, direction, cancellationToken)).Value;
-        return await cache.GetAsync(
+        var evaluation = CurrentScope.Value;
+        var key = (domainId, direction);
+        if (evaluation is not null && evaluation.Snapshots.TryGetValue(key, out var pinned)) return pinned;
+        if (cache is not null) evaluation?.CheckVersion(cache.Versions.Rules);
+        var snapshot = cache is null ? (await LoadSnapshotAsync(domainId, direction, cancellationToken)).Value : await cache.GetAsync(
             $"rules:{domainId:N}:{direction}",
             ConfigurationScopes.Rules,
             token => LoadSnapshotAsync(domainId, direction, token),
             cancellationToken);
+        if (evaluation is not null) evaluation.Snapshots[key] = snapshot;
+        return snapshot;
     }
 
     private async Task<(RuleSnapshot Value, long Size)> LoadSnapshotAsync(
@@ -381,16 +458,41 @@ public sealed partial class MailRuleService(
         MailRuleDirection direction,
         CancellationToken cancellationToken)
     {
+        for (var attempt = 0; attempt < 2; attempt++)
+        {
+            var before = versions is null ? null : await versions.ReadAsync(cancellationToken);
+            var result = await LoadSnapshotOnceAsync(domainId, direction, cancellationToken);
+            var after = versions is null ? before : await versions.ReadAsync(cancellationToken);
+            if (before?.Rules != after?.Rules) continue;
+            if (after is not null) CurrentScope.Value?.CheckVersion(after.Rules);
+            return result;
+        }
+        throw new InvalidOperationException("Mail rules changed repeatedly during snapshot loading.");
+    }
+
+    private async Task<(RuleSnapshot Value, long Size)> LoadSnapshotOnceAsync(
+        Guid domainId,
+        MailRuleDirection direction,
+        CancellationToken cancellationToken)
+    {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
-        var count = await db.MailRules.AsNoTracking()
-            .CountAsync(x => x.DomainId == domainId && x.Direction == direction && x.IsEnabled, cancellationToken);
-        var estimate = 512L + count * 2048L;
+        var candidates = db.MailRules.AsNoTracking()
+            .Where(x => x.DomainId == domainId && x.Direction == direction && x.IsEnabled);
+        var count = await candidates.CountAsync(cancellationToken);
+        if (count == 0) return (new RuleSnapshot([], false), 128);
+        var estimate = 512L + await candidates.Select(x =>
+            512L + x.Name.Length * 2L + x.TargetMailboxName.Length * 2L
+            + x.Conditions.Sum(condition => 128L + condition.ValuesJson.Length * 2L)
+            + x.Actions.Sum(action => 96L + action.ValuesJson.Length * 2L))
+            .SumAsync(cancellationToken);
         if (cache is not null && estimate > cache.Options.MaximumEntryBytes)
-            return (new RuleSnapshot([], true), estimate);
+            return (new RuleSnapshot([], true), Math.Max(1, Math.Min(128, cache.Options.MaximumEntryBytes)));
         var rows = await LoadRuleBatchAsync(db, domainId, direction, 0, Math.Max(1, count), cancellationToken);
         var rules = rows.Select(Compile).ToArray();
         estimate = 512L + rows.Sum(EstimateRuleSize);
-        return (new RuleSnapshot(rules, estimate > (cache?.Options.MaximumEntryBytes ?? long.MaxValue)), estimate);
+        var oversized = estimate > (cache?.Options.MaximumEntryBytes ?? long.MaxValue);
+        return (new RuleSnapshot(oversized ? [] : rules, oversized), oversized && cache is not null
+            ? Math.Max(1, Math.Min(128, cache.Options.MaximumEntryBytes)) : estimate);
     }
 
     private async Task<object?> MatchBatchedAsync(
@@ -403,6 +505,7 @@ public sealed partial class MailRuleService(
         for (var attempt = 0; attempt < 2; attempt++)
         {
             var before = versions is null ? null : await versions.ReadAsync(cancellationToken);
+            if (before is not null) CurrentScope.Value?.CheckVersion(before.Rules);
             await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
             var batchSize = Math.Clamp(cache?.Options.RuleFallbackBatchSize ?? 64, 1, 512);
             object? candidate = null;
@@ -411,8 +514,7 @@ public sealed partial class MailRuleService(
                 var rows = await LoadRuleBatchAsync(db, domainId, direction, offset, batchSize, cancellationToken);
                 foreach (var rule in rows.Select(Compile))
                 {
-                    var results = rule.Conditions.Select(x => Matches(x, facts)).ToArray();
-                    var matched = rule.MatchMode == MailRuleMatchMode.All ? results.All(x => x) : results.Any(x => x);
+                    var matched = RuleMatches(rule, facts);
                     if (!matched) continue;
                     if (rejectionOnly)
                     {
@@ -434,6 +536,10 @@ public sealed partial class MailRuleService(
             }
             var after = versions is null ? before : await versions.ReadAsync(cancellationToken);
             if (before?.Rules == after?.Rules) return candidate;
+            var scope = CurrentScope.Value;
+            if (scope is not null && scope.Snapshots.Values.All(x => x.Oversized)
+                && scope.Matches.Count == 0 && scope.Rejections.Count == 0)
+                scope.Version = null;
         }
         throw new InvalidOperationException("Mail rules changed repeatedly during bounded evaluation.");
     }
@@ -463,13 +569,23 @@ public sealed partial class MailRuleService(
         rule.Name,
         rule.MatchMode,
         rule.TargetMailboxName,
-        rule.Conditions.OrderBy(x => x.Position).Select(x => new CompiledCondition(
-            x.Field,
-            x.Operator,
-            DeserializeValues(x.ValuesJson)
-                .Select(value => CompilePattern(x.Field == MailRuleField.SenderDomain ? NormalizeDomain(value) : value))
-                .ToArray())).ToArray(),
+        rule.Conditions.OrderBy(x => x.Position).Select(CompileCondition).ToArray(),
         rule.Actions.OrderBy(x => x.Position).Select(ToActionView).ToArray());
+
+    private static CompiledCondition CompileCondition(MailRuleCondition condition)
+    {
+        var values = DeserializeValues(condition.ValuesJson);
+        long? number = long.TryParse(values.FirstOrDefault(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsedNumber)
+            ? parsedNumber : null;
+        DateTimeOffset? first = DateTimeOffset.TryParse(values.FirstOrDefault(), CultureInfo.InvariantCulture,
+            DateTimeStyles.RoundtripKind, out var parsedFirst) ? parsedFirst : null;
+        DateTimeOffset? second = values.Length > 1 && DateTimeOffset.TryParse(values[1], CultureInfo.InvariantCulture,
+            DateTimeStyles.RoundtripKind, out var parsedSecond) ? parsedSecond : null;
+        bool? boolean = bool.TryParse(values.FirstOrDefault(), out var parsedBoolean) ? parsedBoolean : null;
+        CompiledPattern[] patterns = condition.Field is MailRuleField.MessageSize or MailRuleField.MessageTime or MailRuleField.HasAttachment
+            ? [] : values.Select(value => CompilePattern(condition.Field == MailRuleField.SenderDomain ? NormalizeDomain(value) : value)).ToArray();
+        return new(condition.Field, condition.Operator, patterns, number, first, second, boolean);
+    }
 
     private static CompiledPattern CompilePattern(string value)
     {
@@ -490,6 +606,9 @@ public sealed partial class MailRuleService(
         long messageSize,
         DateTimeOffset messageTime)
     {
+        var evaluation = CurrentScope.Value;
+        var factsKey = (message, envelopeSender, string.Join('\0', envelopeRecipients), messageSize, messageTime);
+        if (evaluation is not null && evaluation.Facts.TryGetValue(factsKey, out var previous)) return previous;
         var senders = new List<string>();
         AddAddress(senders, envelopeSender);
         foreach (var mailbox in message.From.Mailboxes) AddAddress(senders, mailbox.Address);
@@ -501,25 +620,30 @@ public sealed partial class MailRuleService(
             .Where(x => x.Length > 0)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
-        var attachments = message.Attachments
-            .Select(x => x.ContentDisposition?.FileName ?? x.ContentType.Name)
-            .Where(x => !string.IsNullOrWhiteSpace(x))
-            .Select(x => x!)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToArray();
-        var body = string.Join('\n', new[] { message.TextBody, NormalizeHtml(message.HtmlBody) }
-            .Where(x => !string.IsNullOrWhiteSpace(x)));
-        return new MailRuleFacts(
+        if (evaluation is null || !evaluation.MimeContent.TryGetValue(message, out var content))
+        {
+            content = (new Lazy<string>(() => string.Join('\n', new[] { message.TextBody, NormalizeHtml(message.HtmlBody) }
+                .Where(x => !string.IsNullOrWhiteSpace(x)))),
+                new Lazy<IReadOnlyList<string>>(() => message.Attachments
+                    .Select(x => x.ContentDisposition?.FileName ?? x.ContentType.Name)
+                    .Where(x => !string.IsNullOrWhiteSpace(x))
+                    .Select(x => x!)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToArray()));
+            if (evaluation is not null) evaluation.MimeContent[message] = content;
+        }
+        var facts = new MailRuleFacts(
             senders.Distinct(StringComparer.OrdinalIgnoreCase).ToArray(),
             domains,
             recipients.Distinct(StringComparer.OrdinalIgnoreCase).ToArray(),
             cc,
             message.Subject ?? string.Empty,
-            body,
-            attachments,
+            content.Body,
+            content.Attachments,
             messageSize,
-            messageTime,
-            attachments.Length > 0);
+            messageTime);
+        if (evaluation is not null) evaluation.Facts[factsKey] = facts;
+        return facts;
     }
 
     private static bool Matches(MailRuleCondition condition, MailRuleFacts facts)
@@ -546,7 +670,6 @@ public sealed partial class MailRuleService(
 
     private static bool Matches(CompiledCondition condition, MailRuleFacts facts)
     {
-        var values = condition.Values.Select(x => x.Text).ToArray();
         return condition.Field switch
         {
             MailRuleField.Sender => MatchText(facts.Senders, condition.Operator, condition.Values),
@@ -557,33 +680,69 @@ public sealed partial class MailRuleService(
             MailRuleField.Subject => MatchText([facts.Subject], condition.Operator, condition.Values),
             MailRuleField.Body => MatchText([facts.Body], condition.Operator, condition.Values),
             MailRuleField.AttachmentName => MatchText(facts.AttachmentNames, condition.Operator, condition.Values),
-            MailRuleField.MessageSize => MatchNumber(facts.MessageSize, condition.Operator, values),
-            MailRuleField.MessageTime => MatchTime(facts.MessageTime, condition.Operator, values),
+            MailRuleField.MessageSize => condition.Number is { } number && MatchNumber(facts.MessageSize, condition.Operator, number),
+            MailRuleField.MessageTime => condition.FirstTime is { } first
+                && MatchTime(facts.MessageTime, condition.Operator, first, condition.SecondTime),
             MailRuleField.HasAttachment => condition.Operator == MailRuleOperator.Is
-                                            && values.Length > 0
-                                            && bool.TryParse(values[0], out var expected)
+                                            && condition.Boolean is { } expected
                                             && expected == facts.HasAttachment,
             _ => false
         };
     }
+
+    private static bool RuleMatches(CompiledRule rule, MailRuleFacts facts)
+    {
+        if (rule.MatchMode == MailRuleMatchMode.All)
+        {
+            foreach (var condition in rule.Conditions)
+                if (!Matches(condition, facts)) return false;
+            return true;
+        }
+        foreach (var condition in rule.Conditions)
+            if (Matches(condition, facts)) return true;
+        return false;
+    }
+
+    private static bool MatchNumber(long candidate, MailRuleOperator operation, long expected) => operation switch
+    {
+        MailRuleOperator.GreaterThan => candidate > expected,
+        MailRuleOperator.GreaterThanOrEqual => candidate >= expected,
+        MailRuleOperator.LessThan => candidate < expected,
+        MailRuleOperator.LessThanOrEqual => candidate <= expected,
+        _ => false
+    };
+
+    private static bool MatchTime(DateTimeOffset candidate, MailRuleOperator operation,
+        DateTimeOffset first, DateTimeOffset? second) => operation switch
+    {
+        MailRuleOperator.Between => second is { } end && candidate >= first && candidate <= end,
+        MailRuleOperator.Before => candidate < first,
+        MailRuleOperator.After => candidate > first,
+        _ => false
+    };
 
     private static bool MatchText(
         IEnumerable<string> candidates,
         MailRuleOperator operation,
         IReadOnlyList<CompiledPattern> values)
     {
-        var source = candidates.Where(x => !string.IsNullOrWhiteSpace(x)).ToArray();
         static bool Match(string candidate, CompiledPattern pattern, bool contains) => pattern.Wildcard is not null
             ? pattern.Wildcard.IsMatch(candidate)
             : contains
                 ? candidate.Contains(pattern.Text, StringComparison.OrdinalIgnoreCase)
                 : string.Equals(candidate, pattern.Text, StringComparison.OrdinalIgnoreCase);
+        bool Any(CompiledPattern value, bool contains)
+        {
+            foreach (var candidate in candidates)
+                if (!string.IsNullOrWhiteSpace(candidate) && Match(candidate, value, contains)) return true;
+            return false;
+        }
         return operation switch
         {
-            MailRuleOperator.ContainsAny => values.Any(value => source.Any(candidate => Match(candidate, value, true))),
-            MailRuleOperator.ContainsAll => values.All(value => source.Any(candidate => Match(candidate, value, true))),
-            MailRuleOperator.EqualsAny => values.Any(value => source.Any(candidate => Match(candidate, value, false))),
-            MailRuleOperator.NotContainsAny => values.All(value => source.All(candidate => !Match(candidate, value, true))),
+            MailRuleOperator.ContainsAny => values.Any(value => Any(value, true)),
+            MailRuleOperator.ContainsAll => values.All(value => Any(value, true)),
+            MailRuleOperator.EqualsAny => values.Any(value => Any(value, false)),
+            MailRuleOperator.NotContainsAny => values.All(value => !Any(value, true)),
             _ => false
         };
     }

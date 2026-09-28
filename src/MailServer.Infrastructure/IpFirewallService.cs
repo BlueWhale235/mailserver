@@ -12,7 +12,7 @@ public sealed class IpFirewallService(
     ConfigurationSnapshotCache? cache = null,
     ConfigurationVersionService? versions = null)
 {
-    private sealed record ParsedNetwork(byte[] Address, int Prefix);
+    private sealed record ParsedNetwork(byte[] Address, int FullBytes, byte PartialMask);
     private sealed record FirewallSnapshot(IReadOnlyList<(string Cidr, ParsedNetwork Network)> Rules, bool Oversized);
 
     public async Task<bool> IsBlockedAsync(string remoteAddress, CancellationToken cancellationToken)
@@ -23,6 +23,7 @@ public sealed class IpFirewallService(
 
     public async Task<bool> IsBlockedAsync(IPAddress address, CancellationToken cancellationToken)
     {
+        var addressBytes = address.GetAddressBytes();
         if (cache is not null)
         {
             var snapshot = await cache.GetAsync(
@@ -30,8 +31,8 @@ public sealed class IpFirewallService(
                 ConfigurationScopes.Firewall,
                 LoadSnapshotAsync,
                 cancellationToken);
-            if (snapshot.Oversized) return await IsBlockedBatchedAsync(address, cancellationToken);
-            return MatchesSnapshot(snapshot, address);
+            if (snapshot.Oversized) return await IsBlockedBatchedAsync(address, addressBytes, cancellationToken);
+            return MatchesSnapshot(snapshot, address, addressBytes);
         }
 
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
@@ -57,14 +58,14 @@ public sealed class IpFirewallService(
         var count = await db.FirewallRules.AsNoTracking().CountAsync(x => x.IsEnabled, cancellationToken);
         var estimate = 256L + count * 160L;
         if (cache is not null && estimate > cache.Options.MaximumEntryBytes)
-            return (new FirewallSnapshot([], true), estimate);
+            return (new FirewallSnapshot([], true), 256);
         var cidrs = await db.FirewallRules.AsNoTracking().Where(x => x.IsEnabled)
             .OrderBy(x => x.Id).Select(x => x.Cidr).ToListAsync(cancellationToken);
         var rules = cidrs.Select(x => (x, ParseNetwork(x))).ToArray();
         return (new FirewallSnapshot(rules, false), estimate);
     }
 
-    private async Task<bool> IsBlockedBatchedAsync(IPAddress address, CancellationToken cancellationToken)
+    private async Task<bool> IsBlockedBatchedAsync(IPAddress address, byte[] addressBytes, CancellationToken cancellationToken)
     {
         for (var attempt = 0; attempt < 2; attempt++)
         {
@@ -78,7 +79,7 @@ public sealed class IpFirewallService(
                     .OrderBy(x => x.Id).Skip(offset).Take(batchSize).Select(x => x.Cidr).ToListAsync(cancellationToken);
                 foreach (var cidr in batch)
                 {
-                    if (Matches(ParseNetwork(cidr), address))
+                    if (Matches(ParseNetwork(cidr), addressBytes))
                     {
                         matchedCidr = cidr;
                         break;
@@ -95,11 +96,11 @@ public sealed class IpFirewallService(
         throw new InvalidOperationException("Firewall rules changed repeatedly during bounded evaluation.");
     }
 
-    private bool MatchesSnapshot(FirewallSnapshot snapshot, IPAddress address)
+    private bool MatchesSnapshot(FirewallSnapshot snapshot, IPAddress address, byte[] addressBytes)
     {
         foreach (var rule in snapshot.Rules)
         {
-            if (!Matches(rule.Network, address)) continue;
+            if (!Matches(rule.Network, addressBytes)) continue;
             logger.LogWarning("Connection from {RemoteAddress} was blocked by firewall rule {Rule}.", address, rule.Cidr);
             return true;
         }
@@ -110,22 +111,20 @@ public sealed class IpFirewallService(
     {
         var normalized = IpFirewallRules.NormalizeCidr(cidr);
         var slash = normalized.IndexOf('/');
-        return new ParsedNetwork(
-            IPAddress.Parse(normalized[..slash]).GetAddressBytes(),
-            int.Parse(normalized[(slash + 1)..]));
+        var prefix = int.Parse(normalized[(slash + 1)..]);
+        var remainingBits = prefix % 8;
+        return new ParsedNetwork(IPAddress.Parse(normalized[..slash]).GetAddressBytes(),
+            prefix / 8, remainingBits == 0 ? (byte)0 : (byte)(0xff << (8 - remainingBits)));
     }
 
-    private static bool Matches(ParsedNetwork network, IPAddress address)
+    private static bool Matches(ParsedNetwork network, ReadOnlySpan<byte> addressBytes)
     {
-        var addressBytes = address.GetAddressBytes();
         if (network.Address.Length != addressBytes.Length) return false;
-        var fullBytes = network.Prefix / 8;
-        var remainingBits = network.Prefix % 8;
-        for (var index = 0; index < fullBytes; index++)
+        for (var index = 0; index < network.FullBytes; index++)
             if (network.Address[index] != addressBytes[index]) return false;
-        if (remainingBits == 0) return true;
-        var mask = (byte)(0xff << (8 - remainingBits));
-        return (network.Address[fullBytes] & mask) == (addressBytes[fullBytes] & mask);
+        return network.PartialMask == 0 ||
+            (network.Address[network.FullBytes] & network.PartialMask) ==
+            (addressBytes[network.FullBytes] & network.PartialMask);
     }
 }
 

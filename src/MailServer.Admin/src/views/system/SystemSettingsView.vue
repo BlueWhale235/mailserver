@@ -4,7 +4,7 @@ import { onBeforeRouteLeave } from 'vue-router'
 import PageHeader from '../../components/PageHeader.vue'
 import StatusPill from '../../components/StatusPill.vue'
 import { ApiError, api, jsonBody } from '../../lib/api'
-import type { ResourceSettings, ResourceStatus, ResourceProcess } from '../../lib/resources'
+import type { ResourceSettings, ResourceStatus, ResourceProcess, ResourceProfile, ResourceValues } from '../../lib/resources'
 import { usePermission } from '../../composables/usePermission'
 
 type SectionKey = 'delivery' | 'smtp' | 'mailboxes' | 'certificates' | 'resources'
@@ -46,10 +46,15 @@ const delivery = ref<DeliverySettings>({ batchSize: 20, leaseSeconds: 120, maxim
 const smtp = ref<SmtpSettings>({ commandTimeoutSeconds: 300 })
 const mailboxes = ref<MailboxSettings>({ defaultFolders: [...systemFolders] })
 const certificates = ref<CertificateSettings>({ defaultMailHostName: null, allowSingleCertificateFallback: false, availableMailHostNames: [], effectiveDefaultMailHostName: null })
-const resources = ref<ResourceSettings>({ profileId: null, profiles: [] })
-const resourceStatus = ref<ResourceStatus>({ totalCacheBudgetBytes: 0, processes: [] })
+const resources = ref<ResourceSettings>({ profileId: null, profiles: [], values: null })
+const resourceStatus = ref<ResourceStatus>({ totalCacheBudgetBytes: 0, totalEstimatedCacheBytes: 0,
+  profileId: null, values: null, processes: [] })
 const statusError = ref('')
 const selectedProfile = computed(() => resources.value.profiles.find(x => x.id === resources.value.profileId))
+const resourceCustom = computed(() => Boolean(selectedProfile.value && resources.value.values
+  && JSON.stringify(resources.value.values) !== JSON.stringify(profileValues(selectedProfile.value))))
+const onlineCacheBytes = computed(() => resourceStatus.value.processes
+  .filter(x => x.state !== 'unreported').reduce((sum, x) => sum + x.estimatedCacheBytes, 0))
 let statusTimer: ReturnType<typeof globalThis.setInterval> | undefined
 let statusLoading = false
 const baselines = ref<Record<SectionKey, string>>({ delivery: '', smtp: '', mailboxes: '', certificates: '', resources: '' })
@@ -75,7 +80,7 @@ const snapshots = computed<Record<SectionKey, string>>(() => ({
     availableMailHostNames: certificates.value.availableMailHostNames,
     effectiveDefaultMailHostName: certificates.value.effectiveDefaultMailHostName,
   }),
-  resources: JSON.stringify({ profileId: resources.value.profileId }),
+  resources: JSON.stringify({ profileId: resources.value.profileId, values: resources.value.values }),
 }))
 const dirtySections = computed(() => sections.filter(section => loaded.value[section.key] && snapshots.value[section.key] !== baselines.value[section.key]).map(section => section.key))
 const dirtyCount = computed(() => dirtySections.value.length)
@@ -92,12 +97,26 @@ const deliveryErrors = computed(() => ({
 }))
 const smtpError = computed(() => integerError(smtp.value.commandTimeoutSeconds, 5, 3600))
 const certificateHostError = computed(() => hostNameError(certificates.value.defaultMailHostName))
+const resourceErrors = computed(() => {
+  const v = resources.value.values
+  if (!v) return ['请选择内存档位']
+  const errors = [
+    integerError(v.cacheBytes, 1, Number.MAX_SAFE_INTEGER), integerError(v.entryBytes, 1, Number.MAX_SAFE_INTEGER),
+    integerError(v.deliveryConcurrency, 1, 10000), integerError(v.smtpConnections, 1, 100000),
+    integerError(v.imapConnections, 1, 100000), integerError(v.versionPollSeconds, 1, 86400),
+    integerError(v.absoluteRefreshSeconds, 1, 86400), integerError(v.maximumConcurrentLoads, 1, 32),
+    integerError(v.ruleFallbackBatchSize, 1, 512),
+  ].filter(Boolean)
+  if (v.entryBytes > v.cacheBytes) errors.push('单项上限不能超过总预算')
+  if (v.absoluteRefreshSeconds < v.versionPollSeconds) errors.push('强制刷新周期不能短于检查周期')
+  return errors
+})
 const sectionValid = computed<Record<SectionKey, boolean>>(() => ({
   delivery: Object.values(deliveryErrors.value).every(value => !value),
   smtp: !smtpError.value,
   mailboxes: mailboxes.value.defaultFolders.length >= systemFolders.length,
   certificates: !certificateHostError.value,
-  resources: Boolean(selectedProfile.value),
+  resources: Boolean(selectedProfile.value) && resourceErrors.value.length === 0,
 }))
 const currentValid = computed(() => sectionValid.value[activeSection.value])
 
@@ -139,6 +158,22 @@ function formatBytes(value: number) {
   return `${(value / 1024 / 1024).toFixed(2)} MiB`
 }
 
+const mib = 1024 * 1024
+function profileValues(profile: ResourceProfile): ResourceValues {
+  return { cacheBytes: profile.cacheBytes, entryBytes: profile.entryBytes,
+    deliveryConcurrency: profile.deliveryConcurrency, smtpConnections: profile.smtpConnections,
+    imapConnections: profile.imapConnections, versionPollSeconds: 3,
+    absoluteRefreshSeconds: 60, maximumConcurrentLoads: 2, ruleFallbackBatchSize: 64 }
+}
+function chooseProfile(profile: ResourceProfile) {
+  resources.value.profileId = profile.id
+  resources.value.values = profileValues(profile)
+}
+function restoreProfile() { if (selectedProfile.value) chooseProfile(selectedProfile.value) }
+function updateResource<K extends keyof ResourceValues>(key: K, value: number) {
+  if (resources.value.values) resources.value.values[key] = value
+}
+
 function resourceState(process: ResourceProcess) {
   if (process.state === 'applied') return { label: '已应用', tone: 'success' as const }
   if (process.state === 'applying') return { label: '应用中', tone: 'warning' as const }
@@ -176,8 +211,9 @@ function acceptCertificates(value: CertificateSettings) {
 }
 
 function acceptResources(value: ResourceSettings) {
-  resources.value = value
-  baselines.value.resources = JSON.stringify({ profileId: value.profileId })
+  const profile = value.profiles.find(x => x.id === value.profileId)
+  resources.value = { ...value, values: value.values ? { ...value.values } : profile ? profileValues(profile) : null }
+  baselines.value.resources = JSON.stringify({ profileId: resources.value.profileId, values: resources.value.values })
   loaded.value.resources = true
 }
 
@@ -236,7 +272,11 @@ function resetCurrent() {
   else if (activeSection.value === 'smtp') smtp.value = JSON.parse(baseline) as SmtpSettings
   else if (activeSection.value === 'mailboxes') mailboxes.value = JSON.parse(baseline) as MailboxSettings
   else if (activeSection.value === 'certificates') certificates.value = JSON.parse(baseline) as CertificateSettings
-  else if (activeSection.value === 'resources') resources.value.profileId = JSON.parse(baseline).profileId
+  else if (activeSection.value === 'resources') {
+    const saved = JSON.parse(baseline) as Pick<ResourceSettings, 'profileId' | 'values'>
+    resources.value.profileId = saved.profileId
+    resources.value.values = saved.values
+  }
   folderError.value = ''
   notice.value = ''
 }
@@ -262,7 +302,7 @@ async function saveCurrent() {
       }
       acceptCertificates(await api<CertificateSettings>('/settings/certificates', { method: 'PUT', body: jsonBody(payload) }))
     } else if (section === 'resources') {
-      acceptResources(await api<ResourceSettings>('/settings/resources', { method: 'PUT', body: jsonBody({ profileId: resources.value.profileId }) }))
+      acceptResources(await api<ResourceSettings>('/settings/resources', { method: 'PUT', body: jsonBody({ profileId: resources.value.profileId, values: resources.value.values }) }))
       await refreshResourceStatus()
     } else {
       return
@@ -440,25 +480,44 @@ onBeforeUnmount(() => {
           <div class="profile-grid" role="radiogroup" aria-label="内存档位">
             <button v-for="profile in resources.profiles" :key="profile.id" type="button" role="radio"
               :aria-checked="resources.profileId === profile.id" :class="{ selected: resources.profileId === profile.id }"
-              :disabled="!can('settings.manage') || Boolean(savingSection)" @click="resources.profileId = profile.id">
+              :disabled="!can('settings.manage') || Boolean(savingSection)" @click="chooseProfile(profile)">
               <v-icon size="22">{{ resources.profileId === profile.id ? 'mdi-check-circle' : 'mdi-memory' }}</v-icon>
               <b>{{ profile.label }}</b>
               <span>配置缓存 {{ formatBytes(profile.cacheBytes) }}</span>
               <small>同时投递 {{ profile.deliveryConcurrency }} 封</small>
             </button>
           </div>
-          <div v-if="selectedProfile" class="cache-summary">
-            <div><span>所选缓存预算</span><b>{{ formatBytes(selectedProfile.cacheBytes) }}</b></div>
-            <div><span>并行投递</span><b>{{ selectedProfile.deliveryConcurrency }} 封</b></div>
-            <div><span>SMTP 连接上限</span><b>{{ selectedProfile.smtpConnections }}</b></div>
-            <div><span>IMAP 连接上限</span><b>{{ selectedProfile.imapConnections }}</b></div>
+          <div v-if="resources.values" class="resource-custom-heading">
+            <b>{{ resourceCustom ? `自定义（基于${selectedProfile?.label}）` : selectedProfile?.label }}</b>
+            <v-btn v-if="resourceCustom && can('settings.manage')" variant="text" @click="restoreProfile">恢复该预设</v-btn>
+          </div>
+          <div v-if="resources.values" class="resource-field-grid">
+            <v-text-field label="配置缓存总预算（MiB）" type="number" :model-value="resources.values.cacheBytes / mib" :disabled="!can('settings.manage')" @update:model-value="updateResource('cacheBytes', Number($event) * mib)" />
+            <v-text-field label="单项缓存上限（MiB）" type="number" :model-value="resources.values.entryBytes / mib" :disabled="!can('settings.manage')" @update:model-value="updateResource('entryBytes', Number($event) * mib)" />
+            <v-text-field label="Worker 并行投递数" type="number" :model-value="resources.values.deliveryConcurrency" :disabled="!can('settings.manage')" @update:model-value="updateResource('deliveryConcurrency', Number($event))" />
+            <v-text-field label="SMTP 连接上限" type="number" :model-value="resources.values.smtpConnections" :disabled="!can('settings.manage')" @update:model-value="updateResource('smtpConnections', Number($event))" />
+            <v-text-field label="IMAP 连接上限" type="number" :model-value="resources.values.imapConnections" :disabled="!can('settings.manage')" @update:model-value="updateResource('imapConnections', Number($event))" />
+          </div>
+          <details v-if="resources.values" class="resource-advanced"><summary>高级参数</summary>
+            <div class="resource-field-grid">
+              <v-text-field label="配置检查周期（秒）" type="number" :model-value="resources.values.versionPollSeconds" :disabled="!can('settings.manage')" @update:model-value="updateResource('versionPollSeconds', Number($event))" />
+              <v-text-field label="强制刷新周期（秒）" type="number" :model-value="resources.values.absoluteRefreshSeconds" :disabled="!can('settings.manage')" @update:model-value="updateResource('absoluteRefreshSeconds', Number($event))" />
+              <v-text-field label="缓存加载并发" type="number" :model-value="resources.values.maximumConcurrentLoads" :disabled="!can('settings.manage')" @update:model-value="updateResource('maximumConcurrentLoads', Number($event))" />
+              <v-text-field label="超预算规则查询批次" type="number" :model-value="resources.values.ruleFallbackBatchSize" :disabled="!can('settings.manage')" @update:model-value="updateResource('ruleFallbackBatchSize', Number($event))" />
+            </div>
+          </details>
+          <v-alert v-if="resourceErrors.length && resources.values" type="warning" variant="tonal" density="compact">{{ resourceErrors[0] }}</v-alert>
+          <div v-if="resources.values" class="cache-summary">
+            <div><span>配置缓存预算</span><b>{{ formatBytes(resources.values.cacheBytes) }}</b></div>
+            <div><span>并行投递</span><b>{{ resources.values.deliveryConcurrency }} 封</b></div>
+            <div><span>请求的 SMTP / IMAP 上限</span><b>{{ resources.values.smtpConnections }} / {{ resources.values.imapConnections }}</b></div>
           </div>
           <p class="resource-help">档位不是整机内存上限或吞吐承诺。配置文件中更低的连接限制仍然有效；512 MB 档优先用于 SQLite 单进程部署。标准拆分部署按角色分配上面的预算，多副本分别计算。</p>
-          <div class="resource-status-heading"><h3>服务应用情况</h3><span>当前在线实例预算合计 {{ formatBytes(resourceStatus.totalCacheBudgetBytes) }}</span></div>
+          <div class="resource-status-heading"><h3>服务应用情况</h3><span>在线实例缓存估算 {{ formatBytes(onlineCacheBytes) }} / {{ formatBytes(resourceStatus.totalCacheBudgetBytes) }}</span></div>
           <v-alert v-if="statusError" type="warning" variant="tonal" density="compact">{{ statusError }}</v-alert>
           <div class="cache-processes">
-            <article v-for="process in resourceStatus.processes" :key="process.processId">
-              <header><div><b>{{ process.instanceName }}</b><span>{{ process.roles.join(' · ') }}</span></div><StatusPill :label="resourceState(process).label" :tone="resourceState(process).tone" /></header>
+            <details v-for="process in resourceStatus.processes" :key="process.processId" class="resource-process-detail">
+              <summary><b>{{ process.instanceName }}</b><span>{{ process.roles.join(' · ') }}</span><StatusPill :label="resourceState(process).label" :tone="resourceState(process).tone" /></summary>
               <dl v-if="process.usage">
                 <div><dt>配置缓存估算用量</dt><dd>{{ formatBytes(process.estimatedCacheBytes) }} / {{ formatBytes(process.usage.cacheBudgetBytes) }}</dd></div>
                 <div v-if="process.roles.includes('worker')"><dt>正在投递 / 并发上限</dt><dd>{{ process.usage.activeDeliveries }} / {{ process.usage.deliveryLimit }}</dd></div>
@@ -467,7 +526,7 @@ onBeforeUnmount(() => {
                 <div><dt>最后上报</dt><dd>{{ new Date(process.lastSeenAt).toLocaleString() }}</dd></div>
               </dl>
               <v-alert v-if="process.message" type="warning" variant="tonal" density="compact">{{ process.message }}</v-alert>
-            </article>
+            </details>
             <v-alert v-if="!resourceStatus.processes.length" type="info" variant="tonal">未收到邮件服务上报。SMTP、IMAP 或 Worker 启动后会在这里显示；管理 API 不使用配置缓存。</v-alert>
           </div>
         </template>
@@ -508,6 +567,11 @@ onBeforeUnmount(() => {
 .profile-grid button:disabled { cursor: default; }
 .profile-grid b { font-size: 14px; }
 .profile-grid span, .profile-grid small, .resource-help { font-size: 12px; color: var(--text-muted); line-height: 1.6; }
+.resource-custom-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 8px 0 14px; }
+.resource-field-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 14px; }
+.resource-advanced { margin: 4px 0 16px; }
+.resource-advanced summary, .resource-process-detail summary { cursor: pointer; }
+.resource-advanced > .resource-field-grid { padding-top: 16px; }
 .resource-status-heading { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin: 24px 0 14px; }
 .resource-status-heading h3 { margin: 0; font-size: 15px; }
 .resource-status-heading span { font-size: 12px; color: var(--text-muted); }
@@ -563,9 +627,9 @@ onBeforeUnmount(() => {
 .cache-summary span, .cache-processes span, .cache-processes dt { color: var(--text-muted); font-size: 11px; }
 .cache-summary b { font-size: 17px; }
 .cache-processes { display: grid; gap: 12px; }
-.cache-processes article { padding: 16px; border: 1px solid var(--border); border-radius: 9px; }
-.cache-processes header { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
-.cache-processes header > div { display: flex; flex-direction: column; gap: 2px; }
+.cache-processes .resource-process-detail { padding: 16px; border: 1px solid var(--border); border-radius: 9px; }
+.cache-processes .resource-process-detail summary { display: flex; align-items: center; gap: 12px; }
+.cache-processes .resource-process-detail summary span { margin-right: auto; }
 .cache-processes dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 22px; margin: 14px 0 0; }
 .cache-processes dl > div { display: flex; flex-direction: column; gap: 2px; }
 .cache-processes dd { margin: 0; font-size: 12px; }
@@ -582,6 +646,6 @@ onBeforeUnmount(() => {
   .settings-nav, .field-grid.two-columns { grid-template-columns: 1fr; }
   .folder-add { grid-template-columns: 1fr; }
   .section-actions { align-items: stretch; flex-direction: column; gap: 8px; }
-  .cache-summary, .cache-processes dl { grid-template-columns: 1fr; }
+  .cache-summary, .cache-processes dl, .resource-field-grid { grid-template-columns: 1fr; }
 }
 </style>

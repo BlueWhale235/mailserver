@@ -3,6 +3,7 @@ import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue'
 import { onBeforeRouteLeave } from 'vue-router'
 import { inspectFirewallLines } from '../lib/firewallInput'
 import PageHeader from '../components/PageHeader.vue'
+import ConnectionProtectionPanel from '../components/ConnectionProtectionPanel.vue'
 import { api, jsonBody } from '../lib/api'
 import { useAuthStore } from '../stores/auth'
 interface Rule { id: string; cidr: string; note?: string; isEnabled: boolean }
@@ -152,6 +153,7 @@ onMounted(() => { if (auth.can('firewall.read')) void load() })
     <div class="table-footer"><span>第 {{ page }} / {{ pageCount }} 页</span><v-pagination v-model="page" :length="pageCount" density="compact"/></div>
   </section>
   <v-alert v-else type="info" variant="tonal">当前账号没有查看防火墙的权限。</v-alert>
+  <ConnectionProtectionPanel/>
   <div class="d-flex ga-3 mt-5">
     <v-btn v-if="auth.can('settings.read')" to="/system/plugins" variant="outlined">插件配置</v-btn>
     <v-btn v-if="auth.can('audit.read')" to="/system/audit" variant="outlined">审计日志</v-btn>

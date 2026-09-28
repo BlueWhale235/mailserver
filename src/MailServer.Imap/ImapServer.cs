@@ -63,8 +63,10 @@ public sealed partial class ImapServerService(
     DomainCertificateProvider certificateProvider,
     ILogger<ImapServerService> logger,
     IpFirewallService? firewall = null,
-    ResourceRuntime? resources = null) : BackgroundService
+    ResourceRuntime? resources = null,
+    ConnectionProtection? protection = null) : BackgroundService
 {
+    private sealed class CredentialRejectedException(string message) : InvalidOperationException(message);
     private const int MaximumBodyStructureDepth = 64;
     private const int MaximumBodyStructureParts = 2048;
     internal const string BaseCapabilities = "IMAP4rev1 UIDPLUS MOVE IDLE NAMESPACE ENABLE UTF8=ACCEPT SPECIAL-USE";
@@ -122,6 +124,16 @@ public sealed partial class ImapServerService(
                 break;
             }
 
+            var peer = (client.Client.RemoteEndPoint as IPEndPoint)?.Address;
+            IDisposable? sourcePermit = null;
+            var banned = protection is not null && peer is not null
+                && protection.IsAuthBlocked(ProtectedLoginProtocol.Imap, peer, DateTimeOffset.UtcNow);
+            if (protection is not null && peer is not null
+                && (banned || !protection.TryAcquire(ProtectedConnectionGroup.Imap, peer, DateTimeOffset.UtcNow, out sourcePermit)))
+            {
+                await RejectBusyAsync(client, endpoint, cancellationToken, banned);
+                continue;
+            }
             // 在 IMAP greeting 之前执行防火墙判断，避免被阻断来源继续探测能力列表。
             try
             {
@@ -133,6 +145,7 @@ public sealed partial class ImapServerService(
                         "IMAP connection from {RemoteAddress} was closed by firewall before greeting.",
                         remoteEndPoint.Address);
                     client.Dispose();
+                    sourcePermit?.Dispose();
                     continue;
                 }
             }
@@ -140,6 +153,7 @@ public sealed partial class ImapServerService(
             {
                 logger.LogError(exception, "IMAP firewall evaluation failed; closing only the current connection.");
                 client.Dispose();
+                sourcePermit?.Dispose();
                 continue;
             }
 
@@ -147,28 +161,34 @@ public sealed partial class ImapServerService(
             var permit = _connectionLimit.TryAcquire();
             if (permit is null)
             {
-                using (client)
-                {
-                    if (endpoint.Security != ConnectionSecurity.ImplicitTls)
-                    {
-                        try
-                        {
-                            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                            timeout.CancelAfter(TimeSpan.FromSeconds(2));
-                            await client.GetStream().WriteAsync("* BYE [UNAVAILABLE] Server busy; retry later.\r\n"u8.ToArray(), timeout.Token);
-                        }
-                        catch (Exception error) when (error is IOException or SocketException or OperationCanceledException) { }
-                    }
-                }
+                sourcePermit?.Dispose();
+                await RejectBusyAsync(client, endpoint, cancellationToken);
                 continue;
             }
-            _ = HandleLimitedAsync(client, endpoint, permit, cancellationToken);
+            _ = HandleLimitedAsync(client, endpoint, permit, sourcePermit, cancellationToken);
         }
     }
 
-    private async Task HandleLimitedAsync(TcpClient client, ImapEndpointOptions endpoint, IDisposable permit, CancellationToken token)
+    private static async Task RejectBusyAsync(TcpClient client, ImapEndpointOptions endpoint, CancellationToken token, bool banned = false)
     {
-        using (permit) await HandleClientAsync(client, endpoint, token);
+        using (client)
+        {
+            if (endpoint.Security == ConnectionSecurity.ImplicitTls) return;
+            try
+            {
+                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
+                timeout.CancelAfter(TimeSpan.FromSeconds(2));
+                var reply = banned ? "* BYE [UNAVAILABLE] Too many authentication failures\r\n"
+                    : "* BYE [UNAVAILABLE] Server busy; retry later.\r\n";
+                await client.GetStream().WriteAsync(Encoding.ASCII.GetBytes(reply), timeout.Token);
+            }
+            catch (Exception error) when (error is IOException or SocketException or OperationCanceledException) { }
+        }
+    }
+
+    private async Task HandleLimitedAsync(TcpClient client, ImapEndpointOptions endpoint, IDisposable permit, IDisposable? sourcePermit, CancellationToken token)
+    {
+        using (permit) using (sourcePermit) await HandleClientAsync(client, endpoint, token);
     }
 
     private async Task HandleClientAsync(
@@ -179,13 +199,15 @@ public sealed partial class ImapServerService(
         var remote = client.Client.RemoteEndPoint?.ToString() ?? "unknown";
         using (client)
         {
+            using var preAuthentication = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            preAuthentication.CancelAfter(TimeSpan.FromSeconds(protection?.Settings.PreAuthenticationSeconds ?? 120));
             try
             {
                 Stream stream = client.GetStream();
                 var isTls = false;
                 if (endpoint.Security == ConnectionSecurity.ImplicitTls)
                 {
-                    stream = await UpgradeTlsAsync(stream, cancellationToken);
+                    stream = await UpgradeTlsBoundedAsync(stream, preAuthentication.Token);
                     isTls = true;
                 }
 
@@ -222,7 +244,8 @@ public sealed partial class ImapServerService(
 
                 while (!cancellationToken.IsCancellationRequested)
                 {
-                    var line = await connection.ReadLineAsync(cancellationToken);
+                    var commandToken = state.AccountId is null ? preAuthentication.Token : cancellationToken;
+                    var line = await connection.ReadLineAsync(commandToken);
                     if (line is null) return;
                     var firstSpace = line.IndexOf(' ');
                     if (firstSpace <= 0)
@@ -249,11 +272,11 @@ public sealed partial class ImapServerService(
                             remote,
                             endpoint.Security,
                             isTls,
-                            cancellationToken);
+                            commandToken);
                     if (!keepRunning) return;
                     if (command == "STARTTLS" && state.TlsUpgradeRequested)
                     {
-                        stream = await UpgradeTlsAsync(connection.Detach(), cancellationToken);
+                        stream = await UpgradeTlsBoundedAsync(connection.Detach(), commandToken);
                         connection.Attach(stream);
                         isTls = true;
                         // STARTTLS 后必须丢弃认证和选择邮箱状态，避免明文阶段状态跨越到 TLS 会话。
@@ -270,6 +293,10 @@ public sealed partial class ImapServerService(
             catch (TimeoutException)
             {
                 logger.LogInformation("IMAP client {Remote} timed out.", remote);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                logger.LogInformation("IMAP client {Remote} exceeded the authentication or TLS deadline.", remote);
             }
             catch (AuthenticationException exception)
             {
@@ -327,6 +354,14 @@ public sealed partial class ImapServerService(
         bool isTls,
         CancellationToken cancellationToken)
     {
+        var peer = IpFirewallRules.TryParseRemoteAddress(remote);
+        if (protection is not null && peer is not null && state.AccountId is null
+            && (command is "LOGIN" or "AUTHENTICATE")
+            && protection.IsAuthBlocked(ProtectedLoginProtocol.Imap, peer, DateTimeOffset.UtcNow))
+        {
+            await connection.WriteLineAsync("* BYE [UNAVAILABLE] Too many authentication failures", cancellationToken);
+            return false;
+        }
         try
         {
             return await DispatchAsync(
@@ -340,6 +375,17 @@ public sealed partial class ImapServerService(
                 endpointSecurity,
                 isTls,
                 cancellationToken);
+        }
+        catch (CredentialRejectedException exception)
+        {
+            var blocked = protection is not null && peer is not null
+                && protection.RecordAuthFailure(ProtectedLoginProtocol.Imap, peer, DateTimeOffset.UtcNow);
+            await connection.WriteLineAsync($"{tag} NO {Quote(exception.Message)}", cancellationToken);
+            if (blocked)
+            {
+                await connection.WriteLineAsync("* BYE [UNAVAILABLE] Too many authentication failures", cancellationToken);
+                return false;
+            }
         }
         catch (KeyNotFoundException exception)
         {
@@ -684,7 +730,7 @@ public sealed partial class ImapServerService(
                 "IMAP authentication failed for {UserName} from {Remote}.",
                 address,
                 remote);
-            throw new InvalidOperationException("Authentication failed.");
+            throw new CredentialRejectedException("Authentication failed.");
         }
 
         await CompleteAuthenticationAsync(scope.ServiceProvider, state, accountId.Value, address, remote, isTls, cancellationToken);
@@ -706,13 +752,15 @@ public sealed partial class ImapServerService(
             new AuthenticationContext(MailProtocol.Imap, mechanism, userName, token, remote, isTls),
             cancellationToken);
         if (result.Status != AuthenticationStatus.Success || string.IsNullOrWhiteSpace(result.Identity))
-            throw new InvalidOperationException(
+            throw (result.Status == AuthenticationStatus.Failure
+                ? new CredentialRejectedException(result.Message ?? "Authentication failed.")
+                : new InvalidOperationException(
                 result.Status == AuthenticationStatus.NotHandled
                     ? "Authentication mechanism is not available."
-                    : result.Message ?? "Authentication failed.");
+                    : result.Message ?? "Authentication failed."));
         var authenticator = scope.ServiceProvider.GetRequiredService<IAccountAuthenticator>();
         var accountId = await authenticator.ResolveMailboxIdentityAsync(result.Identity, cancellationToken);
-        if (accountId is null) throw new InvalidOperationException("Authentication identity is not an active mailbox.");
+        if (accountId is null) throw new CredentialRejectedException("Authentication identity is not an active mailbox.");
         await CompleteAuthenticationAsync(
             scope.ServiceProvider,
             state,
@@ -1705,6 +1753,13 @@ public sealed partial class ImapServerService(
     {
         using var scope = scopeFactory.CreateScope();
         await action(scope.ServiceProvider.GetRequiredService<IMailboxService>());
+    }
+
+    private async Task<Stream> UpgradeTlsBoundedAsync(Stream stream, CancellationToken cancellationToken)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(protection?.Settings.TlsHandshakeSeconds ?? 10));
+        return await UpgradeTlsAsync(stream, timeout.Token);
     }
 
     private async Task<Stream> UpgradeTlsAsync(Stream stream, CancellationToken cancellationToken)

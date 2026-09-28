@@ -492,6 +492,15 @@ function addPreviewAudit(input: Omit<MockAuditEntry, 'id' | 'number' | 'rawJson'
 }
 
 const previewSettings: Record<string, Record<string, unknown>> = {
+  '/security/connection-protection': {
+    enabled: true,
+    smtpLogin: { windowMinutes: 15, maximumFailures: 5, blockMinutes: 30 },
+    imapLogin: { windowMinutes: 15, maximumFailures: 5, blockMinutes: 30 },
+    smtpInbound: { perMinute: 120, burst: 30, maximumConcurrent: 16 },
+    smtpSubmission: { perMinute: 60, burst: 20, maximumConcurrent: 10 },
+    imap: { perMinute: 60, burst: 20, maximumConcurrent: 20 },
+    maximumTrackedSources: 4096, tlsHandshakeSeconds: 10, preAuthenticationSeconds: 120,
+  },
   '/settings/delivery': { batchSize: 20, leaseSeconds: 120, maximumAttempts: 5, pollIntervalSeconds: 5 },
   '/settings/smtp': { commandTimeoutSeconds: 300 },
   '/settings/mailboxes': { defaultFolders: ['INBOX', 'Sent', 'Drafts', 'Trash', 'Junk', 'Archives', 'Customers'] },
@@ -503,6 +512,8 @@ const previewSettings: Record<string, Record<string, unknown>> = {
   },
   '/settings/resources': {
     profileId: '1gb',
+    values: { cacheBytes: 8388608, entryBytes: 1048576, deliveryConcurrency: 2, smtpConnections: 16,
+      imapConnections: 32, versionPollSeconds: 3, absoluteRefreshSeconds: 60, maximumConcurrentLoads: 2, ruleFallbackBatchSize: 64 },
     profiles: [
       { id: '512mb', label: '极小 · 512 MB', cacheBytes: 4194304, entryBytes: 524288, deliveryConcurrency: 1, smtpConnections: 8, imapConnections: 16 },
       { id: '1gb', label: '小型 · 1 GB', cacheBytes: 8388608, entryBytes: 1048576, deliveryConcurrency: 2, smtpConnections: 16, imapConnections: 32 },
@@ -1371,20 +1382,41 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
   if (url.pathname === '/settings/resources/status' && method === 'GET') {
     const settings = previewSettings['/settings/resources']!
     const profile = (settings.profiles as import('./resources').ResourceProfile[]).find(x => x.id === settings.profileId)!
+    const limits = settings.values as import('./resources').ResourceValues
     return {
-      totalCacheBudgetBytes: profile.cacheBytes,
+      totalCacheBudgetBytes: limits.cacheBytes,
+      totalEstimatedCacheBytes: 344064,
+      profileId: profile.id,
+      values: settings.values,
       processes: [{
         processId: 'preview-all', instanceName: 'preview-host', roles: ['smtp', 'imap', 'worker'],
         lastSeenAt: new Date().toISOString(), estimatedCacheBytes: 344064, state: 'applied', message: null,
-        usage: { profileId: profile.id, cacheBudgetBytes: profile.cacheBytes, deliveryLimit: profile.deliveryConcurrency,
-          smtpLimit: profile.smtpConnections, imapLimit: profile.imapConnections, activeDeliveries: 1, activeSmtp: 2, activeImap: 3 },
+        usage: { profileId: profile.id, cacheBudgetBytes: limits.cacheBytes, deliveryLimit: limits.deliveryConcurrency,
+          smtpLimit: limits.smtpConnections, imapLimit: limits.imapConnections, activeDeliveries: 1, activeSmtp: 2, activeImap: 3 },
       }],
     } as T
+  }
+  if (url.pathname === '/security/connection-protection/status' && method === 'GET') {
+    return { processes: [{ instanceName: 'preview-local', roles: 'smtp,imap', lastSeenAt: new Date().toISOString(), state: 'applied', trackedSources: 0 }] } as T
   }
   if (previewSettings[url.pathname]) {
     if (method === 'PUT') {
       const input = JSON.parse(String(init.body)) as Record<string, unknown>
-      if (url.pathname === '/settings/message-templates') {
+      if (url.pathname === '/security/connection-protection') {
+        const numbers = [input.maximumTrackedSources, input.tlsHandshakeSeconds, input.preAuthenticationSeconds]
+        for (const key of ['smtpLogin', 'imapLogin']) {
+          const group = input[key] as Record<string, unknown>
+          numbers.push(group.windowMinutes, group.maximumFailures, group.blockMinutes)
+        }
+        for (const key of ['smtpInbound', 'smtpSubmission', 'imap']) {
+          const group = input[key] as Record<string, unknown>
+          numbers.push(group.perMinute, group.burst, group.maximumConcurrent)
+        }
+        if (!numbers.every(value => Number.isSafeInteger(value) && Number(value) > 0)
+          || Number(input.maximumTrackedSources) < 128 || Number(input.maximumTrackedSources) > 65536)
+          throw new Error('连接防护参数无效')
+        previewSettings[url.pathname] = input
+      } else if (url.pathname === '/settings/message-templates') {
         const senderName = String(input.senderDisplayName ?? '').trim()
         const permanentSubject = String(input.permanentFailureSubject ?? '').trim()
         const retrySubject = String(input.retryExhaustedSubject ?? '').trim()
@@ -1416,7 +1448,11 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
       } else if (url.pathname === '/settings/resources') {
         const current = previewSettings[url.pathname]!
         if (!(current.profiles as import('./resources').ResourceProfile[]).some(x => x.id === input.profileId)) throw new Error('请选择有效的内存档位。')
-        previewSettings[url.pathname] = { ...current, profileId: input.profileId }
+        const profile = (current.profiles as import('./resources').ResourceProfile[]).find(x => x.id === input.profileId)!
+        previewSettings[url.pathname] = { ...current, profileId: input.profileId, values: input.values ?? {
+          cacheBytes: profile.cacheBytes, entryBytes: profile.entryBytes, deliveryConcurrency: profile.deliveryConcurrency,
+          smtpConnections: profile.smtpConnections, imapConnections: profile.imapConnections,
+          versionPollSeconds: 3, absoluteRefreshSeconds: 60, maximumConcurrentLoads: 2, ruleFallbackBatchSize: 64 } }
       } else if (url.pathname === '/settings/delivery') {
         const batchSize = Number(input.batchSize)
         const leaseSeconds = Number(input.leaseSeconds)

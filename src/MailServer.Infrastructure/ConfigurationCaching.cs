@@ -157,7 +157,7 @@ public sealed class ConfigurationSnapshotCache : IDisposable
     private readonly Dictionary<string, Failure> _failures = new(StringComparer.Ordinal);
     private readonly Dictionary<string, long> _versions = new(StringComparer.Ordinal);
     private readonly CancellationTokenSource _lifetime = new();
-    private readonly SemaphoreSlim _loadLimit;
+    private readonly LoadAdmission _loadLimit;
     private readonly ILogger<ConfigurationSnapshotCache> _logger;
     private readonly Meter _meter = new("MailServer.ConfigurationCache", "1.0.0");
     private readonly Counter<long> _hitCounter, _missCounter, _evictionCounter, _failureCounter;
@@ -214,6 +214,19 @@ public sealed class ConfigurationSnapshotCache : IDisposable
             Options.MaximumEntryBytes = Math.Max(0, Math.Min(size, entrySize));
             foreach (var key in _entries.Where(x => x.Value.Size > Options.MaximumEntryBytes).Select(x => x.Key).ToArray()) Remove(key);
             while (_bytes > Options.SizeLimitBytes && _lru.First is not null) Remove(_lru.First.Value);
+        }
+    }
+    public void Reconfigure(long size, long entrySize, int pollSeconds, int refreshSeconds,
+        int concurrentLoads, int fallbackBatchSize)
+    {
+        lock (_sync)
+        {
+            Options.VersionPollSeconds = pollSeconds;
+            Options.AbsoluteRefreshSeconds = refreshSeconds;
+            Options.MaximumConcurrentLoads = concurrentLoads;
+            Options.RuleFallbackBatchSize = fallbackBatchSize;
+            _loadLimit.Resize(concurrentLoads);
+            Resize(size, entrySize);
         }
     }
     private void Remove(string key)
@@ -274,12 +287,11 @@ public sealed class ConfigurationSnapshotCache : IDisposable
     private async Task LoadAsync<T>(string key, string scope, long version,
         Func<CancellationToken, Task<(T Value, long Size)>> loader, TaskCompletionSource<CacheValue> source) where T : class
     {
-        bool entered = false;
+        IDisposable? admission = null;
         var stopwatch = Stopwatch.StartNew();
         try
         {
-            await _loadLimit.WaitAsync(_lifetime.Token);
-            entered = true;
+            admission = await _loadLimit.AcquireAsync(_lifetime.Token);
             var loaded = await loader(_lifetime.Token);
             var value = new CacheValue(loaded.Value, version, DateTimeOffset.UtcNow, Math.Max(1, loaded.Size));
             lock (_sync)
@@ -318,7 +330,7 @@ public sealed class ConfigurationSnapshotCache : IDisposable
         }
         finally
         {
-            if (entered) _loadLimit.Release();
+            admission?.Dispose();
             _loadDuration.Record(stopwatch.Elapsed.TotalMilliseconds);
         }
     }
@@ -326,8 +338,49 @@ public sealed class ConfigurationSnapshotCache : IDisposable
     {
         lock (_sync) { _disposed = true; _entries.Clear(); _nodes.Clear(); _lru.Clear(); _bytes = 0; }
         _lifetime.Cancel();
-        // In-flight loads own the semaphore until they complete.
+        // In-flight loads own their admission permits until they complete.
         _meter.Dispose();
+    }
+
+    private sealed class LoadAdmission(int limit)
+    {
+        private readonly object _sync = new();
+        private int _limit = limit;
+        private int _active;
+        private TaskCompletionSource _changed = NewSignal();
+        private static TaskCompletionSource NewSignal() => new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public void Resize(int limit)
+        {
+            lock (_sync) { _limit = Math.Clamp(limit, 1, 32); Signal(); }
+        }
+        public async Task<IDisposable> AcquireAsync(CancellationToken token)
+        {
+            while (true)
+            {
+                Task wait;
+                lock (_sync)
+                {
+                    if (_active < _limit) { _active++; return new Permit(this); }
+                    wait = _changed.Task;
+                }
+                await wait.WaitAsync(token);
+            }
+        }
+        private void Release()
+        {
+            lock (_sync) { _active--; Signal(); }
+        }
+        private void Signal()
+        {
+            var previous = _changed;
+            _changed = NewSignal();
+            previous.TrySetResult();
+        }
+        private sealed class Permit(LoadAdmission owner) : IDisposable
+        {
+            private int _disposed;
+            public void Dispose() { if (Interlocked.Exchange(ref _disposed, 1) == 0) owner.Release(); }
+        }
     }
 }
 
@@ -338,7 +391,9 @@ public sealed class ConfigurationCacheMonitor(
     IOptions<ConfigurationCacheOptions> options,
     ILogger<ConfigurationCacheMonitor> logger,
     ResourceSettingsService resources,
-    ResourceRuntime runtime) : BackgroundService
+    ResourceRuntime runtime,
+    ConnectionProtectionSettingsService protectionSettings,
+    ConnectionProtection protection) : BackgroundService
 {
     private readonly string _processId = $"{Environment.MachineName}:{Environment.ProcessId}:{Guid.NewGuid():N}";
     private readonly DateTimeOffset _startedAt = DateTimeOffset.UtcNow;
@@ -362,7 +417,10 @@ public sealed class ConfigurationCacheMonitor(
         var current = await versions.ReadAsync(token);
         if (current.Settings != _settingsVersion || DateTimeOffset.UtcNow - _lastResourceRead >= TimeSpan.FromSeconds(60))
         {
-            runtime.Apply((await resources.ReadAsync(token)).ProfileId, cache);
+            var resourceSettings = await resources.ReadAsync(token);
+            var connectionSettings = await protectionSettings.ReadAsync(token);
+            runtime.Apply(resourceSettings, cache);
+            protection.Apply(connectionSettings);
             _heartbeatRequested = true;
             _settingsVersion = current.Settings;
             _lastResourceRead = DateTimeOffset.UtcNow;
@@ -372,7 +430,6 @@ public sealed class ConfigurationCacheMonitor(
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        var poll = TimeSpan.FromSeconds(Math.Max(1, options.Value.VersionPollSeconds));
         var nextHeartbeat = DateTimeOffset.MinValue;
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -395,7 +452,7 @@ public sealed class ConfigurationCacheMonitor(
                 catch (Exception heartbeatError) when (heartbeatError is not OperationCanceledException)
                 { logger.LogDebug(heartbeatError, "Unable to report resource state."); }
             }
-            await Task.Delay(poll, stoppingToken);
+            await Task.Delay(TimeSpan.FromSeconds(Math.Max(1, cache.Options.VersionPollSeconds)), stoppingToken);
         }
     }
 
@@ -420,7 +477,11 @@ public sealed class ConfigurationCacheMonitor(
         status.Misses = cache.Misses;
         status.ReloadFailures = cache.ReloadFailures;
         status.LastError = cache.LastError;
-        status.ResourceStatusJson = System.Text.Json.JsonSerializer.Serialize(runtime.Snapshot());
+        status.ResourceStatusJson = System.Text.Json.JsonSerializer.Serialize(runtime.Snapshot() with
+        {
+            ProtectionConfigurationId = System.Text.Json.JsonSerializer.Serialize(protection.Settings),
+            ProtectedSources = protection.TrackedSources
+        });
         var cutoff = now.AddHours(-Math.Max(1, options.Value.ProcessRetentionHours));
         await db.ConfigurationProcessStatuses.Where(x => x.LastSeenAt < cutoff).ExecuteDeleteAsync(cancellationToken);
         await db.SaveChangesAsync(cancellationToken);

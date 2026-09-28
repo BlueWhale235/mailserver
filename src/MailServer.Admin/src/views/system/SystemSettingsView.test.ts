@@ -95,7 +95,7 @@ afterEach(() => {
 })
 
 describe('system settings safeguards', () => {
-  it('shows six memory profiles, previews limits, supports undo and saves only the selection', async () => {
+  it('fills a preset, permits custom values, supports restore and undo, then saves all values', async () => {
     const previous = vi.mocked(api).getMockImplementation()!
     vi.mocked(api).mockImplementation(async (path, init) => {
       if (path.startsWith('/settings/resources')) return mockApi(path, init) as never
@@ -109,13 +109,23 @@ describe('system settings safeguards', () => {
     expect(wrapper.text()).not.toContain('规则版本')
     await wrapper.findAll('[role="radio"]').find(x => x.text().includes('16 GB'))!.trigger('click')
     expect(wrapper.find('.cache-summary').text()).toContain('128.00 MiB')
+    const cacheField = wrapper.findAllComponents(TextField).find(x => x.props('label') === '配置缓存总预算（MiB）')!
+    cacheField.vm.$emit('update:modelValue', 96)
+    await nextTick()
+    expect(wrapper.text()).toContain('自定义（基于大型 · 16 GB 以上）')
+    await wrapper.findAll('button').find(x => x.text() === '恢复该预设')!.trigger('click')
+    expect(wrapper.find('.cache-summary').text()).toContain('128.00 MiB')
     expect(wrapper.text()).toContain('当前分区有未保存修改')
     await wrapper.findAll('button').find(x => x.text() === '撤销当前修改')!.trigger('click')
     expect(wrapper.text()).not.toContain('当前分区有未保存修改')
     await wrapper.findAll('[role="radio"]').find(x => x.text().includes('16 GB'))!.trigger('click')
     await wrapper.findAll('button').find(x => x.text() === '保存当前设置')!.trigger('click')
     await flushPromises()
-    expect(api).toHaveBeenCalledWith('/settings/resources', { method: 'PUT', body: JSON.stringify({ profileId: '16gb' }) })
+    expect(api).toHaveBeenCalledWith('/settings/resources', { method: 'PUT', body: JSON.stringify({ profileId: '16gb', values: {
+      cacheBytes: 134217728, entryBytes: 16777216, deliveryConcurrency: 32, smtpConnections: 256,
+      imapConnections: 512, versionPollSeconds: 3, absoluteRefreshSeconds: 60,
+      maximumConcurrentLoads: 2, ruleFallbackBatchSize: 64,
+    } }) })
     expect(wrapper.text()).toContain('资源与性能已保存')
     wrapper.unmount()
   })

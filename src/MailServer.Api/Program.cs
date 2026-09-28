@@ -2117,11 +2117,25 @@ api.MapGet("/settings/resources", async (ResourceSettingsService resources, Canc
 api.MapPut("/settings/resources", async (ResourceSelection request, ResourceSettingsService resources,
     HttpContext http, CancellationToken token) =>
 {
-    try { return Results.Ok(await resources.SaveAsync(request.ProfileId ?? "", Actor(http), token)); }
+    try { return Results.Ok(await resources.SaveAsync(request, Actor(http), token)); }
     catch (ArgumentException error) { return Results.BadRequest(new { error = error.Message }); }
 }).RequirePermission(PermissionCodes.SettingsUpdate);
 api.MapGet("/settings/resources/status", async (ResourceSettingsService resources, CancellationToken token) =>
     Results.Ok(await resources.StatusAsync(token))).RequirePermission(PermissionCodes.SettingsDetail);
+
+api.MapGet("/security/connection-protection", async (
+    ConnectionProtectionSettingsService settings, CancellationToken token) =>
+    Results.Ok(await settings.ReadAsync(token))).RequirePermission(PermissionCodes.FirewallList);
+api.MapPut("/security/connection-protection", async (
+    ConnectionProtectionSettings request, ConnectionProtectionSettingsService settings,
+    HttpContext http, CancellationToken token) =>
+{
+    try { return Results.Ok(await settings.SaveAsync(request, Actor(http), token)); }
+    catch (ArgumentException error) { return Results.BadRequest(new { error = error.Message }); }
+}).RequirePermission(PermissionCodes.FirewallUpdate);
+api.MapGet("/security/connection-protection/status", async (
+    ConnectionProtectionSettingsService settings, CancellationToken token) =>
+    Results.Ok(await settings.StatusAsync(token))).RequirePermission(PermissionCodes.FirewallList);
 
 api.MapGet("/settings/cache-status", async (
     ConfigurationVersionService configurationVersions,

@@ -2601,6 +2601,36 @@ public sealed class ProtocolAndPluginTests
         Assert.False(limiter.IsBlocked("192.0.2.1:4000", now.AddMinutes(33)));
     }
 
+    [Fact]
+    public async Task ImapOnlyCountsRejectedCredentialsAndClosesAfterThreshold()
+    {
+        var protection = new ConnectionProtection(new ConfigurationBuilder().Build());
+        protection.Apply(ConnectionProtectionSettings.Default with
+        {
+            ImapLogin = new LoginProtection(15, 2, 30)
+        });
+        var services = new ServiceCollection();
+        services.AddSingleton<IAccountAuthenticator>(new FakeAccountAuthenticator("alice@example.com", "secret"));
+        using var provider = services.BuildServiceProvider();
+        var imap = new ImapServerService(provider.GetRequiredService<IServiceScopeFactory>(),
+            Options.Create(new ImapServerOptions()), null!, NullLogger<ImapServerService>.Instance,
+            protection: protection);
+        await using var stream = new DuplexMemoryStream(string.Empty);
+        await using var connection = new ImapConnection(stream, TimeSpan.FromSeconds(1), 4096);
+        var state = new ImapSessionState();
+        const string remote = "192.0.2.44:50000";
+        Assert.True(await imap.ExecuteCommandAsync(connection, state, "A001", "LOGIN", "invalid",
+            false, remote, ConnectionSecurity.StartTls, true, CancellationToken.None));
+        Assert.True(await imap.ExecuteCommandAsync(connection, state, "A002", "LOGIN", "alice@example.com wrong",
+            false, remote, ConnectionSecurity.StartTls, true, CancellationToken.None));
+        Assert.False(await imap.ExecuteCommandAsync(connection, state, "A003", "LOGIN", "alice@example.com wrong",
+            false, remote, ConnectionSecurity.StartTls, true, CancellationToken.None));
+        Assert.Contains("A001 BAD", stream.OutputText);
+        Assert.Contains("A002 NO", stream.OutputText);
+        Assert.Contains("A003 NO", stream.OutputText);
+        Assert.Contains("* BYE [UNAVAILABLE] Too many authentication failures", stream.OutputText);
+    }
+
     [Theory]
     [InlineData("TO:<bob@example.com>", true, 0)]
     [InlineData("TO:<bob@example.com> NOTIFY=FAILURE", true, 1)]
@@ -2729,15 +2759,17 @@ public sealed class ProtocolAndPluginTests
         var service = CreateSmtpService();
         await using var stream = new DuplexMemoryStream(string.Empty);
         await using var connection = new SmtpConnection(stream, TimeSpan.FromSeconds(1), 4096);
+        var state = new SmtpSessionState();
 
         await service.AuthenticateAsync(
             connection,
-            new SmtpSessionState(),
+            state,
             arguments,
             "127.0.0.1:587",
             CancellationToken.None);
 
         Assert.Contains(expectedResponse, stream.OutputText);
+        Assert.False(state.CredentialRejected);
         Assert.DoesNotContain("secret", stream.OutputText);
     }
 
@@ -2759,6 +2791,7 @@ public sealed class ProtocolAndPluginTests
         Assert.Null(state.AuthenticatedUser);
         Assert.Null(state.AuthenticatedAccountId);
         Assert.Contains("535 5.7.8 Authentication credentials invalid", stream.OutputText);
+        Assert.True(state.CredentialRejected);
         Assert.DoesNotContain("wrong-password", stream.OutputText);
     }
 

@@ -71,6 +71,7 @@ public sealed class InboundMessageService(
         Stream content,
         CancellationToken cancellationToken)
     {
+        using var ruleEvaluation = MailRuleService.BeginEvaluationScope();
         logger.LogInformation(
             "Inbound message received from {RemoteAddress}: sender={Sender}, recipientCount={RecipientCount}, authenticatedUser={AuthenticatedUser}, helo={HeloName}.",
             envelope.RemoteAddress,

@@ -20,6 +20,58 @@ namespace MailServer.Tests;
 public sealed class HttpAcceptanceTests
 {
     [Fact]
+    public async Task ConnectionProtectionCanBeSavedAndRequiresFirewallManagement()
+    {
+        await using var host = await AcceptanceHost.StartAsync();
+        const string path = "/api/v1/security/connection-protection";
+        var current = await host.JsonAsync(HttpMethod.Get, path);
+        Assert.Equal(4096, current.GetProperty("maximumTrackedSources").GetInt32());
+        var changed = ConnectionProtectionSettings.Default with
+        {
+            ImapLogin = new LoginProtection(10, 3, 20),
+            MaximumTrackedSources = 512
+        };
+        await host.JsonAsync(HttpMethod.Put, path, changed);
+        var saved = await host.JsonAsync(HttpMethod.Get, path);
+        Assert.Equal(3, saved.GetProperty("imapLogin").GetProperty("maximumFailures").GetInt32());
+        Assert.Equal(512, saved.GetProperty("maximumTrackedSources").GetInt32());
+        Assert.Empty((await host.JsonAsync(HttpMethod.Get, path + "/status"))
+            .GetProperty("processes").EnumerateArray());
+        await host.JsonAsync(HttpMethod.Put, path, changed with { MaximumTrackedSources = 0 }, 400);
+        using var anonymous = await host.Anonymous.GetAsync(path);
+        Assert.Equal(HttpStatusCode.Unauthorized, anonymous.StatusCode);
+        await host.JsonAsync(HttpMethod.Post, "/api/v1/admins", new { userName = "firewall-reader", password = AcceptanceHost.Password,
+            isEnabled = true, grants = new[] { new { permissionCode = "firewall.read", resourceType = "", resourceKey = "" } } }, 201);
+        using var reader = await host.LoginAsync("firewall-reader");
+        using var allowed = await reader.GetAsync(path);
+        Assert.Equal(HttpStatusCode.OK, allowed.StatusCode);
+        using var denied = await reader.PutAsJsonAsync(path, changed);
+        Assert.Equal(HttpStatusCode.Forbidden, denied.StatusCode);
+        await using var db = await host.Factory.CreateDbContextAsync();
+        Assert.True(await db.SystemSettings.AnyAsync(x => x.Key == ConnectionProtectionSettingsService.Key));
+        Assert.True(await db.AuditRecords.AnyAsync(x => x.Action == "security.connection-protection.update"));
+    }
+
+    [Fact]
+    public async Task ConnectionProtectionSettingsReachTheMailHost()
+    {
+        await using var host = await AcceptanceHost.StartAsync(runAll: true);
+        const string path = "/api/v1/security/connection-protection";
+        await host.JsonAsync(HttpMethod.Put, path, ConnectionProtectionSettings.Default with
+        {
+            ImapLogin = new LoginProtection(15, 3, 30)
+        });
+        for (var attempt = 0; attempt < 100; attempt++)
+        {
+            var status = await host.JsonAsync(HttpMethod.Get, path + "/status");
+            if (status.GetProperty("processes").EnumerateArray().Any(x =>
+                    x.GetProperty("state").GetString() == "applied")) return;
+            await Task.Delay(100);
+        }
+        Assert.Fail("Mail host did not report applying the updated connection protection settings.");
+    }
+
+    [Fact]
     public async Task ResourceProfilesPropagateFromIndependentProcessToRunAll()
     {
         await using var host = await AcceptanceHost.StartAsync(runAll: true);
@@ -56,6 +108,11 @@ public sealed class HttpAcceptanceTests
         await host.JsonAsync(HttpMethod.Put, path, new { profileId = "invalid" }, 400);
         await host.JsonAsync(HttpMethod.Put, path, new { profileId = "4gb" });
         Assert.Equal("4gb", (await host.JsonAsync(HttpMethod.Get, path)).GetProperty("profileId").GetString());
+        var values = new ResourceValues(12 * 1024 * 1024, 1024 * 1024, 3, 20, 40, 4, 80, 3, 32);
+        var custom = await host.JsonAsync(HttpMethod.Put, path, new ResourceSelection("4gb", values));
+        Assert.Equal(3, custom.GetProperty("values").GetProperty("deliveryConcurrency").GetInt32());
+        Assert.Equal(12 * 1024 * 1024, (await host.JsonAsync(HttpMethod.Get, path)).GetProperty("values").GetProperty("cacheBytes").GetInt64());
+        await host.JsonAsync(HttpMethod.Put, path, new ResourceSelection("4gb", values with { EntryBytes = values.CacheBytes + 1 }), 400);
         var status = await host.JsonAsync(HttpMethod.Get, path + "/status");
         Assert.Empty(status.GetProperty("processes").EnumerateArray());
         using var anonymous = await host.Anonymous.GetAsync(path);
@@ -68,7 +125,9 @@ public sealed class HttpAcceptanceTests
         using var forbidden = await reader.PutAsJsonAsync(path, new { profileId = "16gb" });
         Assert.Equal(HttpStatusCode.Forbidden, forbidden.StatusCode);
         await using var db = await host.Factory.CreateDbContextAsync();
-        Assert.Equal("4gb", (await db.SystemSettings.SingleAsync(x => x.Key == ResourceSettingsService.Key)).Value);
+        var savedSetting = JsonDocument.Parse((await db.SystemSettings.SingleAsync(x => x.Key == ResourceSettingsService.Key)).Value);
+        Assert.Equal("4gb", savedSetting.RootElement.GetProperty("profileId").GetString());
+        Assert.Equal(12 * 1024 * 1024, savedSetting.RootElement.GetProperty("values").GetProperty("cacheBytes").GetInt64());
         Assert.True(await db.AuditRecords.AnyAsync(x => x.Action == "settings.resources.update"));
     }
 

@@ -8,6 +8,8 @@ using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 using MimeKit;
 using Xunit;
 
@@ -15,6 +17,92 @@ namespace MailServer.Tests;
 
 public sealed class MailRulesAndAliasesTests
 {
+    [Fact]
+    public async Task RuleEvaluationShortCircuitsBeforeLazyBodyAndAttachments()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var factory = environment.Services.GetRequiredService<IDbContextFactory<MailDbContext>>();
+        var rules = environment.Services.GetRequiredService<MailRuleService>();
+        Guid domainId;
+        await using (var db = await factory.CreateDbContextAsync())
+        {
+            var domain = new MailDomain { Name = "lazy.test" };
+            db.Domains.Add(domain);
+            await db.SaveChangesAsync();
+            domainId = domain.Id;
+        }
+        await rules.CreateAsync(domainId, new MailRuleInput("short circuit", MailRuleDirection.Incoming,
+            MailRuleMatchMode.All, "INBOX", true,
+            [new(MailRuleField.Subject, MailRuleOperator.EqualsAny, ["expected"]),
+             new(MailRuleField.Body, MailRuleOperator.ContainsAny, ["secret"]),
+             new(MailRuleField.AttachmentName, MailRuleOperator.ContainsAny, ["report"])]), "test", CancellationToken.None);
+        var bodyReads = 0;
+        var attachmentReads = 0;
+        var facts = new MailRuleFacts([], [], [], [], "different",
+            () => { bodyReads++; return "secret"; },
+            () => { attachmentReads++; return ["report.pdf"]; },
+            100, DateTimeOffset.UtcNow);
+        Assert.Null(await rules.MatchAsync(domainId, MailRuleDirection.Incoming, facts, CancellationToken.None));
+        Assert.Equal(0, bodyReads);
+        Assert.Equal(0, attachmentReads);
+    }
+
+    [Fact]
+    public async Task EvaluationScopePinsSnapshotAcrossRuleUpdate()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var factory = environment.Services.GetRequiredService<IDbContextFactory<MailDbContext>>();
+        var rules = environment.Services.GetRequiredService<MailRuleService>();
+        Guid domainId;
+        await using (var db = await factory.CreateDbContextAsync())
+        {
+            var domain = new MailDomain { Name = "scope.test" };
+            db.Domains.Add(domain);
+            await db.SaveChangesAsync();
+            domainId = domain.Id;
+        }
+        var input = new MailRuleInput("old", MailRuleDirection.Incoming, MailRuleMatchMode.All,
+            "INBOX", true, [new(MailRuleField.Subject, MailRuleOperator.EqualsAny, ["hello"])]);
+        var created = await rules.CreateAsync(domainId, input, "test", CancellationToken.None);
+        var facts = new MailRuleFacts([], [], [], [], "hello", "", [], 1, DateTimeOffset.UtcNow, false);
+        using (MailRuleService.BeginEvaluationScope())
+        {
+            Assert.Equal("old", (await rules.MatchAsync(domainId, MailRuleDirection.Incoming, facts, CancellationToken.None))?.RuleName);
+            await rules.UpdateAsync(domainId, created.Id, input with { Name = "new" }, "test", CancellationToken.None);
+            Assert.Equal("old", (await rules.MatchAsync(domainId, MailRuleDirection.Incoming, facts, CancellationToken.None))?.RuleName);
+        }
+        Assert.Equal("new", (await rules.MatchAsync(domainId, MailRuleDirection.Incoming, facts, CancellationToken.None))?.RuleName);
+    }
+
+    [Fact]
+    public async Task OversizedRuleSetCachesSmallBatchMarker()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var factory = environment.Services.GetRequiredService<IDbContextFactory<MailDbContext>>();
+        using var cache = new ConfigurationSnapshotCache(Options.Create(new ConfigurationCacheOptions
+            { MaximumEntryBytes = 1024, SizeLimitBytes = 4096 }), NullLogger<ConfigurationSnapshotCache>.Instance);
+        var rules = new MailRuleService(factory, NullLogger<MailRuleService>.Instance, cache,
+            environment.Services.GetRequiredService<ConfigurationVersionService>());
+        Guid domainId;
+        await using (var db = await factory.CreateDbContextAsync())
+        {
+            var domain = new MailDomain { Name = "oversized.test" };
+            db.Domains.Add(domain);
+            await db.SaveChangesAsync();
+            domainId = domain.Id;
+        }
+        await rules.CreateAsync(domainId, new MailRuleInput("large", MailRuleDirection.Incoming,
+            MailRuleMatchMode.All, "INBOX", true,
+            [new(MailRuleField.Subject, MailRuleOperator.ContainsAny, [new string('z', 4000)])]),
+            "test", CancellationToken.None);
+        var facts = new MailRuleFacts([], [], [], [], "not a match", "", [], 1, DateTimeOffset.UtcNow, false);
+        Assert.Null(await rules.MatchAsync(domainId, MailRuleDirection.Incoming, facts, CancellationToken.None));
+        Assert.Equal(1, cache.EntryCount);
+        var misses = cache.Misses;
+        Assert.Null(await rules.MatchAsync(domainId, MailRuleDirection.Incoming, facts, CancellationToken.None));
+        Assert.Equal(misses, cache.Misses);
+    }
+
     [Fact]
     public async Task FirewallSearchFiltersAndPaginatesOnTheServer()
     {

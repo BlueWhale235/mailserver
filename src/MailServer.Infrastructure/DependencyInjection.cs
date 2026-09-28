@@ -34,6 +34,8 @@ public static class DependencyInjection
         services.AddSingleton(runtime);
         if (!runtime.UsesCache) services.PostConfigure<ConfigurationCacheOptions>(value => value.Enabled = false);
         services.AddSingleton<ResourceSettingsService>();
+        services.AddSingleton<ConnectionProtectionSettingsService>();
+        services.AddSingleton<ConnectionProtection>();
         services.Configure<ForwardingOptions>(configuration.GetSection(ForwardingOptions.SectionName));
         services.Configure<PluginOptions>(configuration.GetSection(PluginOptions.SectionName));
         services.Configure<SecurityAssetsOptions>(configuration.GetSection(SecurityAssetsOptions.SectionName));
