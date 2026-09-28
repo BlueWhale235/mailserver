@@ -505,6 +505,10 @@ const previewSettings: Record<string, Record<string, unknown>> = {
   },
   '/settings/delivery': { batchSize: 20, leaseSeconds: 120, maximumAttempts: 5, pollIntervalSeconds: 5 },
   '/settings/smtp': { commandTimeoutSeconds: 300 },
+  '/settings/relay': { host: '', port: 18443, pairingHost: '', pairingPort: 18444,
+    receiveEnabled: false, sendEnabled: false, paired: false, pairingPending: false,
+    peerFingerprint: null, pendingExpiresAt: null,
+    maxInboundConnections: 32, maxConnectionsPerIp: 4, idleTimeoutSeconds: 120 },
   '/settings/mailboxes': { defaultFolders: ['INBOX', 'Sent', 'Drafts', 'Trash', 'Junk', 'Archives', 'Customers'] },
   '/settings/certificates': {
     defaultMailHostName: 'mail.northwind.cn',
@@ -1100,6 +1104,41 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
   if (path.split('?')[0] === '/quarantine/domains') return domains.map(domain => ({ id: domain.id, name: domain.name })) as T
   const url = new globalThis.URL(path, 'http://preview.local')
   const method = (init.method || 'GET').toUpperCase()
+  if (url.pathname === '/settings/relay/status')
+    return { connected: false, activeStreams: 0, lastConnected: null, lastError: null, processes: [] } as T
+  if (url.pathname === '/settings/relay/test' && method === 'POST')
+    throw new Error('预览模式没有运行中的中继服务器')
+  if (url.pathname === '/settings/relay/invitation') {
+    if (method === 'POST') {
+      const relay = previewSettings['/settings/relay']!
+      if (!relay.host || !relay.pairingHost) throw new Error('请先保存中继和配对地址')
+      relay.pairingPending = true
+      relay.paired = false
+      relay.peerFingerprint = null
+      relay.pendingExpiresAt = new Date(Date.now() + 600000).toISOString()
+      return { command: `mailserver relay pair --host ${relay.pairingHost} --port ${relay.pairingPort} --id preview --fingerprint preview`,
+        password: 'preview-password', expiresAt: relay.pendingExpiresAt } as T
+    }
+    if (method === 'DELETE') {
+      const relay = previewSettings['/settings/relay']!
+      relay.pairingPending = false
+      relay.pendingExpiresAt = null
+      return structuredClone(relay) as T
+    }
+  }
+  if (url.pathname === '/settings/relay/pairing' && method === 'DELETE') {
+    const relay = previewSettings['/settings/relay']!
+    relay.paired = false
+    relay.peerFingerprint = null
+    relay.pairingPending = false
+    relay.pendingExpiresAt = null
+    return { settings: structuredClone(relay), nodeRevoked: false } as T
+  }
+  if (url.pathname === '/settings/relay' && method === 'PUT') {
+    const input = JSON.parse(String(init.body))
+    previewSettings['/settings/relay'] = { ...previewSettings['/settings/relay']!, ...input }
+    return structuredClone(previewSettings['/settings/relay']) as T
+  }
   if (url.pathname === '/firewall/rules/search') {
     const query = (url.searchParams.get('query') ?? '').trim().toLowerCase()
     const enabled = url.searchParams.get('isEnabled')

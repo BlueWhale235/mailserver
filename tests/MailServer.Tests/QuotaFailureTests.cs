@@ -25,6 +25,55 @@ public sealed class QuotaFailureTests
     private const string Message = "From: sender@origin.test\r\nTo: alice@example.test\r\nSubject: quota\r\nMessage-ID: <quota@origin.test>\r\n\r\nhello\r\n";
     private static MemoryStream Content() => new(Encoding.UTF8.GetBytes(Message));
 
+    [Fact]
+    public async Task TunneledSmtpUsesNormalRecipientPolicyAndAcknowledgesAfterStorageCommit()
+    {
+        await using var env = await Environment.CreateAsync();
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        using var senderSocket = new TcpClient();
+        var connecting = senderSocket.ConnectAsync(IPAddress.Loopback, ((IPEndPoint)listener.LocalEndpoint).Port);
+        using var receiverSocket = await listener.AcceptTcpClientAsync();
+        await connecting;
+        await using var senderTunnel = new RelayTunnel(senderSocket.GetStream(), true);
+        await using var receiverTunnel = new RelayTunnel(receiverSocket.GetStream(), false);
+        var service = new SmtpServerService(env.Services.GetRequiredService<IServiceScopeFactory>(),
+            Options.Create(new SmtpServerOptions { CommandTimeoutSeconds = 10 }),
+            env.Services.GetRequiredService<DomainCertificateProvider>(), env.SmtpLog);
+        var endpoint = new SmtpEndpointOptions { Port = 25, Security = ConnectionSecurity.StartTls };
+        receiverTunnel.OnOpen = async (_, stream, token) =>
+        {
+            var method = typeof(SmtpServerService).GetMethod("HandleStreamClientAsync", BindingFlags.NonPublic | BindingFlags.Instance)!;
+            await (Task)method.Invoke(service, [null, endpoint, token, stream, "203.0.113.7:2525"])!;
+        };
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var senderLoop = senderTunnel.RunAsync(timeout.Token);
+        var receiverLoop = receiverTunnel.RunAsync(timeout.Token);
+        await using var session = await senderTunnel.OpenAsync(new RelayOpen("inbound", RemoteAddress: "203.0.113.7", RemotePort: 2525), timeout.Token);
+        using var reader = new StreamReader(session, Encoding.UTF8, false, 1024, true);
+        using var writer = new StreamWriter(session, new UTF8Encoding(false), 1024, true) { NewLine = "\r\n", AutoFlush = true };
+        Assert.StartsWith("220", await reader.ReadLineAsync(timeout.Token));
+        await writer.WriteLineAsync("HELO client.test");
+        Assert.StartsWith("250", await reader.ReadLineAsync(timeout.Token));
+        await writer.WriteLineAsync("MAIL FROM:<sender@origin.test>");
+        Assert.StartsWith("250", await reader.ReadLineAsync(timeout.Token));
+        await writer.WriteLineAsync("RCPT TO:<external@outside.test>");
+        Assert.StartsWith("550", await reader.ReadLineAsync(timeout.Token));
+        await writer.WriteLineAsync("RCPT TO:<alice@example.test>");
+        Assert.StartsWith("250", await reader.ReadLineAsync(timeout.Token));
+        await writer.WriteLineAsync("DATA");
+        Assert.StartsWith("354", await reader.ReadLineAsync(timeout.Token));
+        await writer.WriteAsync(Message);
+        await writer.WriteLineAsync(".");
+        Assert.StartsWith("250", await reader.ReadLineAsync(timeout.Token));
+        await using (var db = await env.Factory.CreateDbContextAsync())
+            Assert.Single(await db.Messages.ToListAsync());
+        await writer.WriteLineAsync("QUIT");
+        Assert.StartsWith("221", await reader.ReadLineAsync(timeout.Token));
+        timeout.Cancel();
+        await Task.WhenAll(senderLoop, receiverLoop);
+    }
+
     [Theory]
     [InlineData(1)]
     [InlineData(0)]

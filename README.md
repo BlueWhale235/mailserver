@@ -1,12 +1,12 @@
 # MailServer
 
-一个面向 .NET 10 的模块化 C# 邮件服务器。SMTP、IMAP、JSON API、Vue/Vuetify 管理后台和 Direct MX 投递 Worker 既可以独立运行，也可以通过便携 CLI 统一运行。
+一个面向 .NET 10 的模块化 C# 邮件服务器。SMTP、IMAP、JSON API、Vue/Vuetify 管理后台和投递 Worker 既可以独立运行，也可以通过便携 CLI 统一运行。
 
 ## 主要能力
 
 - SMTP：25/465/587、STARTTLS、隐式 TLS、AUTH、防开放中继及流式 DATA。
 - IMAP：UID、Flags、FETCH、SEARCH、STORE、COPY、MOVE、APPEND、EXPUNGE 和 IDLE。
-- 外发投递：仅 Direct MX，支持重试租约、退信、分阶段诊断、TLS 策略和 DKIM。
+- 外发投递：Direct MX 或一对一实时中继，支持重试租约、退信、分阶段诊断、TLS 策略和 DKIM。
 - 数据存储：SQLite、MySQL，以及独立的 EF Core 迁移程序集。
 - 管理与安全：`/api/v1`、`/admin`、JWT/API Key、PEM 证书和 TLS 1.2/1.3。
 - 扩展与运维：插件系统、单文件 CLI、诊断、Docker Compose 和便携发布。

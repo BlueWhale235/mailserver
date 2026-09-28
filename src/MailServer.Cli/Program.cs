@@ -15,6 +15,8 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using System.Net.Http.Json;
+using System.Text;
+using Microsoft.Extensions.Logging;
 
 return await MailServerCli.RunAsync(args);
 
@@ -59,6 +61,7 @@ internal static class MailServerCli
                 "admin" => await AdminAsync(parsed),
                 "domain" => await DomainAsync(parsed),
                 "account" => await AccountAsync(parsed),
+                "relay" => await RelayAsync(parsed),
                 "run" => await RunHostAsync(parsed),
                 _ => Fail($"Unknown command '{command}'.")
             };
@@ -352,6 +355,64 @@ internal static class MailServerCli
         return 0;
     }
 
+    private static async Task<int> RelayAsync(CliArguments args)
+    {
+        var action = args.Positionals.ElementAtOrDefault(1)?.ToLowerInvariant();
+        if (action is not ("pair" or "run" or "reset"))
+            return Fail("Usage: mailserver relay pair|run|reset [--config relay.json]");
+        var path = Path.GetFullPath(args.Get("config") ?? "relay.json");
+        var configuration = new ConfigurationBuilder()
+            .SetBasePath(Path.GetDirectoryName(path)!)
+            .AddJsonFile(Path.GetFileName(path), optional: true)
+            .AddEnvironmentVariables()
+            .Build();
+        Directory.SetCurrentDirectory(Path.GetDirectoryName(path)!);
+        if (action == "reset")
+        {
+            var root = Path.GetFullPath(configuration["SecurityAssets:RootPath"] ?? "security-assets");
+            var binding = Path.Combine(root, "relay", "binding.json");
+            if (File.Exists(binding)) File.Delete(binding);
+            Console.WriteLine("Relay binding removed. Its identity key was retained.");
+            return 0;
+        }
+        var identity = new RelayIdentity(configuration);
+        using var loggerFactory = LoggerFactory.Create(logging => logging.AddMailServerLogging(configuration));
+        var node = new RelayNodeService(identity, configuration, loggerFactory.CreateLogger<RelayNodeService>());
+        if (action == "run")
+        {
+            var port = ParsePort(args.Get("port") ?? "18443", allowZero: false);
+            var smtpPort = ParsePort(args.Get("smtp-port") ?? "25", allowZero: false);
+            using var shutdown = new CancellationTokenSource();
+            Console.CancelKeyPress += (_, eventArgs) => { eventArgs.Cancel = true; shutdown.Cancel(); };
+            try { await node.RunAsync(port, smtpPort, shutdown.Token); }
+            catch (OperationCanceledException) when (shutdown.IsCancellationRequested) { }
+            return 0;
+        }
+        var host = args.Get("host") ?? throw new ArgumentException("--host is required.");
+        var pairingPort = ParsePort(args.Get("port") ?? "18444", allowZero: false);
+        var id = args.Get("id") ?? throw new ArgumentException("--id is required.");
+        var fingerprint = args.Get("fingerprint") ?? throw new ArgumentException("--fingerprint is required.");
+        Console.Write("One-time pairing password: ");
+        var password = ReadSecret();
+        Console.WriteLine();
+        await node.PairAsync(host, pairingPort, id, fingerprint, password, CancellationToken.None);
+        Console.WriteLine("Relay paired. Start with: mailserver relay run");
+        return 0;
+    }
+
+    private static string ReadSecret()
+    {
+        if (Console.IsInputRedirected) return Console.ReadLine() ?? string.Empty;
+        var value = new StringBuilder();
+        while (true)
+        {
+            var key = Console.ReadKey(intercept: true);
+            if (key.Key == ConsoleKey.Enter) return value.ToString();
+            if (key.Key == ConsoleKey.Backspace) { if (value.Length > 0) value.Length--; continue; }
+            if (!char.IsControl(key.KeyChar)) value.Append(key.KeyChar);
+        }
+    }
+
     private static ServiceProvider BuildServices(IConfiguration configuration)
     {
         var services = new ServiceCollection();
@@ -430,7 +491,7 @@ internal static class MailServerCli
                 yield return $"Certificates:{pair.Item1} requires both certificate and private-key paths.";
         }
         if (configuration.GetSection("Relay").Exists())
-            yield return "Relay configuration is no longer supported. Remove the Relay section; MailServer 2.0 uses Direct MX exclusively.";
+            yield return "The legacy Relay configuration section is unsupported. Remove it and configure the paired relay in system settings.";
         foreach (var endpoint in configuration.GetSection("Smtp:Endpoints").Get<List<EndpointProbe>>() ?? [])
         {
             if (!IPAddress.TryParse(endpoint.Address, out _) || !IsPort(endpoint.Port))
@@ -686,6 +747,9 @@ internal static class MailServerCli
               mailserver domain add <domain>
               mailserver account create|password|enable|disable <address> [--password <value>]
               mailserver run all|api|smtp|imap|worker
+              mailserver relay pair --host ROOT --port 18444 --id ID --fingerprint SHA256 [--config relay.json]
+              mailserver relay run [--port 18443] [--smtp-port 25] [--config relay.json]
+              mailserver relay reset [--config relay.json]
 
             默认配置文件是 ./mailserver.json，可用 --config 或 MAILSERVER_CONFIG 覆盖。
             """);

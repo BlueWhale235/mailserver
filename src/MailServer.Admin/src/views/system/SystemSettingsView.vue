@@ -7,7 +7,7 @@ import { ApiError, api, jsonBody } from '../../lib/api'
 import type { ResourceSettings, ResourceStatus, ResourceProcess, ResourceProfile, ResourceValues } from '../../lib/resources'
 import { usePermission } from '../../composables/usePermission'
 
-type SectionKey = 'delivery' | 'smtp' | 'mailboxes' | 'certificates' | 'resources'
+type SectionKey = 'delivery' | 'smtp' | 'relay' | 'mailboxes' | 'certificates' | 'resources'
 
 interface DeliverySettings {
   batchSize: number
@@ -19,6 +19,25 @@ interface DeliverySettings {
 interface SmtpSettings {
   commandTimeoutSeconds: number
 }
+
+interface RelaySettings {
+  host: string
+  port: number
+  pairingHost: string
+  pairingPort: number
+  receiveEnabled: boolean
+  sendEnabled: boolean
+  paired: boolean
+  pairingPending: boolean
+  peerFingerprint: string | null
+  pendingExpiresAt: string | null
+  maxInboundConnections: number
+  maxConnectionsPerIp: number
+  idleTimeoutSeconds: number
+}
+interface RelayInvitation { command: string; password: string; expiresAt: string }
+interface RelayStatus { connected: boolean; activeStreams: number; lastConnected: string | null; lastError: string | null;
+  appliedInboundLimits: { maxInboundConnections: number; maxConnectionsPerIp: number; idleTimeoutSeconds: number } | null }
 
 interface MailboxSettings {
   defaultFolders: string[]
@@ -35,6 +54,7 @@ const { can } = usePermission()
 const sections: Array<{ key: SectionKey; title: string; description: string; icon: string }> = [
   { key: 'delivery', title: '投递调度', description: '批量、租约与重试节奏', icon: 'mdi-send-clock-outline' },
   { key: 'smtp', title: 'SMTP 会话', description: '命令阶段超时控制', icon: 'mdi-email-fast-outline' },
+  { key: 'relay', title: '邮件中继', description: '配对、收信与发信通道', icon: 'mdi-transit-connection-variant' },
   { key: 'mailboxes', title: '默认文件夹', description: '新邮箱初始化目录', icon: 'mdi-folder-multiple-outline' },
   { key: 'certificates', title: '证书选择', description: '全局证书后备策略', icon: 'mdi-certificate-outline' },
   { key: 'resources', title: '资源与性能', description: '内存档位与服务运行状态', icon: 'mdi-memory' },
@@ -44,6 +64,14 @@ const systemFolders = ['INBOX', 'Sent', 'Drafts', 'Trash', 'Junk', 'Archives']
 const activeSection = ref<SectionKey>('delivery')
 const delivery = ref<DeliverySettings>({ batchSize: 20, leaseSeconds: 120, maximumAttempts: 5, pollIntervalSeconds: 5 })
 const smtp = ref<SmtpSettings>({ commandTimeoutSeconds: 300 })
+const relay = ref<RelaySettings>({ host: '', port: 18443, pairingHost: '', pairingPort: 18444,
+  receiveEnabled: false, sendEnabled: false, paired: false, pairingPending: false,
+  peerFingerprint: null, pendingExpiresAt: null,
+  maxInboundConnections: 32, maxConnectionsPerIp: 4, idleTimeoutSeconds: 120 })
+const relayInvitation = ref<RelayInvitation | null>(null)
+const relayStatus = ref<RelayStatus | null>(null)
+const relayActionError = ref('')
+const relayBusy = ref(false)
 const mailboxes = ref<MailboxSettings>({ defaultFolders: [...systemFolders] })
 const certificates = ref<CertificateSettings>({ defaultMailHostName: null, allowSingleCertificateFallback: false, availableMailHostNames: [], effectiveDefaultMailHostName: null })
 const resources = ref<ResourceSettings>({ profileId: null, profiles: [], values: null })
@@ -57,9 +85,9 @@ const onlineCacheBytes = computed(() => resourceStatus.value.processes
   .filter(x => x.state !== 'unreported').reduce((sum, x) => sum + x.estimatedCacheBytes, 0))
 let statusTimer: ReturnType<typeof globalThis.setInterval> | undefined
 let statusLoading = false
-const baselines = ref<Record<SectionKey, string>>({ delivery: '', smtp: '', mailboxes: '', certificates: '', resources: '' })
-const loaded = ref<Record<SectionKey, boolean>>({ delivery: false, smtp: false, mailboxes: false, certificates: false, resources: false })
-const sectionErrors = ref<Record<SectionKey, string>>({ delivery: '', smtp: '', mailboxes: '', certificates: '', resources: '' })
+const baselines = ref<Record<SectionKey, string>>({ delivery: '', smtp: '', relay: '', mailboxes: '', certificates: '', resources: '' })
+const loaded = ref<Record<SectionKey, boolean>>({ delivery: false, smtp: false, relay: false, mailboxes: false, certificates: false, resources: false })
+const sectionErrors = ref<Record<SectionKey, string>>({ delivery: '', smtp: '', relay: '', mailboxes: '', certificates: '', resources: '' })
 const loading = ref(false)
 const savingSection = ref<SectionKey | null>(null)
 const notice = ref('')
@@ -73,6 +101,11 @@ let resolvePendingLeave: ((allow: boolean) => void) | null = null
 const snapshots = computed<Record<SectionKey, string>>(() => ({
   delivery: JSON.stringify(delivery.value),
   smtp: JSON.stringify(smtp.value),
+  relay: JSON.stringify({ host: relay.value.host, port: relay.value.port,
+    pairingHost: relay.value.pairingHost, pairingPort: relay.value.pairingPort,
+    receiveEnabled: relay.value.receiveEnabled, sendEnabled: relay.value.sendEnabled,
+    maxInboundConnections: relay.value.maxInboundConnections,
+    maxConnectionsPerIp: relay.value.maxConnectionsPerIp, idleTimeoutSeconds: relay.value.idleTimeoutSeconds }),
   mailboxes: JSON.stringify(mailboxes.value),
   certificates: JSON.stringify({
     defaultMailHostName: certificates.value.defaultMailHostName || null,
@@ -96,6 +129,11 @@ const deliveryErrors = computed(() => ({
   pollIntervalSeconds: integerError(delivery.value.pollIntervalSeconds, 1, 300),
 }))
 const smtpError = computed(() => integerError(smtp.value.commandTimeoutSeconds, 5, 3600))
+const relayValid = computed(() => Boolean(String(relay.value.host ?? '').trim() && String(relay.value.pairingHost ?? '').trim())
+  && !integerError(relay.value.port, 1, 65535) && !integerError(relay.value.pairingPort, 1, 65535)
+  && !integerError(relay.value.maxInboundConnections, 1, 200)
+  && !integerError(relay.value.maxConnectionsPerIp, 1, relay.value.maxInboundConnections)
+  && !integerError(relay.value.idleTimeoutSeconds, 1, 3600))
 const certificateHostError = computed(() => hostNameError(certificates.value.defaultMailHostName))
 const resourceErrors = computed(() => {
   const v = resources.value.values
@@ -114,6 +152,7 @@ const resourceErrors = computed(() => {
 const sectionValid = computed<Record<SectionKey, boolean>>(() => ({
   delivery: Object.values(deliveryErrors.value).every(value => !value),
   smtp: !smtpError.value,
+  relay: relayValid.value,
   mailboxes: mailboxes.value.defaultFolders.length >= systemFolders.length,
   certificates: !certificateHostError.value,
   resources: Boolean(selectedProfile.value) && resourceErrors.value.length === 0,
@@ -201,6 +240,54 @@ function acceptSmtp(value: SmtpSettings) {
   loaded.value.smtp = true
 }
 
+function acceptRelay(value: RelaySettings) {
+  relay.value = globalThis.structuredClone(value)
+  baselines.value.relay = snapshots.value.relay
+  loaded.value.relay = true
+}
+
+async function refreshRelayStatus() {
+  try {
+    relayStatus.value = await api<RelayStatus>('/settings/relay/status')
+    const fresh = await api<RelaySettings>('/settings/relay')
+    if (!dirtySections.value.includes('relay')) acceptRelay(fresh)
+    if (fresh.paired) relayInvitation.value = null
+  } catch { /* Keep the last observed state. */ }
+}
+
+async function relayAction(action: 'invitation' | 'cancel' | 'unpair') {
+  relayBusy.value = true
+  relayActionError.value = ''
+  try {
+    if (action === 'invitation') {
+      relayInvitation.value = await api<RelayInvitation>('/settings/relay/invitation', { method: 'POST' })
+    } else {
+      if (action === 'cancel') acceptRelay(await api<RelaySettings>('/settings/relay/invitation', { method: 'DELETE' }))
+      else {
+        const result = await api<{ settings: RelaySettings; nodeRevoked: boolean }>('/settings/relay/pairing', { method: 'DELETE' })
+        acceptRelay(result.settings)
+        if (!result.nodeRevoked) relayActionError.value = '主服务器已解除配对。中继当前不可达，请在中继服务器执行 mailserver relay reset 清除旧绑定。'
+      }
+      relayInvitation.value = null
+    }
+    await refreshRelayStatus()
+  } catch (cause) {
+    relayActionError.value = cause instanceof Error ? cause.message : '中继操作失败'
+  } finally { relayBusy.value = false }
+}
+
+async function testRelayConnection() {
+  relayBusy.value = true
+  relayActionError.value = ''
+  try {
+    await api('/settings/relay/test', { method: 'POST' })
+    notice.value = '中继身份验证与加密连接成功'
+    await refreshRelayStatus()
+  } catch (cause) {
+    relayActionError.value = cause instanceof Error ? cause.message : '连接测试失败'
+  } finally { relayBusy.value = false }
+}
+
 function acceptMailboxes(value: MailboxSettings) {
   mailboxes.value = { defaultFolders: [...value.defaultFolders] }
   baselines.value.mailboxes = JSON.stringify(mailboxes.value)
@@ -241,6 +328,7 @@ async function loadSection(section: SectionKey) {
   try {
     if (section === 'delivery') acceptDelivery(await api<DeliverySettings>('/settings/delivery'))
     else if (section === 'smtp') acceptSmtp(await api<SmtpSettings>('/settings/smtp'))
+    else if (section === 'relay') { acceptRelay(await api<RelaySettings>('/settings/relay')); await refreshRelayStatus() }
     else if (section === 'mailboxes') acceptMailboxes(await api<MailboxSettings>('/settings/mailboxes'))
     else if (section === 'certificates') acceptCertificates(await api<CertificateSettings>('/settings/certificates'))
     else {
@@ -278,6 +366,7 @@ function resetCurrent() {
   if (!baseline) return
   if (activeSection.value === 'delivery') delivery.value = JSON.parse(baseline) as DeliverySettings
   else if (activeSection.value === 'smtp') smtp.value = JSON.parse(baseline) as SmtpSettings
+  else if (activeSection.value === 'relay') Object.assign(relay.value, JSON.parse(baseline))
   else if (activeSection.value === 'mailboxes') mailboxes.value = JSON.parse(baseline) as MailboxSettings
   else if (activeSection.value === 'certificates') certificates.value = JSON.parse(baseline) as CertificateSettings
   else if (activeSection.value === 'resources') {
@@ -301,6 +390,13 @@ async function saveCurrent() {
       acceptDelivery(await api<DeliverySettings>('/settings/delivery', { method: 'PUT', body: jsonBody(delivery.value) }))
     } else if (section === 'smtp') {
       acceptSmtp(await api<SmtpSettings>('/settings/smtp', { method: 'PUT', body: jsonBody(smtp.value) }))
+    } else if (section === 'relay') {
+      acceptRelay(await api<RelaySettings>('/settings/relay', { method: 'PUT', body: jsonBody({
+        host: relay.value.host, port: relay.value.port, pairingHost: relay.value.pairingHost,
+        pairingPort: relay.value.pairingPort, receiveEnabled: relay.value.receiveEnabled,
+        sendEnabled: relay.value.sendEnabled, maxInboundConnections: relay.value.maxInboundConnections,
+        maxConnectionsPerIp: relay.value.maxConnectionsPerIp,
+        idleTimeoutSeconds: relay.value.idleTimeoutSeconds }) }))
     } else if (section === 'mailboxes') {
       acceptMailboxes(await api<MailboxSettings>('/settings/mailboxes', { method: 'PUT', body: jsonBody(mailboxes.value) }))
     } else if (section === 'certificates') {
@@ -378,6 +474,7 @@ onMounted(() => {
   void loadAll()
   statusTimer = globalThis.setInterval(() => {
     if (activeSection.value === 'resources' && !document.hidden) void refreshResourceStatus()
+    if (activeSection.value === 'relay' && !document.hidden) void refreshRelayStatus()
   }, 5000)
 })
 onBeforeUnmount(() => {
@@ -445,6 +542,48 @@ onBeforeUnmount(() => {
           <div class="field-grid single-column">
             <div class="field-block"><v-text-field v-model.number="smtp.commandTimeoutSeconds" label="SMTP 命令超时" type="number" min="5" max="3600" suffix="秒" :error-messages="smtpError" hide-details="auto" /><p>允许范围 5 秒至 1 小时，建议生产环境保持 300 秒。</p></div>
           </div>
+        </template>
+
+        <template v-else-if="activeSection === 'relay'">
+          <v-alert type="info" variant="tonal" density="compact" class="mb-5">中继只转发实时连接。收信域名的 MX 需要指向中继；主服务器离线时，中继会临时拒收，外部服务器稍后重试。</v-alert>
+          <div class="field-grid two-columns">
+            <v-text-field v-model="relay.host" label="中继公网主机名或 IP" :disabled="!can('settings.manage')" />
+            <v-text-field v-model.number="relay.port" label="中继通信端口" type="number" :disabled="!can('settings.manage')" />
+            <v-text-field v-model="relay.pairingHost" label="主服务器公网配对主机名或 IP" :disabled="!can('settings.manage')" />
+            <v-text-field v-model.number="relay.pairingPort" label="主服务器配对端口" type="number" :disabled="!can('settings.manage')" />
+          </div>
+          <p>配对入口供中继首次连接；配对完成后由主服务器主动连接中继。修改配对端口后，监听器最多约 3 秒切换。</p>
+          <div class="field-grid two-columns">
+            <v-switch v-model="relay.receiveEnabled" label="通过中继收信" color="primary" :disabled="(!relay.paired && !relay.receiveEnabled) || !can('settings.manage')" />
+            <v-switch v-model="relay.sendEnabled" label="通过中继发信" color="primary" :disabled="(!relay.paired && !relay.sendEnabled) || !can('settings.manage')" />
+          </div>
+          <div class="field-grid two-columns">
+            <v-text-field v-model.number="relay.maxInboundConnections" label="中继收信总连接上限" type="number" min="1" max="200" :disabled="!can('settings.manage')" />
+            <v-text-field v-model.number="relay.maxConnectionsPerIp" label="每个来源 IP 连接上限" type="number" min="1" :max="relay.maxInboundConnections" :disabled="!can('settings.manage')" />
+            <v-text-field v-model.number="relay.idleTimeoutSeconds" label="无数据活动超时" type="number" min="1" max="3600" suffix="秒" :disabled="!can('settings.manage')" />
+          </div>
+          <p>收信容量由主服务器下发；中继连接后自动应用，修改后约 3 秒内更新。降低上限不会中断已有会话，直到连接数降至新上限前不再接收新连接。</p>
+          <v-alert v-if="relayActionError" type="error" variant="tonal">{{ relayActionError }}</v-alert>
+          <p>状态：{{ relay.paired ? '已配对' : relay.pairingPending ? '等待配对' : '未配对' }} · {{ relayStatus?.connected ? '隧道已连接' : '隧道未连接' }} · 活动连接 {{ relayStatus?.activeStreams ?? 0 }}</p>
+          <p v-if="relay.receiveEnabled">容量下发：{{ relayStatus?.appliedInboundLimits
+            && relayStatus.appliedInboundLimits.maxInboundConnections === relay.maxInboundConnections
+            && relayStatus.appliedInboundLimits.maxConnectionsPerIp === relay.maxConnectionsPerIp
+            && relayStatus.appliedInboundLimits.idleTimeoutSeconds === relay.idleTimeoutSeconds ? '已应用' : '等待连接或下发' }}</p>
+          <p v-if="relayStatus?.lastConnected">最近连接：{{ new Date(relayStatus.lastConnected).toLocaleString() }}</p>
+          <v-alert v-if="!relay.paired && relay.sendEnabled" type="warning" variant="tonal" density="compact">发信中继仍已启用，待发任务会继续排队重试。明确关闭“通过中继发信”并保存后才恢复直连。</v-alert>
+          <p v-if="relayStatus?.lastError">最近错误：{{ relayStatus.lastError }}</p>
+          <p v-if="relay.peerFingerprint">中继公钥指纹：{{ relay.peerFingerprint }}</p>
+          <div class="d-flex ga-2 flex-wrap my-4" v-if="can('settings.manage')">
+            <v-btn variant="outlined" :loading="relayBusy" :disabled="currentDirty" @click="relayAction('invitation')">生成配对命令</v-btn>
+            <v-btn v-if="relay.paired" variant="outlined" :loading="relayBusy" :disabled="currentDirty" @click="testRelayConnection">测试连接</v-btn>
+            <v-btn v-if="relay.pairingPending" variant="text" :loading="relayBusy" @click="relayAction('cancel')">取消待配对</v-btn>
+            <v-btn v-if="relay.paired" color="error" variant="text" :loading="relayBusy" @click="relayAction('unpair')">解除配对</v-btn>
+          </div>
+          <v-alert v-if="relayInvitation" type="warning" variant="tonal" class="mb-4">
+            <p>请在中继服务器执行以下命令，然后按提示输入一次性密码。密码只在此显示，有效期至 {{ new Date(relayInvitation.expiresAt).toLocaleString() }}。</p>
+            <code>{{ relayInvitation.command }}</code><p>一次性密码：<code>{{ relayInvitation.password }}</code></p>
+          </v-alert>
+          <v-alert type="info" variant="tonal" density="compact">DNS：将收信域名的 MX 指向中继主机名；SPF 授权中继出口 IP；中继出口配置 PTR。邮件证书仍由主服务器管理。</v-alert>
         </template>
 
         <template v-else-if="activeSection === 'mailboxes'">

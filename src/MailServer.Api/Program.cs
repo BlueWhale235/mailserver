@@ -2159,6 +2159,41 @@ api.MapGet("/settings/delivery", async (
     Results.Ok(await administration.GetDeliverySettingsAsync(cancellationToken)))
     .RequirePermission(PermissionCodes.SettingsDetail);
 
+api.MapGet("/settings/relay", async (RelaySettingsService relay, CancellationToken token) =>
+    Results.Ok(await relay.ViewAsync(token))).RequirePermission(PermissionCodes.SettingsDetail);
+api.MapPut("/settings/relay", async (RelaySettingsUpdate request, RelaySettingsService relay, CancellationToken token) =>
+{
+    try { return Results.Ok(await relay.SaveAsync(request, token)); }
+    catch (Exception error) when (error is ArgumentException or InvalidOperationException)
+    { return Results.BadRequest(new { error = error.Message }); }
+}).RequirePermission(PermissionCodes.SettingsUpdate);
+api.MapPost("/settings/relay/invitation", async (RelaySettingsService relay, CancellationToken token) =>
+{
+    try { return Results.Ok(await relay.CreateInvitationAsync(token)); }
+    catch (InvalidOperationException error) { return Results.BadRequest(new { error = error.Message }); }
+}).RequirePermission(PermissionCodes.SettingsUpdate);
+api.MapDelete("/settings/relay/invitation", async (RelaySettingsService relay, CancellationToken token) =>
+    Results.Ok(await relay.CancelInvitationAsync(token))).RequirePermission(PermissionCodes.SettingsUpdate);
+api.MapDelete("/settings/relay/pairing", async (RelaySettingsService relay, RelayRootService runtime, CancellationToken token) =>
+{
+    var nodeRevoked = false;
+    try { nodeRevoked = await runtime.RevokeRemoteAsync(token); }
+    catch (Exception error) when (error is IOException or System.Net.Sockets.SocketException
+        or System.Security.Authentication.AuthenticationException or OperationCanceledException) { }
+    var updated = await relay.UnpairAsync(token);
+    return Results.Ok(new { settings = updated, nodeRevoked });
+}).RequirePermission(PermissionCodes.SettingsUpdate);
+api.MapGet("/settings/relay/status", async (RelaySettingsService relay, CancellationToken token) =>
+    Results.Ok(await relay.ReadStatusAsync(token))).RequirePermission(PermissionCodes.SettingsDetail);
+api.MapPost("/settings/relay/test", async (RelayRootService relay, CancellationToken token) =>
+{
+    try { await relay.TestConnectionAsync(token); return Results.Ok(new { connected = true }); }
+    catch (Exception error) when (error is IOException or System.Net.Sockets.SocketException
+        or System.Security.Authentication.AuthenticationException or System.Security.Cryptography.CryptographicException
+        or InvalidOperationException or OperationCanceledException)
+    { return Results.BadRequest(new { error = error.Message }); }
+}).RequirePermission(PermissionCodes.SettingsUpdate);
+
 api.MapGet("/settings/resources", async (ResourceSettingsService resources, CancellationToken token) =>
     Results.Ok(await resources.ReadAsync(token))).RequirePermission(PermissionCodes.SettingsDetail);
 api.MapPut("/settings/resources", async (ResourceSelection request, ResourceSettingsService resources,

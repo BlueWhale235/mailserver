@@ -82,7 +82,8 @@ public sealed class SmtpServerService(
     IOptions<SmtpAbuseOptions>? abuseOptions = null,
     SystemSettingsService? systemSettings = null,
     ResourceRuntime? resources = null,
-    ConnectionProtection? protection = null) : BackgroundService
+    ConnectionProtection? protection = null,
+    RelayRootService? relay = null) : BackgroundService
 {
     private readonly SmtpServerOptions _options = options.Value;
     private readonly List<TcpListener> _listeners = [];
@@ -94,6 +95,7 @@ public sealed class SmtpServerService(
     protected override Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _connectionLimit = resources?.Smtp ?? new AdjustableConcurrencyLimit(_options.MaximumConnections);
+        if (relay is not null) relay.InboundHandler = HandleTunneledAsync;
         foreach (var endpoint in _options.Endpoints)
         {
             if (!IPAddress.TryParse(endpoint.Address, out var bindAddress))
@@ -221,12 +223,41 @@ public sealed class SmtpServerService(
         using (permit) using (sourcePermit) await HandleClientAsync(client, endpoint, token);
     }
 
+    private async Task HandleTunneledAsync(RelayOpen request, Stream stream, CancellationToken token)
+    {
+        if (request.Kind != "inbound" || request.RemoteAddress is null ||
+            !IPAddress.TryParse(request.RemoteAddress, out var peer)) return;
+        if (firewall is not null && await firewall.IsBlockedAsync(peer, token)) return;
+        IDisposable? sourcePermit = null;
+        if (protection is not null && !protection.TryAcquire(
+                ProtectedConnectionGroup.SmtpInbound, peer, DateTimeOffset.UtcNow, out sourcePermit)) return;
+        var permit = _connectionLimit.TryAcquire();
+        if (permit is null)
+        {
+            sourcePermit?.Dispose();
+            await stream.WriteAsync("421 4.3.2 Server busy; retry later\r\n"u8.ToArray(), token);
+            return;
+        }
+        var endpoint = _options.Endpoints.FirstOrDefault(x => x.Port == 25 && !x.RequireAuthentication)
+            ?? new SmtpEndpointOptions { Port = 25, Security = ConnectionSecurity.StartTls };
+        using (permit) using (sourcePermit)
+            await HandleStreamClientAsync(null, endpoint, token, stream, $"{peer}:{request.RemotePort}");
+    }
+
     private async Task HandleClientAsync(
         TcpClient client,
         SmtpEndpointOptions endpoint,
-        CancellationToken serverCancellationToken)
+        CancellationToken serverCancellationToken) =>
+        await HandleStreamClientAsync(client, endpoint, serverCancellationToken);
+
+    private async Task HandleStreamClientAsync(
+        TcpClient? client,
+        SmtpEndpointOptions endpoint,
+        CancellationToken serverCancellationToken,
+        Stream? tunneledStream = null,
+        string? tunneledRemote = null)
     {
-        var remote = client.Client.RemoteEndPoint?.ToString() ?? "unknown";
+        var remote = tunneledRemote ?? client?.Client.RemoteEndPoint?.ToString() ?? "unknown";
         var endpointName = $"{endpoint.Address}:{endpoint.Port}";
         using (client)
         {
@@ -235,12 +266,12 @@ public sealed class SmtpServerService(
                 preAuthentication.CancelAfter(TimeSpan.FromSeconds(protection?.Settings.PreAuthenticationSeconds ?? 120));
             try
             {
-                client.NoDelay = true;
+                if (client is not null) client.NoDelay = true;
                 logger.LogInformation(
                     "SMTP connection accepted from {Remote} on {Endpoint}.",
                     remote,
                     endpointName);
-                Stream stream = client.GetStream();
+                Stream stream = tunneledStream ?? client!.GetStream();
                 var isTls = false;
                 if (endpoint.EffectiveSecurity == ConnectionSecurity.ImplicitTls)
                 {
@@ -518,22 +549,6 @@ public sealed class SmtpServerService(
                                     }
                                 }
                             }
-                            var recipientResult = state.TryAddRecipient(recipient, _options.MaximumRecipients);
-                            if (recipientResult == RecipientAddResult.Duplicate)
-                            {
-                                await connection.ReplyAsync("250 2.1.5 Recipient OK", serverCancellationToken);
-                                break;
-                            }
-                            if (recipientResult == RecipientAddResult.LimitExceeded)
-                            {
-                                logger.LogInformation(
-                                    "SMTP RCPT TO from {Remote} was rejected because recipient limit {Limit} was reached.",
-                                    remote,
-                                    _options.MaximumRecipients);
-                                await connection.ReplyAsync("452 4.5.3 Too many recipients", serverCancellationToken);
-                                break;
-                            }
-
                             using (var scope = scopeFactory.CreateScope())
                             {
                                 var inbound = scope.ServiceProvider.GetRequiredService<IInboundMessageService>();
@@ -549,6 +564,22 @@ public sealed class SmtpServerService(
                                     await connection.ReplyAsync("550 5.7.1 Relaying denied", serverCancellationToken);
                                     break;
                                 }
+                            }
+
+                            var recipientResult = state.TryAddRecipient(recipient, _options.MaximumRecipients);
+                            if (recipientResult == RecipientAddResult.Duplicate)
+                            {
+                                await connection.ReplyAsync("250 2.1.5 Recipient OK", serverCancellationToken);
+                                break;
+                            }
+                            if (recipientResult == RecipientAddResult.LimitExceeded)
+                            {
+                                logger.LogInformation(
+                                    "SMTP RCPT TO from {Remote} was rejected because recipient limit {Limit} was reached.",
+                                    remote,
+                                    _options.MaximumRecipients);
+                                await connection.ReplyAsync("452 4.5.3 Too many recipients", serverCancellationToken);
+                                break;
                             }
 
                             logger.LogInformation(

@@ -79,6 +79,11 @@ beforeEach(() => {
     if (path.startsWith('/settings/resources')) return mockApi(path) as never
     if (path === '/settings/delivery') return { ...delivery } as never
     if (path === '/settings/smtp') return { commandTimeoutSeconds: 300 } as never
+    if (path === '/settings/relay/status') return { connected: false, activeStreams: 0, lastConnected: null, lastError: null, processes: [] } as never
+    if (path === '/settings/relay') return { host: '', port: 18443, pairingHost: '', pairingPort: 18444,
+      receiveEnabled: false, sendEnabled: false, paired: false, pairingPending: false,
+      peerFingerprint: null, pendingExpiresAt: null,
+      maxInboundConnections: 32, maxConnectionsPerIp: 4, idleTimeoutSeconds: 120 } as never
     if (path === '/settings/mailboxes') return { defaultFolders: ['INBOX', 'Sent', 'Drafts', 'Trash', 'Junk', 'Archives'] } as never
     if (path === '/settings/certificates') return {
       defaultMailHostName: null,
@@ -95,6 +100,36 @@ afterEach(() => {
 })
 
 describe('system settings safeguards', () => {
+  it('saves relay capacity on the main server settings page', async () => {
+    const previous = vi.mocked(api).getMockImplementation()!
+    vi.mocked(api).mockImplementation(async (path, init) => {
+      if (path === '/settings/relay') {
+        const saved = init?.method === 'PUT' ? JSON.parse(String(init.body)) as Record<string, unknown> : {}
+        return { host: 'relay.example.test', port: 18443, pairingHost: 'root.example.test', pairingPort: 18444,
+          receiveEnabled: false, sendEnabled: false, paired: false, pairingPending: false,
+          peerFingerprint: null, pendingExpiresAt: null,
+          maxInboundConnections: 32, maxConnectionsPerIp: 4, idleTimeoutSeconds: 120, ...saved } as never
+      }
+      return previous(path, init)
+    })
+    const wrapper = mountView()
+    await flushPromises()
+    await wrapper.findAll('.settings-nav button').find(x => x.text().includes('邮件中继'))!.trigger('click')
+    for (const [label, value] of [
+      ['中继收信总连接上限', 24], ['每个来源 IP 连接上限', 3], ['无数据活动超时', 90],
+    ] as const) {
+      wrapper.findAllComponents(TextField).find(x => x.props('label') === label)!.vm.$emit('update:modelValue', value)
+    }
+    await nextTick()
+    await wrapper.findAll('button').find(x => x.text() === '保存当前设置')!.trigger('click')
+    await flushPromises()
+    const save = vi.mocked(api).mock.calls.find(([path, init]) => path === '/settings/relay' && init?.method === 'PUT')!
+    expect(JSON.parse(String(save[1]?.body))).toMatchObject({
+      maxInboundConnections: 24, maxConnectionsPerIp: 3, idleTimeoutSeconds: 90,
+    })
+    wrapper.unmount()
+  })
+
   it('shows reported service health without exposing internal versions', async () => {
     const previous = vi.mocked(api).getMockImplementation()!
     vi.mocked(api).mockImplementation(async (path, init) => {
@@ -203,6 +238,11 @@ describe('system settings safeguards', () => {
       if (path === '/settings/delivery' && init?.method === 'PUT') return pendingSave.promise as never
       if (path === '/settings/delivery') return { ...delivery } as never
       if (path === '/settings/smtp') return { commandTimeoutSeconds: 300 } as never
+      if (path === '/settings/relay/status') return { connected: false, activeStreams: 0, lastConnected: null, lastError: null, processes: [] } as never
+      if (path === '/settings/relay') return { host: '', port: 18443, pairingHost: '', pairingPort: 18444,
+        receiveEnabled: false, sendEnabled: false, paired: false, pairingPending: false,
+        peerFingerprint: null, pendingExpiresAt: null,
+        maxInboundConnections: 32, maxConnectionsPerIp: 4, idleTimeoutSeconds: 120 } as never
       if (path === '/settings/mailboxes') return { defaultFolders: ['INBOX', 'Sent', 'Drafts', 'Trash', 'Junk', 'Archives'] } as never
       return { defaultMailHostName: null, allowSingleCertificateFallback: false, availableMailHostNames: [], effectiveDefaultMailHostName: null } as never
     })

@@ -92,6 +92,17 @@ public static class DependencyInjection
         services.AddSingleton(new LookupClient(new LookupClientOptions { Timeout = TimeSpan.FromSeconds(5), Retries = 2 }));
         services.AddSingleton<DnsDiagnosticService>();
         services.AddSingleton<SystemSettingsService>();
+        services.AddSingleton<RelayIdentity>();
+        services.AddSingleton<RelaySettingsService>();
+        if (role is "api" or "smtp" or "worker")
+        {
+            services.AddSingleton(provider => new RelayRootService(
+                provider.GetRequiredService<RelaySettingsService>(),
+                provider.GetRequiredService<RelayIdentity>(),
+                provider.GetRequiredService<Microsoft.Extensions.Logging.ILogger<RelayRootService>>(),
+                role == "api" && configuration.GetValue("RunAll:Enabled", false) ? "all" : role));
+            services.AddHostedService(provider => provider.GetRequiredService<RelayRootService>());
+        }
         services.AddSingleton<MailboxFolderManagementService>();
         services.AddSingleton<AuditLogService>();
         services.AddSingleton<PermissionService>();

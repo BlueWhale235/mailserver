@@ -24,7 +24,9 @@ public sealed class DirectMxTransport(
     IDbContextFactory<MailDbContext> dbFactory,
     SrsService srs,
     TransportSecurityPolicyService transportSecurity,
-    ILogger<DirectMxTransport> logger) : IOutboundTransport
+    ILogger<DirectMxTransport> logger,
+    RelaySettingsService? relaySettings = null,
+    RelayRootService? relay = null) : IOutboundTransport
 {
     internal static string? ExtractEnhancedStatusCode(string response)
     {
@@ -108,6 +110,7 @@ public sealed class DirectMxTransport(
                 : transportSecurity.RecordEventAsync(
                     domain, mxHost, policyType, policyString, resultType, failureReason, cancellationToken);
         var profile = await OutboundDeliveryProfile.ResolveAsync(dbFactory, job, cancellationToken);
+        var useRelay = relaySettings is not null && (await relaySettings.ReadAsync(cancellationToken)).SendEnabled;
         var stsPolicy = await transportSecurity.ResolveMtaStsAsync(domain, cancellationToken);
         return await DeliverAcrossMxAsync(hosts, async host =>
         {
@@ -132,7 +135,7 @@ public sealed class DirectMxTransport(
                     return DeliveryResult.Temporary("MX host does not match the enforced MTA-STS policy.", host, new DeliveryDiagnostic("TLS", DurationMilliseconds: stopwatch.ElapsedMilliseconds, FailureCategory: "mta-sts-policy"));
                 }
             }
-            IPAddress? remoteAddress = null;
+            string? remoteAddress = null;
             try
             {
                 await using var messageStream = new MemoryStream(messageBytes, writable: false);
@@ -165,14 +168,22 @@ public sealed class DirectMxTransport(
                     job.Recipient,
                     deliverySecurity,
                     profile.HeloName,
-                    string.Join(',', profile.SourceAddresses.Select(x => x.ToString())));
-                remoteAddress = await OutboundDeliveryProfile.ConnectAsync(
-                    client,
-                    host,
-                    DeliveryPort,
-                    deliverySecurity,
-                    profile.SourceAddresses,
-                    cancellationToken);
+                    useRelay ? "relay-assigned" : string.Join(',', profile.SourceAddresses.Select(x => x.ToString())));
+                await using var relayConnection = useRelay
+                    ? await (relay ?? throw new IOException("Relay process is not available."))
+                        .OpenOutboundAsync(host, cancellationToken)
+                    : null;
+                if (relayConnection is not null)
+                {
+                    await client.ConnectAsync(relayConnection.Stream, host, DeliveryPort, deliverySecurity, cancellationToken);
+                    remoteAddress = $"{relayConnection.RemoteAddress}（中继出口 {relayConnection.SourceAddress}）";
+                }
+                else
+                {
+                    remoteAddress = (await OutboundDeliveryProfile.ConnectAsync(
+                        client, host, DeliveryPort, deliverySecurity,
+                        profile.SourceAddresses, cancellationToken)).ToString();
+                }
                 var response = await client.SendAsync(
                     message,
                     MailboxAddress.Parse(job.Sender),
@@ -196,7 +207,7 @@ public sealed class DirectMxTransport(
                     DeliveryPort,
                     job.Recipient,
                     response);
-                return DeliveryResult.Success(response, $"{host}:{DeliveryPort}", new DeliveryDiagnostic("SMTP", RemoteAddress: remoteAddress.ToString(), SmtpStatusCode: "250", TlsProtocol: tlsProtocol, TlsCipherSuite: tlsCipherSuite, DurationMilliseconds: stopwatch.ElapsedMilliseconds, SessionSummary: response));
+                return DeliveryResult.Success(response, $"{host}:{DeliveryPort}", new DeliveryDiagnostic("SMTP", RemoteAddress: remoteAddress, SmtpStatusCode: "250", TlsProtocol: tlsProtocol, TlsCipherSuite: tlsCipherSuite, DurationMilliseconds: stopwatch.ElapsedMilliseconds, SessionSummary: response));
             }
             catch (SmtpCommandException exception)
             {
