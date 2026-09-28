@@ -327,6 +327,8 @@ public sealed class CleanupQueueService(
         db.AuditRecords.Add(new AuditRecord { Actor = actor, Action = "recycle.restore", Resource = $"cleanup:{queueId}", Detail = item.ResourceType.ToString() });
         await db.SaveChangesAsync(cancellationToken);
         await transaction.CommitAsync(cancellationToken);
+        if (item.ResourceType is CleanupResourceType.Domain or CleanupResourceType.Account)
+            await db.NotifyRoutingCommittedAsync(cancellationToken);
     }
 
     public async Task PurgeAsync(Guid queueId, string actor, CancellationToken cancellationToken) =>
@@ -456,6 +458,8 @@ public sealed class CleanupQueueService(
                 }
                 await db.SaveChangesAsync(cancellationToken);
                 await transaction.CommitAsync(cancellationToken);
+                if (item.ResourceType is CleanupResourceType.Domain or CleanupResourceType.Account)
+                    await db.NotifyRoutingCommittedAsync(cancellationToken);
             }
             catch (Exception exception)
             {

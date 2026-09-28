@@ -1395,6 +1395,53 @@ public sealed class MailRulesAndAliasesTests
         await db.SaveChangesAsync();
     }
 
+    [Fact]
+    public async Task RecipientRoutingCachesPositiveAndNegativeResultsAndInvalidatesOnCommit()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var factory = environment.Services.GetRequiredService<IDbContextFactory<MailDbContext>>();
+        var inbound = environment.Services.GetRequiredService<IInboundMessageService>();
+        var cache = environment.Services.GetRequiredService<ConfigurationSnapshotCache>();
+        Assert.False(await inbound.IsLocalRecipientAsync("alice@example.com", CancellationToken.None));
+        var misses = cache.Misses;
+        Assert.False(await inbound.IsLocalRecipientAsync("alice@example.com", CancellationToken.None));
+        Assert.Equal(misses, cache.Misses);
+        await using (var db = await factory.CreateDbContextAsync())
+        {
+            var domain = new MailDomain { Name = "example.com" };
+            db.AddRange(domain, Account(domain, "alice"));
+            await db.SaveChangesAsync();
+        }
+        Assert.True(await inbound.IsLocalRecipientAsync("alice@example.com", CancellationToken.None));
+        await using (var db = await factory.CreateDbContextAsync())
+        {
+            var account = await db.Accounts.SingleAsync();
+            account.IsEnabled = false;
+            await db.SaveChangesAsync();
+        }
+        Assert.False(await inbound.IsLocalRecipientAsync("alice@example.com", CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task RecipientRoutingVersionRollsBackWithAccountChange()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var factory = environment.Services.GetRequiredService<IDbContextFactory<MailDbContext>>();
+        await using var db = await factory.CreateDbContextAsync();
+        var initial = await db.ConfigurationVersions.Where(x => x.Scope == ConfigurationScopes.Routing)
+            .Select(x => x.Version).SingleAsync();
+        await using (var transaction = await db.Database.BeginTransactionAsync())
+        {
+            db.Domains.Add(new MailDomain { Name = "rollback.example" });
+            await db.SaveChangesAsync();
+            await transaction.RollbackAsync();
+        }
+        await using var check = await factory.CreateDbContextAsync();
+        Assert.Equal(initial, await check.ConfigurationVersions.Where(x => x.Scope == ConfigurationScopes.Routing)
+            .Select(x => x.Version).SingleAsync());
+        Assert.False(await check.Domains.AnyAsync(x => x.Name == "rollback.example"));
+    }
+
     private sealed class TestEnvironment(string root, ServiceProvider services) : IAsyncDisposable
     {
         public IServiceProvider Services => services;

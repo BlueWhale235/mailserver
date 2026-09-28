@@ -20,9 +20,11 @@ public sealed class InboundMessageService(
     IOptions<ForwardingOptions> forwardingOptions,
     IMimeInspectionService mimeInspection,
     IClock clock,
-    ILogger<InboundMessageService> logger) : IInboundMessageService
+    ILogger<InboundMessageService> logger,
+    ConfigurationSnapshotCache? configurationCache = null) : IInboundMessageService
 {
     private readonly ForwardingOptions _forwardingOptions = forwardingOptions.Value;
+    private sealed record RecipientRoute(bool IsLocal);
 
     public InboundMessageService(
         IDbContextFactory<MailDbContext> dbFactory,
@@ -48,22 +50,35 @@ public sealed class InboundMessageService(
     public async Task<bool> IsLocalRecipientAsync(string address, CancellationToken cancellationToken)
     {
         if (!AddressParser.TrySplit(address, out var localPart, out var domainName)) return false;
-        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         // SRS 回写地址视为本地可接收，避免转发退信被当作外部中继拒绝。
-        if (await srs.TryDecodeAsync(db, address, cancellationToken) is not null) return true;
-        return await db.Accounts.AnyAsync(
-                   x => x.LocalPart == localPart && x.Domain.Name == domainName && x.IsEnabled && x.Domain.IsActive,
-                   cancellationToken)
-               || await db.Aliases.AnyAsync(
-                   x => x.SourceLocalPart == localPart
+        if (localPart.StartsWith("srs0=", StringComparison.OrdinalIgnoreCase))
+        {
+            await using var srsDb = await dbFactory.CreateDbContextAsync(cancellationToken);
+            if (await srs.TryDecodeAsync(srsDb, address, cancellationToken) is not null) return true;
+        }
+        async Task<(RecipientRoute Value, long Size)> LoadAsync(CancellationToken token)
+        {
+            await using var db = await dbFactory.CreateDbContextAsync(token);
+            var isLocal = await db.Accounts.AnyAsync(
+                    x => x.LocalPart == localPart && x.Domain.Name == domainName && x.IsEnabled && x.Domain.IsActive,
+                    token)
+                || await db.Aliases.AnyAsync(
+                    x => x.SourceLocalPart == localPart
                         && x.Domain.Name == domainName
                         && x.Domain.IsActive
                         && x.IsEnabled
                         && x.Mode != MailAliasMode.Disabled
                         && x.TargetAccountId != null
                         && x.TargetAccount!.IsEnabled
-                        && x.TargetAccount.Domain.IsActive,
-                   cancellationToken);
+                        && x.TargetAccount.Domain.IsActive, token);
+            return (new RecipientRoute(isLocal), 64 + address.Length * 2L);
+        }
+        if (configurationCache is null || localPart.StartsWith("srs0=", StringComparison.OrdinalIgnoreCase))
+            return (await LoadAsync(cancellationToken)).Value.IsLocal;
+        var route = await configurationCache.GetAsync(
+            $"routing:{localPart.ToLowerInvariant()}@{domainName.ToLowerInvariant()}",
+            ConfigurationScopes.Routing, LoadAsync, cancellationToken, TimeSpan.FromSeconds(10));
+        return route.IsLocal;
     }
 
     public async Task<InboundAcceptance> AcceptAsync(

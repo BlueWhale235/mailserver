@@ -94,12 +94,15 @@ public sealed partial class ImapServerService(
             logger.LogInformation("IMAP listening on {Port}; security={Security}", endpoint.Port, endpoint.Security);
         }
 
+        resources?.SetServiceState("imap", _listeners.Count > 0 ? "listening" : "stopped");
+
         return Task.WhenAll(_acceptLoops);
     }
 
     public override async Task StopAsync(CancellationToken cancellationToken)
     {
         _stopping = true;
+        resources?.SetServiceState("imap", "stopped");
         foreach (var listener in _listeners) listener.Stop();
         await base.StopAsync(cancellationToken);
     }

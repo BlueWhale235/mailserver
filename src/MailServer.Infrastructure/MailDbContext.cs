@@ -9,6 +9,48 @@ namespace MailServer.Infrastructure;
 /// </summary>
 public sealed class MailDbContext(DbContextOptions<MailDbContext> options) : DbContext(options)
 {
+    public override async Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
+    {
+        ChangeTracker.DetectChanges();
+        var routingChanged = ChangeTracker.Entries().Any(entry =>
+            entry.Entity switch
+            {
+                MailDomain => RoutingFieldsChanged(entry, nameof(MailDomain.Name), nameof(MailDomain.IsActive),
+                    nameof(MailDomain.DeletedAt)),
+                MailAccount => RoutingFieldsChanged(entry, nameof(MailAccount.DomainId), nameof(MailAccount.LocalPart),
+                    nameof(MailAccount.IsEnabled), nameof(MailAccount.DeletedAt)),
+                MailAlias => RoutingFieldsChanged(entry, nameof(MailAlias.DomainId), nameof(MailAlias.SourceLocalPart),
+                    nameof(MailAlias.TargetAccountId), nameof(MailAlias.Mode), nameof(MailAlias.IsEnabled)),
+                _ => false
+            });
+        if (!routingChanged) return await base.SaveChangesAsync(cancellationToken);
+
+        if (!Database.IsRelational() || Database.CurrentTransaction is not null)
+        {
+            await ConfigurationVersionService.BumpAsync(this, ConfigurationScopes.Routing, cancellationToken);
+            return await base.SaveChangesAsync(cancellationToken);
+        }
+
+        await using var transaction = await Database.BeginTransactionAsync(cancellationToken);
+        var version = await ConfigurationVersionService.BumpAsync(this, ConfigurationScopes.Routing, cancellationToken);
+        var saved = await base.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+        ConfigurationSnapshotCache.NotifyRoutingCommitted(version);
+        return saved;
+    }
+
+    public async Task NotifyRoutingCommittedAsync(CancellationToken cancellationToken)
+    {
+        var version = await ConfigurationVersions.AsNoTracking()
+            .Where(x => x.Scope == ConfigurationScopes.Routing)
+            .Select(x => (long?)x.Version).SingleOrDefaultAsync(cancellationToken);
+        if (version is not null) ConfigurationSnapshotCache.NotifyRoutingCommitted(version.Value);
+    }
+
+    private static bool RoutingFieldsChanged(Microsoft.EntityFrameworkCore.ChangeTracking.EntityEntry entry,
+        params string[] fields) => entry.State is EntityState.Added or EntityState.Deleted
+        || entry.State == EntityState.Modified && fields.Any(field => entry.Property(field).IsModified);
+
     public DbSet<MailDomain> Domains => Set<MailDomain>();
     public DbSet<DomainCertificate> DomainCertificates => Set<DomainCertificate>();
     public DbSet<DomainDnsSettings> DomainDnsSettings => Set<DomainDnsSettings>();

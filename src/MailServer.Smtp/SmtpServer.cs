@@ -112,12 +112,15 @@ public sealed class SmtpServerService(
                 endpoint.RequireAuthentication);
         }
 
+        resources?.SetServiceState("smtp", _listeners.Count > 0 ? "listening" : "stopped");
+
         return Task.WhenAll(_acceptLoops);
     }
 
     public override async Task StopAsync(CancellationToken cancellationToken)
     {
         _stopping = true;
+        resources?.SetServiceState("smtp", "stopped");
         foreach (var listener in _listeners)
         {
             listener.Stop();

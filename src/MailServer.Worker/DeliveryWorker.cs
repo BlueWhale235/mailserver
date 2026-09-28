@@ -25,6 +25,7 @@ public sealed class DeliveryWorker(
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        resources?.SetServiceState("worker", "working");
         var running = new List<Task>();
         try
         {
@@ -86,7 +87,11 @@ public sealed class DeliveryWorker(
                     running.Add(ProcessLimitedAsync(jobs[index], options, permits[index], stoppingToken));
             }
         }
-        finally { await Task.WhenAll(running); }
+        finally
+        {
+            resources?.SetServiceState("worker", "stopped");
+            await Task.WhenAll(running);
+        }
     }
 
     private async Task ProcessLimitedAsync(DeliveryLease lease, DeliveryOptions options, IDisposable permit, CancellationToken token)

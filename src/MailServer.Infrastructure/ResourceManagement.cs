@@ -80,7 +80,8 @@ public sealed record ResourceSettingsView(string? ProfileId, IReadOnlyList<Resou
 }
 public sealed record ResourceUsage(string? ProfileId, long CacheBudgetBytes, int DeliveryLimit,
     int SmtpLimit, int ImapLimit, int ActiveDeliveries, int ActiveSmtp, int ActiveImap, bool ApplyFailed,
-    string? ConfigurationId = null, string? ProtectionConfigurationId = null, int ProtectedSources = 0);
+    string? ConfigurationId = null, string? ProtectionConfigurationId = null, int ProtectedSources = 0,
+    IReadOnlyDictionary<string, string>? ServiceStates = null);
 public sealed record ResourceProcessView(string ProcessId, string InstanceName, string[] Roles,
     DateTimeOffset LastSeenAt, long EstimatedCacheBytes, ResourceUsage? Usage, string State, string? Message);
 public sealed record ResourceStatusView(long TotalCacheBudgetBytes, IReadOnlyList<ResourceProcessView> Processes,
@@ -93,6 +94,7 @@ public sealed class ResourceRuntime(string role, IConfiguration configuration)
     private string? _configurationId;
     private long _cacheBudget;
     private bool _applyFailed;
+    private readonly Dictionary<string, string> _serviceStates = new(StringComparer.OrdinalIgnoreCase);
     public string Role { get; } = role;
     public bool UsesCache => Role is "smtp" or "imap" or "worker" or "all";
     public AdjustableConcurrencyLimit Smtp { get; } = new(configuration.GetValue("Smtp:MaximumConnections", 200));
@@ -102,7 +104,12 @@ public sealed class ResourceRuntime(string role, IConfiguration configuration)
     public ResourceUsage Snapshot()
     {
         lock (_sync) return new(_profileId, _cacheBudget, Delivery.Limit, Smtp.Limit, Imap.Limit,
-            Delivery.Active, Smtp.Active, Imap.Active, _applyFailed, _configurationId);
+            Delivery.Active, Smtp.Active, Imap.Active, _applyFailed, _configurationId,
+            ServiceStates: new Dictionary<string, string>(_serviceStates));
+    }
+    public void SetServiceState(string role, string state)
+    {
+        lock (_sync) _serviceStates[role] = state;
     }
     public void MarkFailed() { lock (_sync) _applyFailed = true; }
     public void Apply(string? profileId, ConfigurationSnapshotCache cache) =>
@@ -189,7 +196,7 @@ public sealed class ResourceSettingsService(IDbContextFactory<MailDbContext> fac
         await using var db = await factory.CreateDbContextAsync(token);
         var rows = await db.ConfigurationProcessStatuses.AsNoTracking().OrderBy(x => x.InstanceName).ToListAsync(token);
         var cutoff = DateTimeOffset.UtcNow.AddSeconds(-90);
-        var processes = rows.Where(x => x.Roles.Split(',').Any(r => r is "smtp" or "imap" or "worker" or "all"))
+        var processes = rows.Where(x => x.Roles.Split(',').Any(r => r is "api" or "smtp" or "imap" or "worker" or "all"))
             .Select(x =>
             {
                 ResourceUsage? usage = null;
@@ -197,8 +204,12 @@ public sealed class ResourceSettingsService(IDbContextFactory<MailDbContext> fac
                 catch (JsonException) { }
                 var state = x.LastSeenAt < cutoff || usage is null ? "unreported"
                     : usage.ApplyFailed ? "failed" : usage.ConfigurationId != desired.ConfigurationId ? "applying" : "applied";
-                return new ResourceProcessView(x.ProcessId, x.InstanceName, x.Roles.Split(','), x.LastSeenAt,
-                    x.EstimatedCacheBytes, usage, state, state == "failed" ? "暂时无法读取或应用设置，服务继续使用此前的配置。" : null);
+                var roles = x.Roles.Split(',');
+                if (roles.Length == 1 && roles[0] == "api" && state != "unreported") state = "applied";
+                var serviceIssue = roles.Any(role => usage?.ServiceStates?.GetValueOrDefault(role) is "stopped" or "error");
+                if (state == "applied" && serviceIssue) state = "failed";
+                return new ResourceProcessView(x.ProcessId, x.InstanceName, roles, x.LastSeenAt,
+                    x.EstimatedCacheBytes, usage, state, state == "failed" ? "服务未正常监听或工作，或暂时无法应用设置，请查看服务日志。" : null);
             }).ToArray();
         var online = processes.Where(x => x.State != "unreported").ToArray();
         return new(online.Sum(x => x.Usage?.CacheBudgetBytes ?? 0), processes,

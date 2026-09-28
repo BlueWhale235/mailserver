@@ -683,6 +683,7 @@ public sealed class AdminApplicationService(
         }
         await db.SaveChangesAsync(cancellationToken);
         await transaction.CommitAsync(cancellationToken);
+        await db.NotifyRoutingCommittedAsync(cancellationToken);
         certificateProvider.Invalidate();
     }
 
@@ -742,6 +743,7 @@ public sealed class AdminApplicationService(
         }
         await db.SaveChangesAsync(cancellationToken);
         await transaction.CommitAsync(cancellationToken);
+        await db.NotifyRoutingCommittedAsync(cancellationToken);
         foreach (var path in managedFiles.Distinct(StringComparer.OrdinalIgnoreCase))
             SecurityAssetFiles.DeleteManagedFile(securityRoot, path);
         certificateProvider.Invalidate();
@@ -1061,6 +1063,7 @@ public sealed class AdminApplicationService(
             ?? throw new InvalidOperationException("Domain does not exist.");
         var result = await CreateAccountCoreAsync(db, domain, localPart, password, quotaBytes, actor, cancellationToken);
         await transaction.CommitAsync(cancellationToken);
+        await db.NotifyRoutingCommittedAsync(cancellationToken);
         return result;
     }
 
@@ -1079,6 +1082,7 @@ public sealed class AdminApplicationService(
         var normalizedLocalPart = NormalizeLocalPartForDomain(localPart, domain.Name);
         var result = await CreateAccountCoreAsync(db, domain, normalizedLocalPart, password, quotaBytes, actor, cancellationToken);
         await transaction.CommitAsync(cancellationToken);
+        await db.NotifyRoutingCommittedAsync(cancellationToken);
         return result;
     }
 
@@ -1145,6 +1149,7 @@ public sealed class AdminApplicationService(
         AddAudit(db, actor, "account.soft-delete", $"account:{account.Id}", $"purgeAfter={purgeAfter:O}");
         await db.SaveChangesAsync(cancellationToken);
         await transaction.CommitAsync(cancellationToken);
+        await db.NotifyRoutingCommittedAsync(cancellationToken);
     }
 
     public async Task DisableDomainAccountsAsync(
@@ -1223,6 +1228,7 @@ public sealed class AdminApplicationService(
         AddAudit(db, actor, "account.batch-soft-delete", $"domain:{domainId}", $"count={accounts.Count};purgeAfter={purgeAfter:O}");
         await db.SaveChangesAsync(cancellationToken);
         await transaction.CommitAsync(cancellationToken);
+        await db.NotifyRoutingCommittedAsync(cancellationToken);
     }
 
     public async Task SetAccountPasswordAsync(
@@ -1371,6 +1377,7 @@ public sealed class AdminApplicationService(
             ?? throw new InvalidOperationException("Domain does not exist.");
         var result = await CreateAliasCoreAsync(db, domain, localPart, targetAccountId, mode, actor, cancellationToken);
         await transaction.CommitAsync(cancellationToken);
+        await db.NotifyRoutingCommittedAsync(cancellationToken);
         return result;
     }
 
@@ -1397,6 +1404,7 @@ public sealed class AdminApplicationService(
         var localPart = NormalizeLocalPartForDomain(sourceLocalPart, domain.Name);
         var result = await CreateAliasCoreAsync(db, domain, localPart, targetAccountId, mode, actor, cancellationToken);
         await transaction.CommitAsync(cancellationToken);
+        await db.NotifyRoutingCommittedAsync(cancellationToken);
         return result;
     }
 
@@ -1461,6 +1469,7 @@ public sealed class AdminApplicationService(
             AddAudit(db, actor, "alias.update", $"alias:{alias.Id}", $"{normalizedLocalPart}:Disabled");
             await db.SaveChangesAsync(cancellationToken);
             await transaction.CommitAsync(cancellationToken);
+            await db.NotifyRoutingCommittedAsync(cancellationToken);
             return ToAliasView(alias, null);
         }
         var target = await db.Accounts.Include(x => x.Domain)
@@ -1478,6 +1487,7 @@ public sealed class AdminApplicationService(
         AddAudit(db, actor, "alias.update", $"alias:{alias.Id}", $"{normalizedLocalPart}:{requestedMode}->{alias.DestinationAddress}");
         await db.SaveChangesAsync(cancellationToken);
         await transaction.CommitAsync(cancellationToken);
+        await db.NotifyRoutingCommittedAsync(cancellationToken);
         return ToAliasView(alias, target);
     }
 

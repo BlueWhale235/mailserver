@@ -16,16 +16,18 @@ public static class ConfigurationScopes
     public const string Rules = "rules";
     public const string Firewall = "firewall";
     public const string Settings = "settings";
-    public static readonly string[] All = [Rules, Firewall, Settings];
+    public const string Routing = "routing";
+    public static readonly string[] All = [Rules, Firewall, Settings, Routing];
 }
 
-public sealed record ConfigurationVersionsSnapshot(long Rules, long Firewall, long Settings)
+public sealed record ConfigurationVersionsSnapshot(long Rules, long Firewall, long Settings, long Routing = 0)
 {
     public long For(string scope) => scope switch
     {
         ConfigurationScopes.Rules => Rules,
         ConfigurationScopes.Firewall => Firewall,
         ConfigurationScopes.Settings => Settings,
+        ConfigurationScopes.Routing => Routing,
         _ => 0
     };
 }
@@ -64,7 +66,8 @@ public sealed class ConfigurationVersionService(
         return new ConfigurationVersionsSnapshot(
             rows.GetValueOrDefault(ConfigurationScopes.Rules),
             rows.GetValueOrDefault(ConfigurationScopes.Firewall),
-            rows.GetValueOrDefault(ConfigurationScopes.Settings));
+            rows.GetValueOrDefault(ConfigurationScopes.Settings),
+            rows.GetValueOrDefault(ConfigurationScopes.Routing));
     }
 
     public static async Task<long> BumpAsync(
@@ -110,7 +113,8 @@ public sealed class ConfigurationVersionService(
         var saved = new ConfigurationVersionsSnapshot(
             versionRows.GetValueOrDefault(ConfigurationScopes.Rules),
             versionRows.GetValueOrDefault(ConfigurationScopes.Firewall),
-            versionRows.GetValueOrDefault(ConfigurationScopes.Settings));
+            versionRows.GetValueOrDefault(ConfigurationScopes.Settings),
+            versionRows.GetValueOrDefault(ConfigurationScopes.Routing));
         var statuses = await db.ConfigurationProcessStatuses.AsNoTracking()
             .OrderBy(x => x.InstanceName).ThenBy(x => x.ProcessId)
             .ToListAsync(cancellationToken);
@@ -147,6 +151,8 @@ public sealed class ConfigurationCacheBypass : IDisposable
 
 public sealed class ConfigurationSnapshotCache : IDisposable
 {
+    internal static event Action<long>? RoutingCommitted;
+    internal static void NotifyRoutingCommitted(long version) => RoutingCommitted?.Invoke(version);
     private sealed record CacheValue(object Value, long Version, DateTimeOffset LoadedAt, long Size);
     private sealed record Failure(int Count, DateTimeOffset RetryAt, Exception Error);
     private readonly object _sync = new();
@@ -176,13 +182,15 @@ public sealed class ConfigurationSnapshotCache : IDisposable
     public ConfigurationVersionsSnapshot Versions
     {
         get { lock (_sync) return new(_versions.GetValueOrDefault(ConfigurationScopes.Rules),
-            _versions.GetValueOrDefault(ConfigurationScopes.Firewall), _versions.GetValueOrDefault(ConfigurationScopes.Settings)); }
+            _versions.GetValueOrDefault(ConfigurationScopes.Firewall), _versions.GetValueOrDefault(ConfigurationScopes.Settings),
+            _versions.GetValueOrDefault(ConfigurationScopes.Routing)); }
     }
     public ConfigurationSnapshotCache(IOptions<ConfigurationCacheOptions> options, ILogger<ConfigurationSnapshotCache> logger)
     {
         Options = options.Value;
         _logger = logger;
         _loadLimit = new(Math.Clamp(Options.MaximumConcurrentLoads, 1, 32));
+        RoutingCommitted += ObserveRoutingCommitted;
         _hitCounter = _meter.CreateCounter<long>("mailserver.config_cache.hits");
         _missCounter = _meter.CreateCounter<long>("mailserver.config_cache.misses");
         _evictionCounter = _meter.CreateCounter<long>("mailserver.config_cache.evictions");
@@ -193,6 +201,7 @@ public sealed class ConfigurationSnapshotCache : IDisposable
             lock (_sync) return _entries.Count == 0 ? 0 : _entries.Values.Max(x => (DateTimeOffset.UtcNow - x.LoadedAt).TotalSeconds);
         });
     }
+    private void ObserveRoutingCommitted(long version) => ObserveCommittedVersion(ConfigurationScopes.Routing, version);
     public void ObserveVersions(ConfigurationVersionsSnapshot versions)
     {
         lock (_sync)
@@ -200,6 +209,7 @@ public sealed class ConfigurationSnapshotCache : IDisposable
             _versions[ConfigurationScopes.Rules] = Math.Max(versions.Rules, _versions.GetValueOrDefault(ConfigurationScopes.Rules));
             _versions[ConfigurationScopes.Firewall] = Math.Max(versions.Firewall, _versions.GetValueOrDefault(ConfigurationScopes.Firewall));
             _versions[ConfigurationScopes.Settings] = Math.Max(versions.Settings, _versions.GetValueOrDefault(ConfigurationScopes.Settings));
+            _versions[ConfigurationScopes.Routing] = Math.Max(versions.Routing, _versions.GetValueOrDefault(ConfigurationScopes.Routing));
         }
     }
     public void ObserveCommittedVersion(string scope, long version)
@@ -238,7 +248,8 @@ public sealed class ConfigurationSnapshotCache : IDisposable
         _evictionCounter.Add(1);
     }
     public async Task<T> GetAsync<T>(string key, string scope,
-        Func<CancellationToken, Task<(T Value, long Size)>> loader, CancellationToken cancellationToken) where T : class
+        Func<CancellationToken, Task<(T Value, long Size)>> loader, CancellationToken cancellationToken,
+        TimeSpan? maximumAge = null) where T : class
     {
         if (!Options.Enabled || ConfigurationCacheBypass.IsActive) return (await loader(cancellationToken)).Value;
         cancellationToken.ThrowIfCancellationRequested();
@@ -252,7 +263,9 @@ public sealed class ConfigurationSnapshotCache : IDisposable
             version = _versions.GetValueOrDefault(scope);
             _entries.TryGetValue(key, out stale);
             if (stale is not null && stale.Version == version
-                && DateTimeOffset.UtcNow - stale.LoadedAt < TimeSpan.FromSeconds(Math.Max(1, Options.AbsoluteRefreshSeconds)))
+                && DateTimeOffset.UtcNow - stale.LoadedAt < (maximumAge is null
+                    ? TimeSpan.FromSeconds(Math.Max(1, Options.AbsoluteRefreshSeconds))
+                    : TimeSpan.FromSeconds(Math.Max(1, Math.Min(Options.AbsoluteRefreshSeconds, maximumAge.Value.TotalSeconds)))))
             {
                 _lru.Remove(_nodes[key]);
                 _lru.AddLast(_nodes[key]);
@@ -336,6 +349,7 @@ public sealed class ConfigurationSnapshotCache : IDisposable
     }
     public void Dispose()
     {
+        RoutingCommitted -= ObserveRoutingCommitted;
         lock (_sync) { _disposed = true; _entries.Clear(); _nodes.Clear(); _lru.Clear(); _bytes = 0; }
         _lifetime.Cancel();
         // In-flight loads own their admission permits until they complete.
@@ -489,6 +503,6 @@ public sealed class ConfigurationCacheMonitor(
 
     private string ResolveRoles()
     {
-        return runtime.Role == "all" ? "smtp,imap,worker" : runtime.Role;
+        return runtime.Role == "all" ? "api,smtp,imap,worker" : runtime.Role;
     }
 }
