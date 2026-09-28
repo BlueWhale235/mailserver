@@ -281,6 +281,9 @@ namespace MailServer.Migrations.Sqlite.Migrations
                     b.Property<long>("RulesVersion")
                         .HasColumnType("INTEGER");
 
+                    b.Property<long>("RoutingVersion")
+                        .HasColumnType("INTEGER");
+
                     b.Property<long>("SettingsVersion")
                         .HasColumnType("INTEGER");
 

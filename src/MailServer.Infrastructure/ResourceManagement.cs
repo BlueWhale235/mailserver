@@ -206,6 +206,9 @@ public sealed class ResourceSettingsService(IDbContextFactory<MailDbContext> fac
                     : usage.ApplyFailed ? "failed" : usage.ConfigurationId != desired.ConfigurationId ? "applying" : "applied";
                 var roles = x.Roles.Split(',');
                 if (roles.Length == 1 && roles[0] == "api" && state != "unreported") state = "applied";
+                var serviceStarting = roles.Where(role => role is "smtp" or "imap" or "worker")
+                    .Any(role => usage?.ServiceStates?.ContainsKey(role) != true);
+                if (state == "applied" && serviceStarting) state = "applying";
                 var serviceIssue = roles.Any(role => usage?.ServiceStates?.GetValueOrDefault(role) is "stopped" or "error");
                 if (state == "applied" && serviceIssue) state = "failed";
                 return new ResourceProcessView(x.ProcessId, x.InstanceName, roles, x.LastSeenAt,

@@ -289,6 +289,7 @@ public sealed class ResourceManagementTests
         var original = await service.SaveAsync("1gb", "test", CancellationToken.None);
         var runtime = new ResourceRuntime("worker", new ConfigurationBuilder().Build());
         runtime.Apply(original, cache);
+        runtime.SetServiceState("worker", "working");
         await using (var db = await fixture.Factory.CreateDbContextAsync())
         {
             db.ConfigurationProcessStatuses.Add(new ConfigurationProcessStatus {

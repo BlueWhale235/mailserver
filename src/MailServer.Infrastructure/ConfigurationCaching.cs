@@ -126,7 +126,7 @@ public sealed class ConfigurationVersionService(
             x.Roles.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
             x.StartedAt,
             x.LastSeenAt,
-            new ConfigurationVersionsSnapshot(x.RulesVersion, x.FirewallVersion, x.SettingsVersion),
+            new ConfigurationVersionsSnapshot(x.RulesVersion, x.FirewallVersion, x.SettingsVersion, x.RoutingVersion),
             x.EstimatedCacheBytes,
             x.EntryCount,
             x.Hits,
@@ -134,7 +134,9 @@ public sealed class ConfigurationVersionService(
             x.ReloadFailures,
             x.LastError,
             x.LastSeenAt < staleCutoff ? "stale"
-                : x.RulesVersion == saved.Rules && x.FirewallVersion == saved.Firewall && x.SettingsVersion == saved.Settings
+                : x.Roles == "api" ? "not-applicable"
+                : x.RulesVersion == saved.Rules && x.FirewallVersion == saved.Firewall
+                    && x.SettingsVersion == saved.Settings && x.RoutingVersion == saved.Routing
                     ? "current" : "lagging")).ToArray());
     }
 }
@@ -485,6 +487,7 @@ public sealed class ConfigurationCacheMonitor(
         status.RulesVersion = current.Rules;
         status.FirewallVersion = current.Firewall;
         status.SettingsVersion = current.Settings;
+        status.RoutingVersion = current.Routing;
         status.EstimatedCacheBytes = cache.EstimatedBytes;
         status.EntryCount = cache.EntryCount;
         status.Hits = cache.Hits;
@@ -499,6 +502,10 @@ public sealed class ConfigurationCacheMonitor(
         var cutoff = now.AddHours(-Math.Max(1, options.Value.ProcessRetentionHours));
         await db.ConfigurationProcessStatuses.Where(x => x.LastSeenAt < cutoff).ExecuteDeleteAsync(cancellationToken);
         await db.SaveChangesAsync(cancellationToken);
+        logger.LogInformation(
+            "Runtime resource sample: role={Role} rssBytes={RssBytes} managedBytes={ManagedBytes} heapBytes={HeapBytes} gc0={Gc0} gc1={Gc1} gc2={Gc2} cacheBytes={CacheBytes}",
+            runtime.Role, Environment.WorkingSet, GC.GetTotalMemory(false), GC.GetGCMemoryInfo().HeapSizeBytes,
+            GC.CollectionCount(0), GC.CollectionCount(1), GC.CollectionCount(2), cache.EstimatedBytes);
     }
 
     private string ResolveRoles()

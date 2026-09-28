@@ -95,6 +95,30 @@ afterEach(() => {
 })
 
 describe('system settings safeguards', () => {
+  it('shows reported service health without exposing internal versions', async () => {
+    const previous = vi.mocked(api).getMockImplementation()!
+    vi.mocked(api).mockImplementation(async (path, init) => {
+      if (path === '/settings/resources/status') return {
+        totalCacheBudgetBytes: 8388608, totalEstimatedCacheBytes: 1024,
+        profileId: '1gb', values: null,
+        processes: [{ processId: 'host:1', instanceName: 'host', roles: ['smtp', 'imap'],
+          lastSeenAt: new Date().toISOString(), estimatedCacheBytes: 1024, state: 'applied', message: null,
+          usage: { profileId: '1gb', cacheBudgetBytes: 8388608, deliveryLimit: 2,
+            smtpLimit: 16, imapLimit: 32, activeDeliveries: 0, activeSmtp: 1, activeImap: 2,
+            serviceStates: { smtp: 'listening', imap: 'listening' } } }],
+      } as never
+      return previous(path, init)
+    })
+    const wrapper = mountView()
+    await flushPromises()
+    await wrapper.findAll('.settings-nav button').find(x => x.text().includes('资源与性能'))!.trigger('click')
+    expect(wrapper.text()).toContain('SMTP 服务状态')
+    expect(wrapper.text()).toContain('IMAP 服务状态')
+    expect(wrapper.text()).toContain('正在监听')
+    expect(wrapper.text()).not.toContain('规则版本')
+    wrapper.unmount()
+  })
+
   it('fills a preset, permits custom values, supports restore and undo, then saves all values', async () => {
     const previous = vi.mocked(api).getMockImplementation()!
     vi.mocked(api).mockImplementation(async (path, init) => {

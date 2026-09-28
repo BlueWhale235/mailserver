@@ -113,10 +113,19 @@ public sealed class HttpAcceptanceTests
         Assert.Equal(3, custom.GetProperty("values").GetProperty("deliveryConcurrency").GetInt32());
         Assert.Equal(12 * 1024 * 1024, (await host.JsonAsync(HttpMethod.Get, path)).GetProperty("values").GetProperty("cacheBytes").GetInt64());
         await host.JsonAsync(HttpMethod.Put, path, new ResourceSelection("4gb", values with { EntryBytes = values.CacheBytes + 1 }), 400);
-        var status = await host.JsonAsync(HttpMethod.Get, path + "/status");
-        Assert.Contains(status.GetProperty("processes").EnumerateArray(),
-            process => process.GetProperty("roles").EnumerateArray().Any(role => role.GetString() == "api")
+        var apiReported = false;
+        var lastStatus = string.Empty;
+        for (var attempt = 0; attempt < 50; attempt++)
+        {
+            var status = await host.JsonAsync(HttpMethod.Get, path + "/status");
+            lastStatus = status.GetRawText();
+            apiReported = status.GetProperty("processes").EnumerateArray().Any(process =>
+                process.GetProperty("roles").EnumerateArray().Any(role => role.GetString() == "api")
                 && process.GetProperty("state").GetString() == "applied");
+            if (apiReported) break;
+            await Task.Delay(100);
+        }
+        Assert.True(apiReported, $"The standalone API did not report its process status: {lastStatus}");
         using var anonymous = await host.Anonymous.GetAsync(path);
         Assert.Equal(HttpStatusCode.Unauthorized, anonymous.StatusCode);
         await host.JsonAsync(HttpMethod.Post, "/api/v1/admins", new { userName = "resources-reader", password = AcceptanceHost.Password,

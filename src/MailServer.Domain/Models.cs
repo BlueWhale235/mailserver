@@ -559,6 +559,7 @@ public sealed class ConfigurationProcessStatus
     public long RulesVersion { get; set; }
     public long FirewallVersion { get; set; }
     public long SettingsVersion { get; set; }
+    public long RoutingVersion { get; set; }
     public long EstimatedCacheBytes { get; set; }
     public int EntryCount { get; set; }
     public long Hits { get; set; }

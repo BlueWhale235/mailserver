@@ -12,6 +12,27 @@ namespace MailServer.Tests;
 public sealed class SmallMemoryMaintenanceTests
 {
     [Fact]
+    public async Task MailboxSelectionSnapshotReplaysAndRejectsOverBudgetItems()
+    {
+        await using var snapshot = new MailboxSelectionSnapshot(512);
+        var item = new MailboxItem(Guid.NewGuid(), 1, 10, string.Empty, 1,
+            DateTimeOffset.UtcNow, 20, "content-key");
+        await snapshot.AddAsync(item, CancellationToken.None);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => snapshot.AddAsync(
+            item with { ContentKey = new string('x', 1024) }, CancellationToken.None));
+        await snapshot.SealAsync(CancellationToken.None);
+        var first = new List<MailboxItem>();
+        await foreach (var value in snapshot.ReadAsync(CancellationToken.None)) first.Add(value);
+        var second = new List<MailboxItem>();
+        await foreach (var value in snapshot.ReadAsync(CancellationToken.None)) second.Add(value);
+        Assert.Equal([item], first);
+        Assert.Equal(first, second);
+        Assert.Equal(1, snapshot.Count);
+        await snapshot.DisposeAsync();
+        Assert.False(File.Exists(snapshot.FilePath));
+    }
+
+    [Fact]
     public void MailboxLockStripesRemainBoundedAndShareCollidingPermit()
     {
         var field = typeof(MailboxService).GetField("MailboxLocks",

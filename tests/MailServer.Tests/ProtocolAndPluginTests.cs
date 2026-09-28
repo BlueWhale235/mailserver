@@ -1219,7 +1219,7 @@ public sealed class ProtocolAndPluginTests
         try
         {
             var scenario = await CreateImapInboxScenarioAsync(root);
-            for (var uid = 2; uid <= 150; uid++)
+            for (var uid = 2; uid <= 300; uid++)
             {
                 await AddInboxMessageAsync(
                     scenario.Factory,
@@ -1237,7 +1237,7 @@ public sealed class ProtocolAndPluginTests
             await scenario.Service.ExecuteLineAsync(connection, scenario.State, "A003 UID FETCH 999999 FLAGS", "local", ConnectionSecurity.StartTls, true, CancellationToken.None);
 
             var output = stream.OutputText;
-            Assert.Equal(150, Regex.Matches(output, @"\* \d+ FETCH").Count);
+            Assert.Equal(300, Regex.Matches(output, @"\* \d+ FETCH").Count);
             Assert.Contains("A001 OK FETCH completed", output);
             Assert.Contains("A002 OK FETCH completed", output);
             Assert.Contains("A003 OK FETCH completed", output);

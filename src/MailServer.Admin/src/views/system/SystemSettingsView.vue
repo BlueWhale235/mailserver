@@ -181,6 +181,14 @@ function resourceState(process: ResourceProcess) {
   return { label: '未收到上报', tone: 'warning' as const }
 }
 
+function serviceStateLabel(state: string | undefined) {
+  if (state === 'listening') return '正在监听'
+  if (state === 'working') return '正在工作'
+  if (state === 'stopped') return '已停止'
+  if (state === 'error') return '发生故障'
+  return '等待首次上报'
+}
+
 function acceptDelivery(value: DeliverySettings) {
   delivery.value = globalThis.structuredClone(value)
   baselines.value.delivery = JSON.stringify(delivery.value)
@@ -523,11 +531,12 @@ onBeforeUnmount(() => {
                 <div v-if="process.roles.includes('worker')"><dt>正在投递 / 并发上限</dt><dd>{{ process.usage.activeDeliveries }} / {{ process.usage.deliveryLimit }}</dd></div>
                 <div v-if="process.roles.includes('smtp')"><dt>SMTP 连接 / 上限</dt><dd>{{ process.usage.activeSmtp }} / {{ process.usage.smtpLimit }}</dd></div>
                 <div v-if="process.roles.includes('imap')"><dt>IMAP 连接 / 上限</dt><dd>{{ process.usage.activeImap }} / {{ process.usage.imapLimit }}</dd></div>
+                <div v-for="role in process.roles" :key="role"><dt>{{ role.toUpperCase() }} 服务状态</dt><dd>{{ serviceStateLabel(process.usage.serviceStates?.[role]) }}</dd></div>
                 <div><dt>最后上报</dt><dd>{{ new Date(process.lastSeenAt).toLocaleString() }}</dd></div>
               </dl>
               <v-alert v-if="process.message" type="warning" variant="tonal" density="compact">{{ process.message }}</v-alert>
             </details>
-            <v-alert v-if="!resourceStatus.processes.length" type="info" variant="tonal">未收到邮件服务上报。SMTP、IMAP 或 Worker 启动后会在这里显示；管理 API 不使用配置缓存。</v-alert>
+            <v-alert v-if="!resourceStatus.processes.some(process => process.roles.some(role => role === 'smtp' || role === 'imap' || role === 'worker'))" type="info" variant="tonal">尚未收到邮件服务上报。SMTP、IMAP 或 Worker 启动后会在这里显示；管理 API 不使用配置缓存。</v-alert>
           </div>
         </template>
       </div>

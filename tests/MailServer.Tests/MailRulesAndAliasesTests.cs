@@ -1402,6 +1402,7 @@ public sealed class MailRulesAndAliasesTests
         var factory = environment.Services.GetRequiredService<IDbContextFactory<MailDbContext>>();
         var inbound = environment.Services.GetRequiredService<IInboundMessageService>();
         var cache = environment.Services.GetRequiredService<ConfigurationSnapshotCache>();
+        cache.Options.Enabled = true; // Exercise the SMTP runtime path; API-only hosts deliberately disable caching.
         Assert.False(await inbound.IsLocalRecipientAsync("alice@example.com", CancellationToken.None));
         var misses = cache.Misses;
         Assert.False(await inbound.IsLocalRecipientAsync("alice@example.com", CancellationToken.None));
@@ -1440,6 +1441,33 @@ public sealed class MailRulesAndAliasesTests
         Assert.Equal(initial, await check.ConfigurationVersions.Where(x => x.Scope == ConfigurationScopes.Routing)
             .Select(x => x.Version).SingleAsync());
         Assert.False(await check.Domains.AnyAsync(x => x.Name == "rollback.example"));
+    }
+
+    [Fact]
+    public async Task StaleRecipientRouteCannotDeliverToDisabledAccount()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var factory = environment.Services.GetRequiredService<IDbContextFactory<MailDbContext>>();
+        var inbound = environment.Services.GetRequiredService<IInboundMessageService>();
+        environment.Services.GetRequiredService<ConfigurationSnapshotCache>().Options.Enabled = true;
+        await using (var db = await factory.CreateDbContextAsync())
+        {
+            var domain = new MailDomain { Name = "example.com" };
+            db.AddRange(domain, Account(domain, "alice"));
+            await db.SaveChangesAsync();
+        }
+        Assert.True(await inbound.IsLocalRecipientAsync("alice@example.com", CancellationToken.None));
+        await using (var db = await factory.CreateDbContextAsync())
+            await db.Accounts.Where(x => x.LocalPart == "alice")
+                .ExecuteUpdateAsync(update => update.SetProperty(x => x.IsEnabled, false));
+        // Direct database edits deliberately bypass the official version bump until periodic refresh.
+        Assert.True(await inbound.IsLocalRecipientAsync("alice@example.com", CancellationToken.None));
+        await using var message = MessageStream("stale-route", "alice@example.com", "body");
+        await Assert.ThrowsAsync<InvalidOperationException>(() => inbound.AcceptAsync(
+            new InboundEnvelope("sender@outside.test", ["alice@example.com"], null, "127.0.0.1", "test"),
+            message, CancellationToken.None));
+        await using var check = await factory.CreateDbContextAsync();
+        Assert.False(await check.MailboxMessages.AnyAsync());
     }
 
     private sealed class TestEnvironment(string root, ServiceProvider services) : IAsyncDisposable

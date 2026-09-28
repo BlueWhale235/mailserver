@@ -283,6 +283,9 @@ namespace MailServer.Migrations.MySql.Migrations
                     b.Property<long>("RulesVersion")
                         .HasColumnType("bigint");
 
+                    b.Property<long>("RoutingVersion")
+                        .HasColumnType("bigint");
+
                     b.Property<long>("SettingsVersion")
                         .HasColumnType("bigint");
 

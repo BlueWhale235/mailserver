@@ -11,14 +11,18 @@ internal sealed class MailboxSelectionSnapshot : IMailboxSelectionSnapshot
     private const long MaximumProcessBytes = 256L * 1024 * 1024;
     private static long _reservedBytes;
     private readonly FileStream _stream;
+    private readonly long _maximumFileBytes;
     private long _bytes;
     private bool _sealed;
     private int _disposed;
+    internal string FilePath { get; }
     public long Count { get; private set; }
 
-    public MailboxSelectionSnapshot()
+    public MailboxSelectionSnapshot(long maximumFileBytes = MaximumFileBytes)
     {
+        _maximumFileBytes = maximumFileBytes;
         var path = Path.Combine(Path.GetTempPath(), $"mailbox-selection-{Guid.NewGuid():N}.tmp");
+        FilePath = path;
         _stream = new FileStream(path, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None,
             64 * 1024, FileOptions.Asynchronous | FileOptions.DeleteOnClose | FileOptions.SequentialScan);
     }
@@ -28,7 +32,7 @@ internal sealed class MailboxSelectionSnapshot : IMailboxSelectionSnapshot
         if (_sealed) throw new InvalidOperationException("Mailbox selection is already sealed.");
         var line = JsonSerializer.Serialize(item);
         var bytes = Encoding.UTF8.GetBytes(line + "\n");
-        if (_bytes + bytes.Length > MaximumFileBytes)
+        if (_bytes + bytes.Length > _maximumFileBytes)
             throw new InvalidOperationException("Mailbox selection exceeds the temporary storage limit.");
         var reserved = Interlocked.Add(ref _reservedBytes, bytes.Length);
         if (reserved > MaximumProcessBytes)

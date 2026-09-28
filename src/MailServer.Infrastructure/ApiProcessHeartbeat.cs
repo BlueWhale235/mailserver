@@ -38,6 +38,10 @@ public sealed class ApiProcessHeartbeat(
                 }
                 status.LastSeenAt = DateTimeOffset.UtcNow;
                 status.ResourceStatusJson = JsonSerializer.Serialize(runtime.Snapshot());
+                var cutoff = DateTimeOffset.UtcNow.AddHours(-24);
+                await db.ConfigurationProcessStatuses
+                    .Where(x => x.ProcessId != _processId && x.LastSeenAt < cutoff)
+                    .ExecuteDeleteAsync(stoppingToken);
                 await db.SaveChangesAsync(stoppingToken);
             }
             catch (Exception error) when (error is not OperationCanceledException)

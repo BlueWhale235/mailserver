@@ -28,6 +28,7 @@ export interface ResourceUsage {
   activeDeliveries: number
   activeSmtp: number
   activeImap: number
+  serviceStates?: Record<string, string> | null
 }
 export interface ResourceProcess {
   processId: string
