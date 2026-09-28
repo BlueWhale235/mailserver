@@ -133,12 +133,23 @@ public sealed class SmallMemoryMaintenanceTests
                 canceled.Cancel();
                 await Assert.ThrowsAnyAsync<OperationCanceledException>(() => handler.RunAsync(task, canceled.Token));
             }
-            Assert.Equal(1, (await handler.RunAsync(task, CancellationToken.None)).ProcessedCount);
+            await using (var db = await factory.CreateDbContextAsync())
+            {
+                using var state = JsonDocument.Parse((await db.ScheduledTasks.SingleAsync()).SettingsJson);
+                Assert.Equal(keys[1], state.RootElement.GetProperty("LastKey").GetString());
+                Assert.Single(await db.AuditRecords.ToListAsync());
+            }
+            // A new factory and handler simulate a restarted service reading only persisted progress.
+            var restartedFactory = new PooledDbContextFactory<MailDbContext>(options);
+            var restartedHandler = new StorageIntegrityTaskHandler(restartedFactory,
+                Options.Create(new StorageOptions { RootPath = root }));
+            Assert.Equal(1, (await restartedHandler.RunAsync(task, CancellationToken.None)).ProcessedCount);
             await using (var db = await factory.CreateDbContextAsync())
             {
                 using var state = JsonDocument.Parse((await db.ScheduledTasks.SingleAsync()).SettingsJson);
                 Assert.Equal(JsonValueKind.Null, state.RootElement.GetProperty("LastKey").ValueKind);
                 Assert.Equal(1, state.RootElement.GetProperty("CompletedCycles").GetInt64());
+                Assert.Equal(2, await db.AuditRecords.CountAsync());
             }
             Assert.Equal(2, (await handler.RunAsync(task, CancellationToken.None)).ProcessedCount);
         }

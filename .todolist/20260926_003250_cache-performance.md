@@ -14,7 +14,7 @@
 | 最终入库分发核实账号与别名状态 | 已实现并通过现有测试 | 不使用 RCPT 旧快照直接落库；故障注入专项仍待扩充 |
 | IMAP FETCH／SEARCH／STORE／EXPUNGE 大邮箱元数据分批、临时文件限额 | 已实现并通过协议回归 | SQLite 日期／标志 SEARCH 已在 SQL 预筛且保留原序号；MySQL 标志 SEARCH 已加入待运行的真实容器验收；MySQL 日期、超大邮箱压力和慢客户端专项仍待扩充 |
 | IMAP 原文、头部、正文、部分 literal 流式输出及大型 MIME 并发限制 | 已实现并通过协议回归 | 断流、丢文件、取消及峰值内存专项仍待扩充 |
-| 固定锁条带与完整性扫描游标 | 已实现并通过 SQLite 专项测试 | 扫描失败注入和跨进程续跑专项仍待扩充 |
+| 固定锁条带与完整性扫描游标 | 已实现并通过 SQLite 专项测试 | 新数据库上下文重启续跑、取消后游标与审计不前进已验证；提交失败注入和真正跨进程专项仍待扩充 |
 | API、SMTP、IMAP、Worker 资源上报和可读状态 | 已实现并通过本机构建／API 测试 | 独立服务故障和过期状态专项仍待扩充 |
 | MySQL 8.4 迁移、版本竞争、双 Worker `SKIP LOCKED` | 等待外部环境验收 | `scripts/acceptance-mysql-84.sh`；本机没有 Docker，未执行 |
 | Linux 512 MiB 持续负载、RSS／堆／GC、吞吐／P95／OOM | 等待外部环境验收 | `scripts/acceptance-linux-512m.sh`；本机没有 Docker，未执行；不宣称达到内存目标 |
