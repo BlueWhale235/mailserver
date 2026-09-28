@@ -1444,6 +1444,57 @@ public sealed class MailRulesAndAliasesTests
     }
 
     [Fact]
+    public async Task RecipientRoutingTracksAliasCreateTransferAndDisable()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var factory = environment.Services.GetRequiredService<IDbContextFactory<MailDbContext>>();
+        var inbound = environment.Services.GetRequiredService<IInboundMessageService>();
+        environment.Services.GetRequiredService<ConfigurationSnapshotCache>().Options.Enabled = true;
+        MailAccount first;
+        MailAccount second;
+        await using (var db = await factory.CreateDbContextAsync())
+        {
+            var domain = new MailDomain { Name = "example.com" };
+            first = Account(domain, "alice");
+            second = Account(domain, "bob");
+            db.AddRange(domain, first, second);
+            await db.SaveChangesAsync();
+        }
+        Assert.False(await inbound.IsLocalRecipientAsync("sales@example.com", CancellationToken.None));
+        await using (var db = await factory.CreateDbContextAsync())
+        {
+            db.Aliases.Add(new MailAlias
+            {
+                DomainId = first.DomainId, SourceLocalPart = "sales", TargetAccountId = first.Id
+            });
+            await db.SaveChangesAsync();
+        }
+        Assert.True(await inbound.IsLocalRecipientAsync("sales@example.com", CancellationToken.None));
+        await using (var db = await factory.CreateDbContextAsync())
+        {
+            var alias = await db.Aliases.SingleAsync();
+            alias.TargetAccountId = second.Id;
+            second = await db.Accounts.SingleAsync(x => x.Id == second.Id);
+            second.IsEnabled = false;
+            await db.SaveChangesAsync();
+        }
+        Assert.False(await inbound.IsLocalRecipientAsync("sales@example.com", CancellationToken.None));
+        await using (var db = await factory.CreateDbContextAsync())
+        {
+            var account = await db.Accounts.SingleAsync(x => x.Id == second.Id);
+            account.IsEnabled = true;
+            await db.SaveChangesAsync();
+        }
+        Assert.True(await inbound.IsLocalRecipientAsync("sales@example.com", CancellationToken.None));
+        await using (var db = await factory.CreateDbContextAsync())
+        {
+            db.Aliases.Remove(await db.Aliases.SingleAsync());
+            await db.SaveChangesAsync();
+        }
+        Assert.False(await inbound.IsLocalRecipientAsync("sales@example.com", CancellationToken.None));
+    }
+
+    [Fact]
     public async Task StaleRecipientRouteCannotDeliverToDisabledAccount()
     {
         await using var environment = await TestEnvironment.CreateAsync();
