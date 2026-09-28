@@ -375,8 +375,21 @@ public sealed class StoredMessage
     public required string ContentKey { get; set; }
     public required string EnvelopeFrom { get; set; }
     public string? InternetMessageId { get; set; }
+    public string? InternetMessageIdHash { get; set; }
+    public string? SourceType { get; set; }
+    public Guid? AuthenticatedAccountId { get; set; }
+    public string? AuthenticatedAccountName { get; set; }
+    public string? SourceIp { get; set; }
     public long Size { get; set; }
     public DateTimeOffset ReceivedAt { get; set; } = DateTimeOffset.UtcNow;
+}
+
+public sealed class StoredMessageRecipient
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid MessageId { get; set; }
+    public StoredMessage Message { get; set; } = null!;
+    public required string Address { get; set; }
 }
 
 public sealed class MailboxMessage

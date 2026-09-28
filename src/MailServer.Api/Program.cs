@@ -1889,6 +1889,52 @@ api.MapGet("/queues", async (
         search, status, scope ?? DeliveryJobScope.Any, page ?? 1, pageSize ?? 20, cancellationToken)))
     .RequirePermission(PermissionCodes.QueueList);
 
+api.MapGet("/operations/messages", async (string? messageId, string? sender, string? recipient,
+    string? authenticatedAccount, DateTimeOffset? from, DateTimeOffset? to, DeliveryStatus? deliveryStatus,
+    bool? recycled, int? page, int? pageSize, OperationsMailService mail, CancellationToken token) =>
+{
+    if (from > to) return Results.BadRequest(new { error = "开始时间不能晚于结束时间。" });
+    return Results.Ok(await mail.SearchAsync(new(messageId, sender, recipient, authenticatedAccount,
+        from, to, deliveryStatus, recycled, page ?? 1, pageSize ?? 50), token));
+}).RequirePermission(PermissionCodes.OperationsMailRead);
+api.MapGet("/operations/messages/{id:guid}", async (Guid id, OperationsMailService mail, CancellationToken token) =>
+    await mail.GetAsync(id, token) is { } result ? Results.Ok(result) : Results.NotFound())
+    .RequirePermission(PermissionCodes.OperationsMailRead);
+api.MapGet("/operations/messages/{id:guid}/recipients", async (Guid id, string kind, int? page, int? pageSize,
+    OperationsMailService mail, CancellationToken token) =>
+    await mail.GetRecipientsAsync(id, kind, page ?? 1, pageSize ?? 50, token) is { } result
+        ? Results.Ok(result) : Results.NotFound())
+    .RequirePermission(PermissionCodes.OperationsMailRead);
+api.MapGet("/operations/messages/{id:guid}/copies", async (Guid id, int? page, int? pageSize,
+    OperationsMailService mail, CancellationToken token) =>
+    await mail.GetCopiesAsync(id, page ?? 1, pageSize ?? 50, token) is { } result
+        ? Results.Ok(result) : Results.NotFound())
+    .RequirePermission(PermissionCodes.OperationsMailRead);
+api.MapGet("/operations/messages/{id:guid}/deliveries", async (Guid id, int? page, int? pageSize,
+    OperationsMailService mail, CancellationToken token) =>
+    await mail.GetDeliveriesAsync(id, page ?? 1, pageSize ?? 50, token) is { } result
+        ? Results.Ok(result) : Results.NotFound())
+    .RequirePermission(PermissionCodes.OperationsMailRead);
+api.MapGet("/operations/messages/{id:guid}/deliveries/{jobId:guid}/attempts", async (
+    Guid id, Guid jobId, int? page, int? pageSize, OperationsMailService mail, CancellationToken token) =>
+    await mail.GetAttemptsAsync(id, jobId, page ?? 1, pageSize ?? 50, token) is { } result ? Results.Ok(result) : Results.NotFound())
+    .RequirePermission(PermissionCodes.OperationsMailRead);
+api.MapGet("/operations/messages/{id:guid}/content", async (Guid id, HttpContext http,
+    OperationsMailService mail, CancellationToken token) =>
+{
+    var content = await mail.GetContentAsync(id, Actor(http), "operations.mail.preview", token);
+    return content is null ? Results.NotFound(new { error = "邮件记录或原文不存在。" }) : Results.Ok(content);
+}).RequirePermission(PermissionCodes.OperationsMailRead)
+    .RequirePermission(PermissionCodes.OperationsMailContentRead);
+api.MapGet("/operations/messages/{id:guid}/raw", async (Guid id, HttpContext http,
+    OperationsMailService mail, CancellationToken token) =>
+{
+    var stream = await mail.OpenAuditedAsync(id, Actor(http), "operations.mail.download", token);
+    return stream is null ? Results.NotFound(new { error = "邮件记录或原文不存在。" })
+        : Results.Stream(stream, "message/rfc822", $"message-{id:N}.eml");
+}).RequirePermission(PermissionCodes.OperationsMailRead)
+    .RequirePermission(PermissionCodes.OperationsMailContentRead);
+
 api.MapGet("/queues/summary", async (
     AdminApplicationService administration,
     CancellationToken cancellationToken) =>

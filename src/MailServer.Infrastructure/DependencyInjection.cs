@@ -133,6 +133,7 @@ public static class DependencyInjection
         services.AddSingleton<IPluginStateStore, PluginStateStore>();
         services.AddSingleton<IPluginQuarantineStore, PluginQuarantineStore>();
         services.AddSingleton<AdminApplicationService>();
+        services.AddSingleton<OperationsMailService>();
         services.AddSingleton<AccountDirectoryService>();
         services.AddSingleton<IOutboundTransport, DirectMxTransport>();
         return services;

@@ -20,6 +20,44 @@ namespace MailServer.Tests;
 public sealed class HttpAcceptanceTests
 {
     [Fact]
+    public async Task OperationsMailSeparatesMetadataAndContentPermissionsAndAuditsContentAccess()
+    {
+        await using var host = await AcceptanceHost.StartAsync();
+        var descriptor = await host.ContentStore.SaveAsync(new MemoryStream(System.Text.Encoding.UTF8.GetBytes(
+            "Message-ID: <case@example.test>\r\nFrom: Claim <claim@example.test>\r\nSubject: Case\r\n\r\nbody")), CancellationToken.None);
+        var id = Guid.NewGuid();
+        await using (var db = await host.Factory.CreateDbContextAsync())
+        {
+            db.Messages.Add(new StoredMessage { Id = id, ContentKey = descriptor.Key, Size = descriptor.Size,
+                EnvelopeFrom = "real@example.test", InternetMessageId = "case@example.test",
+                InternetMessageIdHash = MessageIdLookup.Hash("case@example.test") });
+            await db.SaveChangesAsync();
+        }
+        var path = $"/api/v1/operations/messages/{id}";
+        using (var anonymous = await host.Anonymous.GetAsync(path))
+            Assert.Equal(HttpStatusCode.Unauthorized, anonymous.StatusCode);
+        await host.JsonAsync(HttpMethod.Post, "/api/v1/admins", new { userName = "mail-reader", password = AcceptanceHost.Password,
+            isEnabled = true, grants = new[] { new { permissionCode = "operations.mail.read", resourceType = "", resourceKey = "" } } }, 201);
+        await host.JsonAsync(HttpMethod.Post, "/api/v1/admins", new { userName = "content-only", password = AcceptanceHost.Password,
+            isEnabled = true, grants = new[] { new { permissionCode = "operations.mail.content.read", resourceType = "", resourceKey = "" } } }, 201);
+        using var reader = await host.LoginAsync("mail-reader");
+        using (var detail = await reader.GetAsync(path)) Assert.Equal(HttpStatusCode.OK, detail.StatusCode);
+        using (var preview = await reader.GetAsync(path + "/content")) Assert.Equal(HttpStatusCode.Forbidden, preview.StatusCode);
+        using var contentOnly = await host.LoginAsync("content-only");
+        using (var preview = await contentOnly.GetAsync(path + "/content")) Assert.Equal(HttpStatusCode.Forbidden, preview.StatusCode);
+        var rendered = await host.JsonAsync(HttpMethod.Get, path + "/content");
+        Assert.Equal("Case", rendered.GetProperty("subject").GetString());
+        using (var raw = await host.Admin.GetAsync(path + "/raw"))
+        {
+            Assert.Equal(HttpStatusCode.OK, raw.StatusCode);
+            Assert.Contains("body", await raw.Content.ReadAsStringAsync());
+        }
+        await using var check = await host.Factory.CreateDbContextAsync();
+        Assert.Equal(2, await check.AuditRecords.CountAsync(x => x.RelatedId == id.ToString()
+            && (x.Action == "operations.mail.preview" || x.Action == "operations.mail.download")));
+    }
+
+    [Fact]
     public async Task ConnectionProtectionCanBeSavedAndRequiresFirewallManagement()
     {
         await using var host = await AcceptanceHost.StartAsync();
@@ -691,6 +729,7 @@ public sealed class HttpAcceptanceTests
         public HttpClient Anonymous { get; }
         public HttpClient Admin { get; }
         public IDbContextFactory<MailDbContext> Factory => services.GetRequiredService<IDbContextFactory<MailDbContext>>();
+        public IMessageContentStore ContentStore => services.GetRequiredService<IMessageContentStore>();
 
         private AcceptanceHost(ServiceProvider services, Process process, Uri address)
         {

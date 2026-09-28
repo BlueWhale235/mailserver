@@ -24,6 +24,8 @@ public static class PermissionCodes
     public const string FirewallRead = "firewall.read";
     public const string FirewallManage = "firewall.manage";
     public const string QueueRead = "queue.read";
+    public const string OperationsMailRead = "operations.mail.read";
+    public const string OperationsMailContentRead = "operations.mail.content.read";
     public const string QueueManage = "queue.manage";
     public const string SettingsRead = "settings.read";
     public const string SettingsManage = "settings.manage";
@@ -275,6 +277,8 @@ public sealed class PermissionService(IDbContextFactory<MailDbContext> dbFactory
             Item(PermissionCodes.FirewallRead, "防火墙只读", "查看防火墙规则。", domainScope: false),
             Item(PermissionCodes.FirewallManage, "防火墙管理", "创建、启停、编辑和删除防火墙规则。", domainScope: false),
             Item(PermissionCodes.QueueRead, "投递队列只读", "查看外发投递队列和原始邮件。", domainScope: false),
+            Item(PermissionCodes.OperationsMailRead, "运维邮件查询", "查看全部现存邮件的元数据和收发记录。", domainScope: false),
+            Item(PermissionCodes.OperationsMailContentRead, "运维邮件内容", "预览和下载现存邮件原文；还需运维邮件查询权限。", domainScope: false),
             Item(PermissionCodes.QueueManage, "投递队列管理", "立即重试或删除投递任务。", domainScope: false),
             Item(PermissionCodes.SettingsRead, "系统设置只读", "查看系统设置和通知模板。", domainScope: false),
             Item(PermissionCodes.SettingsManage, "系统设置管理", "修改系统设置和通知模板。", domainScope: false),

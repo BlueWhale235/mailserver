@@ -143,7 +143,10 @@ public sealed record InboundEnvelope(
     string? AuthenticatedUser,
     string RemoteAddress,
     string HeloName,
-    Guid? AuthenticatedAccountId = null);
+    Guid? AuthenticatedAccountId = null)
+{
+    public string? SourceType { get; init; }
+}
 
 /// <summary>
 /// 入站邮件被接受后的结果，包含原始内容键以及本地/外发分发数量。

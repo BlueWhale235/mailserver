@@ -1,4 +1,5 @@
 using System.Data;
+using System.Net;
 using System.Text;
 using MailServer.Domain;
 using Microsoft.EntityFrameworkCore;
@@ -113,10 +114,17 @@ public sealed class InboundMessageService(
                 ContentKey = descriptor.Key,
                 EnvelopeFrom = envelope.Sender,
                 InternetMessageId = mimeMessage.MessageId,
+                InternetMessageIdHash = MessageIdLookup.Hash(mimeMessage.MessageId),
+                SourceType = envelope.SourceType ?? (envelope.RemoteAddress == "local" ? "system" : "smtp"),
+                AuthenticatedAccountId = envelope.AuthenticatedAccountId,
+                AuthenticatedAccountName = envelope.AuthenticatedAccountId is null ? null : envelope.AuthenticatedUser,
+                SourceIp = IPAddress.TryParse(envelope.RemoteAddress, out _) ? envelope.RemoteAddress : null,
                 Size = descriptor.Size,
                 ReceivedAt = receivedAt
             };
             db.Messages.Add(storedMessage);
+            foreach (var address in envelope.Recipients.Distinct(StringComparer.OrdinalIgnoreCase))
+                db.MessageRecipients.Add(new StoredMessageRecipient { Message = storedMessage, Address = address });
 
             var decodedEnvelopeSender = await srs.TryDecodeAsync(db, envelope.Sender, cancellationToken);
             var forwardingTraces = await srs.ReadForwardingTracesAsync(

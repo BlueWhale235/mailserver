@@ -1,4 +1,5 @@
 using System.Data;
+using System.Net;
 using System.Text;
 using System.Text.Json;
 using MailServer.Domain;
@@ -39,10 +40,15 @@ public sealed class QuarantineService(
                 ContentKey = descriptor.Key,
                 EnvelopeFrom = AddressParser.Normalize(request.Sender),
                 InternetMessageId = await ReadInternetMessageIdAsync(descriptor.Key, cancellationToken),
+                SourceType = "quarantine",
+                SourceIp = IPAddress.TryParse(request.RemoteAddress, out _) ? request.RemoteAddress : null,
                 Size = descriptor.Size,
                 ReceivedAt = clock.UtcNow
             };
             db.Messages.Add(message);
+            message.InternetMessageIdHash = MessageIdLookup.Hash(message.InternetMessageId);
+            foreach (var address in request.Recipients.Distinct(StringComparer.OrdinalIgnoreCase))
+                db.MessageRecipients.Add(new StoredMessageRecipient { Message = message, Address = address });
 
             var records = new List<QuarantineRecord>();
             foreach (var group in domains.GroupBy(x => x.DomainId))

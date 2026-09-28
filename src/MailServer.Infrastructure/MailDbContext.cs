@@ -63,6 +63,7 @@ public sealed class MailDbContext(DbContextOptions<MailDbContext> options) : DbC
     public DbSet<Mailbox> Mailboxes => Set<Mailbox>();
     public DbSet<MailboxFolderDeletionJob> MailboxFolderDeletionJobs => Set<MailboxFolderDeletionJob>();
     public DbSet<StoredMessage> Messages => Set<StoredMessage>();
+    public DbSet<StoredMessageRecipient> MessageRecipients => Set<StoredMessageRecipient>();
     public DbSet<MailboxMessage> MailboxMessages => Set<MailboxMessage>();
     public DbSet<DeliveryJob> DeliveryJobs => Set<DeliveryJob>();
     public DbSet<DeliveryAttempt> DeliveryAttempts => Set<DeliveryAttempt>();
@@ -315,6 +316,22 @@ public sealed class MailDbContext(DbContextOptions<MailDbContext> options) : DbC
             entity.Property(x => x.ContentKey).HasMaxLength(64);
             entity.Property(x => x.EnvelopeFrom).HasMaxLength(320);
             entity.Property(x => x.InternetMessageId).HasMaxLength(998);
+            entity.Property(x => x.InternetMessageIdHash).HasMaxLength(64);
+            entity.HasIndex(x => x.InternetMessageIdHash);
+            entity.HasIndex(x => x.ReceivedAt);
+            entity.Property(x => x.SourceType).HasMaxLength(32);
+            entity.Property(x => x.AuthenticatedAccountName).HasMaxLength(320);
+            entity.Property(x => x.SourceIp).HasMaxLength(128);
+        });
+
+        modelBuilder.Entity<StoredMessageRecipient>(entity =>
+        {
+            entity.ToTable("stored_message_recipients");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Address).HasMaxLength(320);
+            entity.HasIndex(x => x.Address);
+            entity.HasIndex(x => x.MessageId);
+            entity.HasOne(x => x.Message).WithMany().HasForeignKey(x => x.MessageId).OnDelete(DeleteBehavior.Cascade);
         });
 
         modelBuilder.Entity<QuarantineRecord>(entity =>

@@ -1502,6 +1502,25 @@ namespace MailServer.Migrations.Sqlite.Migrations
                         .HasMaxLength(998)
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("InternetMessageIdHash")
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid?>("AuthenticatedAccountId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("AuthenticatedAccountName")
+                        .HasMaxLength(320)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("SourceIp")
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("SourceType")
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
                     b.Property<long>("ReceivedAt")
                         .HasColumnType("INTEGER");
 
@@ -1512,7 +1531,22 @@ namespace MailServer.Migrations.Sqlite.Migrations
 
                     b.HasIndex("ContentKey");
 
+                    b.HasIndex("InternetMessageIdHash");
+
+                    b.HasIndex("ReceivedAt");
+
                     b.ToTable("stored_messages", (string)null);
+                });
+
+            modelBuilder.Entity("MailServer.Domain.StoredMessageRecipient", b =>
+                {
+                    b.Property<Guid>("Id").ValueGeneratedOnAdd().HasColumnType("TEXT");
+                    b.Property<Guid>("MessageId").HasColumnType("TEXT");
+                    b.Property<string>("Address").IsRequired().HasMaxLength(320).HasColumnType("TEXT");
+                    b.HasKey("Id");
+                    b.HasIndex("Address");
+                    b.HasIndex("MessageId");
+                    b.ToTable("stored_message_recipients", (string)null);
                 });
 
             modelBuilder.Entity("MailServer.Domain.SystemSetting", b =>
@@ -1872,6 +1906,16 @@ namespace MailServer.Migrations.Sqlite.Migrations
 
                     b.Navigation("Mailbox");
 
+                    b.Navigation("Message");
+                });
+
+            modelBuilder.Entity("MailServer.Domain.StoredMessageRecipient", b =>
+                {
+                    b.HasOne("MailServer.Domain.StoredMessage", "Message")
+                        .WithMany()
+                        .HasForeignKey("MessageId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
                     b.Navigation("Message");
                 });
 

@@ -103,6 +103,10 @@ public sealed class SentCopyService(
                     ContentKey = descriptor.Key,
                     EnvelopeFrom = string.Empty,
                     InternetMessageId = mimeMessage?.MessageId,
+                    InternetMessageIdHash = MessageIdLookup.Hash(mimeMessage?.MessageId),
+                    SourceType = "imap-append",
+                    AuthenticatedAccountId = accountId,
+                    AuthenticatedAccountName = $"{mailbox.Account.LocalPart}@{mailbox.Account.Domain.Name}",
                     Size = descriptor.Size
                 };
             if (stored.Id == default || db.Entry(stored).State == EntityState.Detached)

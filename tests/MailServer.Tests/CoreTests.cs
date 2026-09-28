@@ -418,6 +418,13 @@ public sealed class CoreTests
 
             Assert.Equal(1, result.LocalDeliveries);
             Assert.Equal(1, result.QueuedDeliveries);
+            await using (var db = await factory.CreateDbContextAsync())
+            {
+                var accepted = await db.Messages.SingleAsync(x => x.Id == result.MessageId);
+                Assert.Equal("plugin", accepted.SourceType);
+                Assert.Equal(MessageIdLookup.Hash("sdk@example.test"), accepted.InternetMessageIdHash);
+                Assert.Equal(2, await db.MessageRecipients.CountAsync(x => x.MessageId == result.MessageId));
+            }
             Assert.Equal("example.test", domainInfo?.Name);
             Assert.Equal("alice@example.test", accountInfo?.Address);
             Assert.True(localRecipient.IsLocal);

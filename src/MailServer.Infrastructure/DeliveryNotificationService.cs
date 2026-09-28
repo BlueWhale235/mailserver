@@ -53,7 +53,8 @@ public sealed class DeliveryNotificationService(
             await using var memory = new MemoryStream();
             await message.WriteToAsync(memory, cancellationToken);
             memory.Position = 0;
-            await inbound.AcceptAsync(new InboundEnvelope(string.Empty, [sender], "system", "local", hostName),
+            await inbound.AcceptAsync(new InboundEnvelope(string.Empty, [sender], "system", "local", hostName)
+                { SourceType = "bounce" },
                 memory, cancellationToken);
         }
         catch (Exception exception) when (exception is MailboxQuotaExceededException or DomainQuotaExceededException)

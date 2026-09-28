@@ -166,7 +166,8 @@ public sealed class TlsReportBackgroundService(
         await message.WriteToAsync(memory, cancellationToken);
         memory.Position = 0;
         await inbound.AcceptAsync(
-            new InboundEnvelope(submitter, [address], "tls-report", "local", "localhost"),
+            new InboundEnvelope(submitter, [address], "tls-report", "local", "localhost")
+                { SourceType = "system" },
             memory,
             cancellationToken);
     }

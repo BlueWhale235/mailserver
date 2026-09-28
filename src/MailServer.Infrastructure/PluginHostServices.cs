@@ -28,7 +28,8 @@ public sealed class PluginMailSender(IInboundMessageService inboundMessages) : I
                 request.Recipients.Select(AddressParser.Normalize).ToArray(),
                 request.AuthenticatedUser ?? "plugin",
                 string.IsNullOrWhiteSpace(request.RemoteAddress) ? "plugin" : request.RemoteAddress,
-                string.IsNullOrWhiteSpace(request.HeloName) ? "plugin.local" : request.HeloName),
+                string.IsNullOrWhiteSpace(request.HeloName) ? "plugin.local" : request.HeloName)
+                { SourceType = "plugin" },
             request.Content,
             cancellationToken);
 
@@ -247,6 +248,7 @@ public sealed class PluginMessageStore(
             message.ContentKey = descriptor.Key;
             message.Size = descriptor.Size;
             message.InternetMessageId = await ReadInternetMessageIdAsync(descriptor.Key, cancellationToken);
+            message.InternetMessageIdHash = MessageIdLookup.Hash(message.InternetMessageId);
             await db.SaveChangesAsync(cancellationToken);
         }
         catch
