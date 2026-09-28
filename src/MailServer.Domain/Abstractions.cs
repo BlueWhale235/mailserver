@@ -391,6 +391,8 @@ public interface IMailboxService
     Task UnsubscribeAsync(Guid accountId, string mailboxName, CancellationToken cancellationToken);
     Task<IReadOnlyList<MailboxSummary>> ListSubscribedAsync(Guid accountId, CancellationToken cancellationToken);
     Task<IReadOnlyList<MailboxItem>> FetchAsync(Guid mailboxId, string sequenceSet, bool useUid, CancellationToken cancellationToken);
+    Task<IMailboxSelectionSnapshot> CreateFetchSnapshotAsync(Guid mailboxId, string sequenceSet,
+        bool useUid, CancellationToken cancellationToken);
     Task<IReadOnlyList<long>> SearchAsync(Guid mailboxId, string criteria, bool useUid, CancellationToken cancellationToken);
     Task StoreFlagsAsync(Guid mailboxId, string sequenceSet, bool useUid, string operation, IReadOnlyCollection<string> flags, CancellationToken cancellationToken);
     Task MarkSeenAsync(Guid mailboxId, IReadOnlyCollection<Guid> mailboxMessageIds, CancellationToken cancellationToken);
@@ -398,4 +400,10 @@ public interface IMailboxService
     Task<CopyMoveResult> CopyAsync(Guid mailboxId, string sequenceSet, bool useUid, string destination, bool move, CancellationToken cancellationToken);
     Task<AppendResult> AppendAsync(Guid accountId, string mailboxName, Stream content, IReadOnlyCollection<string> flags, DateTimeOffset? internalDate, CancellationToken cancellationToken);
     Task<Stream> OpenMessageAsync(Guid mailboxMessageId, CancellationToken cancellationToken);
+}
+
+public interface IMailboxSelectionSnapshot : IAsyncDisposable
+{
+    long Count { get; }
+    IAsyncEnumerable<MailboxItem> ReadAsync(CancellationToken cancellationToken);
 }

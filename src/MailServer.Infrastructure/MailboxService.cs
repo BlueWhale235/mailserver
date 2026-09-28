@@ -326,13 +326,51 @@ public sealed partial class MailboxService(
         bool useUid,
         CancellationToken cancellationToken)
     {
+        await using var snapshot = await CreateFetchSnapshotAsync(mailboxId, sequenceSet, useUid, cancellationToken);
+        var result = new List<MailboxItem>();
+        await foreach (var item in snapshot.ReadAsync(cancellationToken)) result.Add(item);
+        return result;
+    }
+
+    public async Task<IMailboxSelectionSnapshot> CreateFetchSnapshotAsync(
+        Guid mailboxId, string sequenceSet, bool useUid, CancellationToken cancellationToken)
+    {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
-        var messages = await db.MailboxMessages
-            .Where(x => x.MailboxId == mailboxId)
-            .Include(x => x.Message)
-            .OrderBy(x => x.Uid)
-            .ToListAsync(cancellationToken);
-        return SelectMessages(messages, sequenceSet, useUid).ToArray();
+        await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
+        var baseQuery = db.MailboxMessages.AsNoTracking().Where(x => x.MailboxId == mailboxId);
+        var maximumUid = await baseQuery.MaxAsync(x => (long?)x.Uid, cancellationToken) ?? 0;
+        var maximum = useUid ? maximumUid : await baseQuery.LongCountAsync(cancellationToken);
+        var ranges = SequenceSet.ParseRanges(sequenceSet, maximum);
+        var snapshot = new MailboxSelectionSnapshot();
+        try
+        {
+            var lastUid = long.MinValue;
+            long sequence = 0;
+            while (true)
+            {
+                var page = await baseQuery.Where(x => x.Uid > lastUid && x.Uid <= maximumUid)
+                    .OrderBy(x => x.Uid).Take(256)
+                    .Select(x => new MailboxItem(x.Id, 0, x.Uid, x.Flags, x.ModSeq,
+                        x.InternalDate, x.Message.Size, x.Message.ContentKey))
+                    .ToListAsync(cancellationToken);
+                foreach (var item in page)
+                {
+                    sequence++;
+                    if (SequenceSet.Contains(ranges, useUid ? item.Uid : sequence))
+                        await snapshot.AddAsync(item with { Sequence = sequence }, cancellationToken);
+                }
+                if (page.Count < 256) break;
+                lastUid = page[^1].Uid;
+            }
+            await transaction.CommitAsync(cancellationToken);
+            await snapshot.SealAsync(cancellationToken);
+            return snapshot;
+        }
+        catch
+        {
+            await snapshot.DisposeAsync();
+            throw;
+        }
     }
 
     public async Task<IReadOnlyList<long>> SearchAsync(
@@ -341,92 +379,69 @@ public sealed partial class MailboxService(
         bool useUid,
         CancellationToken cancellationToken)
     {
-        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
-        var messages = await db.MailboxMessages
-            .Where(x => x.MailboxId == mailboxId)
-            .Include(x => x.Message)
-            .OrderBy(x => x.Uid)
-            .ToListAsync(cancellationToken);
+        await using var snapshot = await CreateFetchSnapshotAsync(mailboxId, "1:*", false, cancellationToken);
         var normalized = criteria.Trim().ToUpperInvariant();
-        IEnumerable<(MailboxMessage Message, long Sequence)> selected = messages.Select((message, index) => (message, index + 1L));
-        if (normalized == "ALL")
+        var dateSearch = TryParseDateSearch(criteria, out var operatorName, out var date);
+        var charset = "UTF-8";
+        var headerName = string.Empty;
+        var headerNeedle = string.Empty;
+        var bodyNeedle = string.Empty;
+        var headerSearch = !dateSearch && TryParseHeaderSearch(criteria, out charset, out headerName, out headerNeedle);
+        var textSearch = !dateSearch && !headerSearch && TryParseTextSearch(criteria, out charset, out bodyNeedle);
+        if ((headerSearch || textSearch) && !IsSupportedSearchCharset(charset))
+            throw new InvalidOperationException($"Unsupported search charset: {charset}.");
+        var normalizedNeedle = headerSearch ? NormalizeSearchText(headerNeedle)
+            : textSearch ? NormalizeSearchText(bodyNeedle) : string.Empty;
+        var matches = new List<long>();
+        await foreach (var item in snapshot.ReadAsync(cancellationToken))
         {
-            // ALL is already the default selected set.
-        }
-        else if (TryParseDateSearch(criteria, out var operatorName, out var date))
-        {
-            selected = operatorName switch
+            var selected = true;
+            if (dateSearch)
             {
-                "SINCE" => selected.Where(x => x.Message.InternalDate.LocalDateTime.Date >= date),
-                "BEFORE" => selected.Where(x => x.Message.InternalDate.LocalDateTime.Date < date),
-                "ON" => selected.Where(x => x.Message.InternalDate.LocalDateTime.Date == date),
-                _ => selected
-            };
-        }
-        else if (TryParseHeaderSearch(criteria, out var charset, out var headerName, out var headerNeedle))
-        {
-            if (!IsSupportedSearchCharset(charset))
-            {
-                throw new InvalidOperationException($"Unsupported search charset: {charset}.");
-            }
-
-            var normalizedNeedle = NormalizeSearchText(headerNeedle);
-            var matches = new List<(MailboxMessage Message, long Sequence)>();
-            foreach (var item in selected)
-            {
-                await using var content = await contentStore.OpenReadAsync(item.Message.Message.ContentKey, cancellationToken);
-                var message = await MimeMessage.LoadAsync(content, cancellationToken);
-                var values = headerName.Equals("SUBJECT", StringComparison.OrdinalIgnoreCase)
-                    ? [message.Subject ?? string.Empty]
-                    : message.Headers
-                        .Where(x => x.Field.Equals(headerName, StringComparison.OrdinalIgnoreCase))
-                        .Select(x => x.Value)
-                        .ToArray();
-                if (values.Any(value => NormalizeSearchText(UnfoldHeaderValue(value)).Contains(normalizedNeedle, StringComparison.Ordinal)))
+                var itemDate = item.InternalDate.LocalDateTime.Date;
+                selected = operatorName switch
                 {
-                    matches.Add(item);
-                }
+                    "SINCE" => itemDate >= date,
+                    "BEFORE" => itemDate < date,
+                    "ON" => itemDate == date,
+                    _ => true
+                };
             }
-
-            selected = matches;
-        }
-        else if (TryParseTextSearch(criteria, out charset, out var bodyNeedle))
-        {
-            if (!IsSupportedSearchCharset(charset))
+            else if (headerSearch || textSearch)
             {
-                throw new InvalidOperationException($"Unsupported search charset: {charset}.");
-            }
-
-            var normalizedNeedle = NormalizeSearchText(bodyNeedle);
-            var matches = new List<(MailboxMessage Message, long Sequence)>();
-            foreach (var item in selected)
-            {
-                await using var content = await contentStore.OpenReadAsync(item.Message.Message.ContentKey, cancellationToken);
+                await using var content = await contentStore.OpenReadAsync(item.ContentKey, cancellationToken);
                 var message = await MimeMessage.LoadAsync(content, cancellationToken);
-                if (NormalizeSearchText(ExtractSearchableBody(message)).Contains(normalizedNeedle, StringComparison.Ordinal))
+                if (headerSearch)
                 {
-                    matches.Add(item);
+                    var values = headerName.Equals("SUBJECT", StringComparison.OrdinalIgnoreCase)
+                        ? [message.Subject ?? string.Empty]
+                        : message.Headers.Where(x => x.Field.Equals(headerName, StringComparison.OrdinalIgnoreCase))
+                            .Select(x => x.Value).ToArray();
+                    selected = values.Any(value => NormalizeSearchText(UnfoldHeaderValue(value))
+                        .Contains(normalizedNeedle, StringComparison.Ordinal));
                 }
+                else
+                    selected = NormalizeSearchText(ExtractSearchableBody(message))
+                        .Contains(normalizedNeedle, StringComparison.Ordinal);
             }
-
-            selected = matches;
-        }
-        else
-        {
-            selected = normalized switch
+            else if (normalized != "ALL")
             {
-                "SEEN" => selected.Where(x => HasFlag(x.Message.Flags, "\\Seen")),
-                "UNSEEN" => selected.Where(x => !HasFlag(x.Message.Flags, "\\Seen")),
-                "DELETED" => selected.Where(x => HasFlag(x.Message.Flags, "\\Deleted")),
-                "UNDELETED" => selected.Where(x => !HasFlag(x.Message.Flags, "\\Deleted")),
-                "FLAGGED" => selected.Where(x => HasFlag(x.Message.Flags, "\\Flagged")),
-                "UNFLAGGED" => selected.Where(x => !HasFlag(x.Message.Flags, "\\Flagged")),
-                "ANSWERED" => selected.Where(x => HasFlag(x.Message.Flags, "\\Answered")),
-                "UNANSWERED" => selected.Where(x => !HasFlag(x.Message.Flags, "\\Answered")),
-                _ => selected
-            };
+                selected = normalized switch
+                {
+                    "SEEN" => HasFlag(item.Flags, "\\Seen"),
+                    "UNSEEN" => !HasFlag(item.Flags, "\\Seen"),
+                    "DELETED" => HasFlag(item.Flags, "\\Deleted"),
+                    "UNDELETED" => !HasFlag(item.Flags, "\\Deleted"),
+                    "FLAGGED" => HasFlag(item.Flags, "\\Flagged"),
+                    "UNFLAGGED" => !HasFlag(item.Flags, "\\Flagged"),
+                    "ANSWERED" => HasFlag(item.Flags, "\\Answered"),
+                    "UNANSWERED" => !HasFlag(item.Flags, "\\Answered"),
+                    _ => true
+                };
+            }
+            if (selected) matches.Add(useUid ? item.Uid : item.Sequence);
         }
-        return selected.Select(x => useUid ? x.Message.Uid : x.Sequence).ToArray();
+        return matches;
     }
 
     public async Task StoreFlagsAsync(
@@ -441,38 +456,36 @@ public sealed partial class MailboxService(
         await mailboxLock.WaitAsync(cancellationToken);
         try
         {
+            await using var selection = await CreateFetchSnapshotAsync(mailboxId, sequenceSet, useUid, cancellationToken);
             await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
             await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
             var mailbox = await db.Mailboxes.SingleAsync(x => x.Id == mailboxId, cancellationToken);
-            var messages = await db.MailboxMessages
-                .Where(x => x.MailboxId == mailboxId)
-                .Include(x => x.Message)
-                .Include(x => x.Mailbox)
-                .Include(x => x.Mailbox)
-                .OrderBy(x => x.Uid)
-                .ToListAsync(cancellationToken);
-            var selectedIds = SelectMessages(messages, sequenceSet, useUid).Select(x => x.Id).ToHashSet();
-            foreach (var message in messages.Where(x => selectedIds.Contains(x.Id)))
+            var batch = new List<Guid>(256);
+            async Task ApplyBatchAsync()
             {
-                var current = ParseFlags(message.Flags);
-                if (operation.StartsWith('+'))
+                var messages = await db.MailboxMessages
+                    .Where(x => x.MailboxId == mailboxId && batch.Contains(x.Id))
+                    .OrderBy(x => x.Uid).ToListAsync(cancellationToken);
+                foreach (var message in messages)
                 {
-                    current.UnionWith(flags);
+                    var current = ParseFlags(message.Flags);
+                    if (operation.StartsWith('+')) current.UnionWith(flags);
+                    else if (operation.StartsWith('-')) current.ExceptWith(flags);
+                    else current = new HashSet<string>(flags, StringComparer.OrdinalIgnoreCase);
+                    message.Flags = string.Join(' ', current.Order(StringComparer.OrdinalIgnoreCase));
+                    message.ModSeq = ++mailbox.HighestModSeq;
                 }
-                else if (operation.StartsWith('-'))
-                {
-                    current.ExceptWith(flags);
-                }
-                else
-                {
-                    current = new HashSet<string>(flags, StringComparer.OrdinalIgnoreCase);
-                }
-
-                message.Flags = string.Join(' ', current.Order(StringComparer.OrdinalIgnoreCase));
-                message.ModSeq = ++mailbox.HighestModSeq;
+                await db.SaveChangesAsync(cancellationToken);
+                db.ChangeTracker.Clear();
+                mailbox = await db.Mailboxes.SingleAsync(x => x.Id == mailboxId, cancellationToken);
+                batch.Clear();
             }
-
-            await db.SaveChangesAsync(cancellationToken);
+            await foreach (var item in selection.ReadAsync(cancellationToken))
+            {
+                batch.Add(item.Id);
+                if (batch.Count == 256) await ApplyBatchAsync();
+            }
+            if (batch.Count > 0) await ApplyBatchAsync();
             await transaction.CommitAsync(cancellationToken);
         }
         finally
@@ -501,46 +514,56 @@ public sealed partial class MailboxService(
         try
         {
             await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
-            var messages = await db.MailboxMessages
-                .Where(x => x.MailboxId == mailboxId)
-                .Include(x => x.Message)
-                .Include(x => x.Mailbox)
-                .OrderBy(x => x.Uid)
-                .ToListAsync(cancellationToken);
-            var expunged = messages
-                .Select((message, index) => new { Message = message, Sequence = index + 1L })
-                .Where(x => HasFlag(x.Message.Flags, "\\Deleted"))
-                .Select(x => new ExpungedMailboxItem(x.Sequence, x.Message.Uid))
-                .ToArray();
+            await using var selection = await CreateFetchSnapshotAsync(mailboxId, "1:*", false, cancellationToken);
+            await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
+            var expunged = new List<ExpungedMailboxItem>();
             var now = DateTimeOffset.UtcNow;
             var purgeAfter = now.AddDays(Math.Clamp(maintenance?.Value.SoftDeleteRetentionDays ?? 30, 1, 3650));
-            var deletedMessages = messages.Where(x => HasFlag(x.Flags, "\\Deleted")).ToArray();
-            var deletedIds = deletedMessages.Select(x => x.Id).ToArray();
-            var queued = await db.CleanupQueue
-                .Where(x => x.ResourceType == CleanupResourceType.MailboxMessage
-                    && x.ResourceId.HasValue && deletedIds.Contains(x.ResourceId.Value)
-                    && (x.Status == CleanupQueueStatus.Pending || x.Status == CleanupQueueStatus.Failed))
-                .ToListAsync(cancellationToken);
-            var queuedIds = queued.Where(x => x.ResourceId.HasValue).Select(x => x.ResourceId!.Value).ToHashSet();
-            foreach (var item in queued) item.PurgeAfter = purgeAfter;
-            foreach (var message in deletedMessages)
+            var batch = new List<Guid>(256);
+            async Task ApplyBatchAsync()
             {
-                message.DeletedAt = now;
-                message.DeletedBy = "imap";
-                message.PurgeAfter = purgeAfter;
-                if (queuedIds.Contains(message.Id)) continue;
-                db.CleanupQueue.Add(new CleanupQueueItem
+                var deletedMessages = await db.MailboxMessages
+                    .Where(x => x.MailboxId == mailboxId && batch.Contains(x.Id))
+                    .Include(x => x.Message).Include(x => x.Mailbox)
+                    .ToListAsync(cancellationToken);
+                var queued = await db.CleanupQueue
+                    .Where(x => x.ResourceType == CleanupResourceType.MailboxMessage
+                        && x.ResourceId.HasValue && batch.Contains(x.ResourceId.Value)
+                        && (x.Status == CleanupQueueStatus.Pending || x.Status == CleanupQueueStatus.Failed))
+                    .ToListAsync(cancellationToken);
+                var queuedIds = queued.Where(x => x.ResourceId.HasValue)
+                    .Select(x => x.ResourceId!.Value).ToHashSet();
+                foreach (var item in queued) item.PurgeAfter = purgeAfter;
+                foreach (var message in deletedMessages)
                 {
-                    ResourceType = CleanupResourceType.MailboxMessage,
-                    ResourceId = message.Id,
-                    ContentKey = message.Message.ContentKey,
-                    AccountId = message.Mailbox.AccountId,
-                    EstimatedBytes = message.Message.Size,
-                    CreatedAt = now,
-                    PurgeAfter = purgeAfter
-                });
+                    message.DeletedAt = now;
+                    message.DeletedBy = "imap";
+                    message.PurgeAfter = purgeAfter;
+                    if (queuedIds.Contains(message.Id)) continue;
+                    db.CleanupQueue.Add(new CleanupQueueItem
+                    {
+                        ResourceType = CleanupResourceType.MailboxMessage,
+                        ResourceId = message.Id,
+                        ContentKey = message.Message.ContentKey,
+                        AccountId = message.Mailbox.AccountId,
+                        EstimatedBytes = message.Message.Size,
+                        CreatedAt = now,
+                        PurgeAfter = purgeAfter
+                    });
+                }
+                await db.SaveChangesAsync(cancellationToken);
+                db.ChangeTracker.Clear();
+                batch.Clear();
             }
-            await db.SaveChangesAsync(cancellationToken);
+            await foreach (var item in selection.ReadAsync(cancellationToken))
+            {
+                if (!HasFlag(item.Flags, "\\Deleted")) continue;
+                expunged.Add(new ExpungedMailboxItem(item.Sequence, item.Uid));
+                batch.Add(item.Id);
+                if (batch.Count == 256) await ApplyBatchAsync();
+            }
+            if (batch.Count > 0) await ApplyBatchAsync();
+            await transaction.CommitAsync(cancellationToken);
             return expunged;
         }
         finally
@@ -1149,19 +1172,21 @@ internal static class SequenceSet
 {
     public static bool Contains(string expression, long value, long maximum)
     {
-        foreach (var segment in expression.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
-        {
-            var range = segment.Split(':', 2);
-            var start = Parse(range[0], maximum);
-            var end = range.Length == 1 ? start : Parse(range[1], maximum);
-            if (value >= Math.Min(start, end) && value <= Math.Max(start, end))
-            {
-                return true;
-            }
-        }
-
-        return false;
+        return Contains(ParseRanges(expression, maximum), value);
     }
+
+    public static IReadOnlyList<(long Start, long End)> ParseRanges(string expression, long maximum) =>
+        expression.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(segment =>
+            {
+                var range = segment.Split(':', 2);
+                var start = Parse(range[0], maximum);
+                var end = range.Length == 1 ? start : Parse(range[1], maximum);
+                return (Math.Min(start, end), Math.Max(start, end));
+            }).ToArray();
+
+    public static bool Contains(IReadOnlyList<(long Start, long End)> ranges, long value) =>
+        ranges.Any(range => value >= range.Start && value <= range.End);
 
     private static long Parse(string value, long maximum) =>
         value == "*" ? maximum : long.TryParse(value, out var parsed) ? parsed : -1;

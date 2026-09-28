@@ -857,6 +857,31 @@ public sealed class ProtocolAndPluginTests
     }
 
     [Fact]
+    public async Task ImapRawFetchStreamsExactHeaderTextAndPartialLiterals()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-stream-{Guid.NewGuid():N}");
+        try
+        {
+            var scenario = await CreateImapInboxScenarioAsync(root);
+            await using var stream = new DuplexMemoryStream(string.Empty);
+            await using var connection = new ImapConnection(stream, TimeSpan.FromSeconds(1), 4096);
+            await scenario.Service.FetchAsync(connection, scenario.State,
+                "1 (RFC822 BODY.PEEK[HEADER] BODY.PEEK[TEXT] BODY.PEEK[]<5.8>)",
+                "local", useUid: false, CancellationToken.None);
+            var output = stream.OutputText;
+            Assert.Contains("BODY[HEADER]", output);
+            Assert.Contains("BODY[TEXT]", output);
+            Assert.Contains("hello body", output);
+            Assert.Contains("BODY[]<5> {8}\r\n", output);
+            Assert.Contains("RFC822 {", output);
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task ImapHeaderFetchFiltersCaseFoldedAndRepeatedFields()
     {
         var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-header-{Guid.NewGuid():N}");

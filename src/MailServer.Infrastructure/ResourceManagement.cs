@@ -98,6 +98,7 @@ public sealed class ResourceRuntime(string role, IConfiguration configuration)
     public AdjustableConcurrencyLimit Smtp { get; } = new(configuration.GetValue("Smtp:MaximumConnections", 200));
     public AdjustableConcurrencyLimit Imap { get; } = new(configuration.GetValue("Imap:MaximumConnections", 200));
     public AdjustableConcurrencyLimit Delivery { get; } = new(8);
+    public AdjustableConcurrencyLimit LargeMime { get; } = new(1);
     public ResourceUsage Snapshot()
     {
         lock (_sync) return new(_profileId, _cacheBudget, Delivery.Limit, Smtp.Limit, Imap.Limit,
@@ -121,6 +122,7 @@ public sealed class ResourceRuntime(string role, IConfiguration configuration)
                 Smtp.Resize(Math.Min(values.SmtpConnections, configuration.GetValue<int?>("Smtp:MaximumConnections") ?? int.MaxValue));
                 Imap.Resize(Math.Min(values.ImapConnections, configuration.GetValue<int?>("Imap:MaximumConnections") ?? int.MaxValue));
                 Delivery.Resize(values.DeliveryConcurrency);
+                LargeMime.Resize(settings.ProfileId == "512mb" ? 1 : Math.Clamp(values.ImapConnections / 16, 1, 8));
             }
             _cacheBudget = UsesCache && cache.Options.Enabled ? cache.Options.SizeLimitBytes : 0;
             _profileId = settings.ProfileId;
