@@ -18,6 +18,204 @@ namespace MailServer.Tests;
 public sealed class MailRulesAndAliasesTests
 {
     [Fact]
+    public void ParsedMimeIsReusedOnlyForItsStreamAndInvalidatedAfterContentMiddleware()
+    {
+        using var first = new MemoryStream();
+        using var second = new MemoryStream();
+        var message = new MimeMessage();
+        using (MailRuleService.BeginEvaluationScope())
+        {
+            MailRuleService.RememberParsedMessage(first, message);
+            Assert.Same(message, MailRuleService.GetParsedMessage(first));
+            Assert.Null(MailRuleService.GetParsedMessage(second));
+            MailRuleService.InvalidateParsedMessage(second);
+            Assert.Same(message, MailRuleService.GetParsedMessage(first));
+            MailRuleService.InvalidateParsedMessage(first);
+            Assert.Null(MailRuleService.GetParsedMessage(first));
+        }
+        Assert.Null(MailRuleService.GetParsedMessage(first));
+    }
+
+    [Fact]
+    public async Task InboundUsesVerifiedMimeUntilContentIsInvalidated()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var factory = environment.Services.GetRequiredService<IDbContextFactory<MailDbContext>>();
+        var rules = environment.Services.GetRequiredService<MailRuleService>();
+        Guid domainId;
+        await using (var db = await factory.CreateDbContextAsync())
+        {
+            var domain = new MailDomain { Name = "example.com" };
+            var alice = Account(domain, "alice");
+            db.AddRange(domain, alice, new Mailbox { Account = alice, Name = "INBOX" },
+                new Mailbox { Account = alice, Name = "Archive" },
+                new Mailbox { Account = alice, Name = "Changed" });
+            await db.SaveChangesAsync();
+            domainId = domain.Id;
+        }
+        await rules.CreateAsync(domainId, new MailRuleInput("verified", MailRuleDirection.Incoming,
+            MailRuleMatchMode.All, "Archive", true,
+            [new(MailRuleField.Subject, MailRuleOperator.EqualsAny, ["verified"])]),
+            "test", CancellationToken.None);
+        await rules.CreateAsync(domainId, new MailRuleInput("changed", MailRuleDirection.Incoming,
+            MailRuleMatchMode.All, "Changed", true,
+            [new(MailRuleField.Subject, MailRuleOperator.EqualsAny, ["new"])]),
+            "test", CancellationToken.None);
+        var inbound = environment.Services.GetRequiredService<IInboundMessageService>();
+        for (var i = 0; i < 2; i++)
+        {
+            await using var stream = MessageStream($"verified-{i}", "alice@example.com", "raw");
+            var parsed = await MimeMessage.LoadAsync(stream);
+            parsed.Subject = "verified";
+            stream.Position = 0;
+            using (MailRuleService.BeginEvaluationScope())
+            {
+                MailRuleService.RememberParsedMessage(stream, parsed);
+                if (i == 1)
+                {
+                    var subjectOffset = Encoding.UTF8.GetString(stream.ToArray()).IndexOf("Subject: raw",
+                        StringComparison.Ordinal) + "Subject: ".Length;
+                    stream.Position = subjectOffset;
+                    await stream.WriteAsync(Encoding.ASCII.GetBytes("new"));
+                    stream.Position = 0;
+                    MailRuleService.InvalidateParsedMessage(stream);
+                }
+                await inbound.AcceptAsync(new InboundEnvelope("sender@outside.test", ["alice@example.com"],
+                    null, "127.0.0.1", "test"), stream, CancellationToken.None);
+            }
+        }
+        await using var verification = await factory.CreateDbContextAsync();
+        var folders = await verification.MailboxMessages.OrderBy(x => x.Message.InternetMessageId)
+            .Select(x => x.Mailbox.Name).ToListAsync();
+        Assert.Equal(["Archive", "Changed"], folders);
+    }
+
+    [Fact]
+    public async Task CandidateIndexPreservesMixedRuleOrderAndDifferentMailFacts()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var factory = environment.Services.GetRequiredService<IDbContextFactory<MailDbContext>>();
+        Guid domainId;
+        await using (var db = await factory.CreateDbContextAsync())
+        {
+            var domain = new MailDomain { Name = "candidate.test" };
+            db.Domains.Add(domain);
+            await db.SaveChangesAsync();
+            domainId = domain.Id;
+            for (var index = 0; index < 64; index++)
+            {
+                var rule = new MailRule
+                {
+                    DomainId = domainId,
+                    Name = $"rule-{index}",
+                    Direction = MailRuleDirection.Incoming,
+                    MatchMode = index == 3 ? MailRuleMatchMode.Any : MailRuleMatchMode.All,
+                    TargetMailboxName = "INBOX",
+                    Priority = index,
+                    Conditions =
+                    [
+                        new MailRuleCondition
+                        {
+                            Field = index == 3 ? MailRuleField.Subject : MailRuleField.SenderDomain,
+                            Operator = MailRuleOperator.EqualsAny,
+                            ValuesJson = index == 3 ? "[\"urgent\"]" : index == 8 ? "[\"match.test\"]" : "[\"other.test\"]",
+                            Position = 0
+                        }
+                    ]
+                };
+                db.MailRules.Add(rule);
+            }
+            await db.SaveChangesAsync();
+        }
+        var rules = new MailRuleService(factory, NullLogger<MailRuleService>.Instance);
+        using (MailRuleService.BeginEvaluationScope())
+        {
+            var urgent = new MailRuleFacts([], ["match.test"], [], [], "urgent", "", [], 1,
+                DateTimeOffset.UtcNow, false);
+            Assert.Equal("rule-3", (await rules.MatchAsync(domainId, MailRuleDirection.Incoming,
+                urgent, CancellationToken.None))?.RuleName);
+            var ordinary = new MailRuleFacts([], ["match.test"], [], [], "ordinary", "", [], 1,
+                DateTimeOffset.UtcNow, false);
+            Assert.Equal("rule-8", (await rules.MatchAsync(domainId, MailRuleDirection.Incoming,
+                ordinary, CancellationToken.None))?.RuleName);
+        }
+        long estimatedSnapshot;
+        await using (var db = await factory.CreateDbContextAsync())
+        {
+            var rows = await db.MailRules.Include(x => x.Conditions).Where(x => x.DomainId == domainId).ToListAsync();
+            estimatedSnapshot = 512 + rows.Sum(row => 512L + row.Name.Length * 2L
+                + row.TargetMailboxName.Length * 2L
+                + row.Conditions.Sum(condition => 128L + condition.ValuesJson.Length * 2L));
+        }
+        using var limitedCache = new ConfigurationSnapshotCache(Options.Create(new ConfigurationCacheOptions
+            { MaximumEntryBytes = estimatedSnapshot + 512, SizeLimitBytes = estimatedSnapshot + 512 }),
+            NullLogger<ConfigurationSnapshotCache>.Instance);
+        var limited = new MailRuleService(factory, NullLogger<MailRuleService>.Instance, limitedCache);
+        var limitedFacts = new MailRuleFacts([], ["match.test"], [], [], "ordinary", "", [], 1,
+            DateTimeOffset.UtcNow, false);
+        Assert.Equal("rule-8", (await limited.MatchAsync(domainId, MailRuleDirection.Incoming,
+            limitedFacts, CancellationToken.None))?.RuleName);
+        Assert.Equal(estimatedSnapshot, limitedCache.EstimatedBytes);
+    }
+
+    [Fact]
+    public async Task EvaluationScopeDoesNotReuseTimeConditionAcrossDifferentTimes()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var factory = environment.Services.GetRequiredService<IDbContextFactory<MailDbContext>>();
+        var rules = environment.Services.GetRequiredService<MailRuleService>();
+        Guid domainId;
+        await using (var db = await factory.CreateDbContextAsync())
+        {
+            var domain = new MailDomain { Name = "time-condition.test" };
+            db.Domains.Add(domain);
+            await db.SaveChangesAsync();
+            domainId = domain.Id;
+        }
+        var cutoff = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        await rules.CreateAsync(domainId, new MailRuleInput("before cutoff", MailRuleDirection.Incoming,
+            MailRuleMatchMode.All, "INBOX", true,
+            [new(MailRuleField.MessageTime, MailRuleOperator.Before, [cutoff.ToString("O")])]),
+            "test", CancellationToken.None);
+        using (MailRuleService.BeginEvaluationScope())
+        {
+            var before = new MailRuleFacts([], [], [], [], "same", "", [], 1, cutoff.AddMinutes(-1), false);
+            var after = new MailRuleFacts([], [], [], [], "same", "", [], 1, cutoff.AddMinutes(1), false);
+            Assert.NotNull(await rules.MatchAsync(domainId, MailRuleDirection.Incoming, before, CancellationToken.None));
+            Assert.Null(await rules.MatchAsync(domainId, MailRuleDirection.Incoming, after, CancellationToken.None));
+        }
+    }
+
+    [Fact]
+    public async Task EvaluationScopeIncludesCcWhenReusingRecipientCondition()
+    {
+        await using var environment = await TestEnvironment.CreateAsync();
+        var factory = environment.Services.GetRequiredService<IDbContextFactory<MailDbContext>>();
+        var rules = environment.Services.GetRequiredService<MailRuleService>();
+        Guid domainId;
+        await using (var db = await factory.CreateDbContextAsync())
+        {
+            var domain = new MailDomain { Name = "cc-condition.test" };
+            db.Domains.Add(domain);
+            await db.SaveChangesAsync();
+            domainId = domain.Id;
+        }
+        await rules.CreateAsync(domainId, new MailRuleInput("cc match", MailRuleDirection.Incoming,
+            MailRuleMatchMode.All, "INBOX", true,
+            [new(MailRuleField.RecipientOrCc, MailRuleOperator.EqualsAny, ["copy@test.net"])]),
+            "test", CancellationToken.None);
+        var recipients = new[] { "main@test.net" };
+        var time = DateTimeOffset.UtcNow;
+        using (MailRuleService.BeginEvaluationScope())
+        {
+            var withCc = new MailRuleFacts([], [], recipients, ["copy@test.net"], "same", "", [], 1, time, false);
+            var withoutCc = new MailRuleFacts([], [], recipients, [], "same", "", [], 1, time, false);
+            Assert.NotNull(await rules.MatchAsync(domainId, MailRuleDirection.Incoming, withCc, CancellationToken.None));
+            Assert.Null(await rules.MatchAsync(domainId, MailRuleDirection.Incoming, withoutCc, CancellationToken.None));
+        }
+    }
+
+    [Fact]
     public async Task RuleEvaluationShortCircuitsBeforeLazyBodyAndAttachments()
     {
         await using var environment = await TestEnvironment.CreateAsync();

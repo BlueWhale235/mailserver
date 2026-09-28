@@ -973,6 +973,7 @@ public sealed class SmtpServerService(
         {
             Rewind(data);
             message = await MimeMessage.LoadAsync(data, cancellationToken);
+            MailRuleService.RememberParsedMessage(data, message);
         }
         catch (Exception exception) when (exception is FormatException or IOException or InvalidOperationException)
         {

@@ -427,6 +427,7 @@ public sealed class PluginPipeline(
             {
                 // 内容检查会反复读取同一个内存/文件流，调用前后复位 Position 是插件兼容性的关键。
                 content.Position = 0;
+                MailRuleService.InvalidateParsedMessage(content);
                 var stopwatch = Stopwatch.StartNew();
                 var invocation = middleware.InvokeAsync(
                     new MessageContentContext(sender, recipients, bodyType, content.Length, content, settings),

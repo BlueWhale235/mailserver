@@ -82,7 +82,8 @@ public sealed class InboundMessageService(
         var descriptor = await contentStore.SaveAsync(content, cancellationToken);
         try
         {
-            var mimeMessage = await LoadMimeMessageWithFallbackAsync(descriptor.Key, cancellationToken);
+            var mimeMessage = MailRuleService.GetParsedMessage(content)
+                ?? await LoadMimeMessageWithFallbackAsync(descriptor.Key, cancellationToken);
 
             var receivedAt = clock.UtcNow;
             await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);

@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Net;
+using System.Runtime.CompilerServices;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using MailServer.Domain;
@@ -111,13 +112,22 @@ public sealed partial class MailRuleService(
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private static readonly AsyncLocal<EvaluationScope?> CurrentScope = new();
+    private const int ConditionResultLimit = 512;
+    private const int ConditionResultBudgetBytes = 64 * 1024;
+    private const int EstimatedConditionResultBytes = 128;
     private sealed class EvaluationScope
     {
         public readonly Dictionary<(Guid DomainId, MailRuleDirection Direction), RuleSnapshot> Snapshots = new();
         public readonly Dictionary<(Guid DomainId, MailRuleDirection Direction, MailRuleFacts Facts), MailRuleMatch?> Matches = new();
         public readonly Dictionary<(Guid AccountId, MailRuleFacts Facts), MailRuleRejection?> Rejections = new();
         public readonly Dictionary<MimeMessage, (Lazy<string> Body, Lazy<IReadOnlyList<string>> Attachments)> MimeContent = new();
+        public readonly Dictionary<(MimeMessage Message, string Sender, string Recipients),
+            (IReadOnlyList<string> Senders, IReadOnlyList<string> Domains,
+             IReadOnlyList<string> Recipients, IReadOnlyList<string> Cc)> Addresses = new();
         public readonly Dictionary<(MimeMessage Message, string Sender, string Recipients, long Size, DateTimeOffset Time), MailRuleFacts> Facts = new();
+        public Stream? ParsedStream;
+        public MimeMessage? ParsedMessage;
+        public readonly Dictionary<ConditionResultKey, bool> ConditionResults = new(new ConditionResultKeyComparer());
         public long? Version;
         public void CheckVersion(long version)
         {
@@ -136,6 +146,30 @@ public sealed partial class MailRuleService(
         if (previous is null) CurrentScope.Value = new EvaluationScope();
         return new ScopeLease(previous, previous is null);
     }
+    internal static void RememberParsedMessage(Stream content, MimeMessage message)
+    {
+        if (CurrentScope.Value is { } scope)
+        {
+            scope.ParsedStream = content;
+            scope.ParsedMessage = message;
+        }
+    }
+    internal static MimeMessage? GetParsedMessage(Stream content) =>
+        CurrentScope.Value is { } scope && ReferenceEquals(scope.ParsedStream, content)
+            ? scope.ParsedMessage : null;
+
+    internal static void InvalidateParsedMessage(Stream content)
+    {
+        if (CurrentScope.Value is not { } scope || !ReferenceEquals(scope.ParsedStream, content)) return;
+        scope.ParsedStream = null;
+        scope.ParsedMessage = null;
+        scope.MimeContent.Clear();
+        scope.Addresses.Clear();
+        scope.Facts.Clear();
+        scope.Matches.Clear();
+        scope.Rejections.Clear();
+        scope.ConditionResults.Clear();
+    }
     private sealed record CompiledPattern(string Text, Regex? Wildcard);
     private sealed record CompiledCondition(MailRuleField Field, MailRuleOperator Operator,
         IReadOnlyList<CompiledPattern> Values, long? Number, DateTimeOffset? FirstTime,
@@ -147,7 +181,24 @@ public sealed partial class MailRuleService(
         string TargetMailboxName,
         IReadOnlyList<CompiledCondition> Conditions,
         IReadOnlyList<MailRuleActionView> Actions);
-    private sealed record RuleSnapshot(IReadOnlyList<CompiledRule> Rules, bool Oversized);
+    private sealed record RuleSnapshot(IReadOnlyList<CompiledRule> Rules, bool Oversized, CandidateIndex? Index = null);
+    private sealed record CandidateIndex(Dictionary<string, int[]> Senders,
+        Dictionary<string, int[]> SenderDomains, Dictionary<string, int[]> Recipients,
+        Dictionary<string, int[]> Cc, int[] Fallback);
+    private readonly record struct ConditionResultKey(CompiledCondition Condition, object? Dependency,
+        object? AdditionalDependency = null,
+        long Number = 0, DateTimeOffset Time = default);
+    private sealed class ConditionResultKeyComparer : IEqualityComparer<ConditionResultKey>
+    {
+        public bool Equals(ConditionResultKey x, ConditionResultKey y) =>
+            ReferenceEquals(x.Condition, y.Condition) && x.Number == y.Number && x.Time == y.Time
+            && ReferenceEquals(x.Dependency, y.Dependency)
+            && ReferenceEquals(x.AdditionalDependency, y.AdditionalDependency);
+        public int GetHashCode(ConditionResultKey key) => HashCode.Combine(
+            RuntimeHelpers.GetHashCode(key.Condition), key.Number, key.Time,
+            key.Dependency is null ? 0 : RuntimeHelpers.GetHashCode(key.Dependency),
+            key.AdditionalDependency is null ? 0 : RuntimeHelpers.GetHashCode(key.AdditionalDependency));
+    }
 
     public async Task<IReadOnlyList<MailRuleView>> GetRulesAsync(
         Guid domainId,
@@ -364,9 +415,9 @@ public sealed partial class MailRuleService(
             if (evaluation is not null) evaluation.Matches[resultKey] = batched;
             return batched;
         }
-        foreach (var rule in snapshot.Rules)
+        foreach (var rule in Candidates(snapshot, facts))
         {
-            var matched = RuleMatches(rule, facts);
+            var matched = RuleMatches(rule, facts, evaluation);
             if (matched)
             {
                 logger.LogInformation(
@@ -414,9 +465,9 @@ public sealed partial class MailRuleService(
             if (evaluation is not null) evaluation.Rejections[resultKey] = batched;
             return batched;
         }
-        foreach (var rule in snapshot.Rules)
+        foreach (var rule in Candidates(snapshot, facts))
         {
-            var matched = RuleMatches(rule, facts);
+            var matched = RuleMatches(rule, facts, evaluation);
             if (!matched) continue;
             var reject = rule.Actions.FirstOrDefault(x => x.Kind == MailRuleActionKind.Reject);
             if (reject is null) continue;
@@ -488,11 +539,15 @@ public sealed partial class MailRuleService(
         if (cache is not null && estimate > cache.Options.MaximumEntryBytes)
             return (new RuleSnapshot([], true), Math.Max(1, Math.Min(128, cache.Options.MaximumEntryBytes)));
         var rows = await LoadRuleBatchAsync(db, domainId, direction, 0, Math.Max(1, count), cancellationToken);
-        var rules = rows.Select(Compile).ToArray();
+        var sharedConditions = new Dictionary<(MailRuleField, MailRuleOperator, string), CompiledCondition>();
+        var rules = rows.Select(row => Compile(row, sharedConditions)).ToArray();
         estimate = 512L + rows.Sum(EstimateRuleSize);
         var oversized = estimate > (cache?.Options.MaximumEntryBytes ?? long.MaxValue);
-        return (new RuleSnapshot(oversized ? [] : rules, oversized), oversized && cache is not null
-            ? Math.Max(1, Math.Min(128, cache.Options.MaximumEntryBytes)) : estimate);
+        if (oversized) return (new RuleSnapshot([], true), Math.Max(1, Math.Min(128, cache!.Options.MaximumEntryBytes)));
+        var indexBudget = cache is null ? long.MaxValue
+            : Math.Min(cache.Options.MaximumEntryBytes / 4, Math.Max(0, cache.Options.MaximumEntryBytes - estimate));
+        var (index, indexSize) = BuildIndex(rules, indexBudget);
+        return (new RuleSnapshot(rules, false, index), estimate + indexSize);
     }
 
     private async Task<object?> MatchBatchedAsync(
@@ -512,9 +567,9 @@ public sealed partial class MailRuleService(
             for (var offset = 0; ; offset += batchSize)
             {
                 var rows = await LoadRuleBatchAsync(db, domainId, direction, offset, batchSize, cancellationToken);
-                foreach (var rule in rows.Select(Compile))
+                foreach (var rule in rows.Select(row => Compile(row)))
                 {
-                    var matched = RuleMatches(rule, facts);
+                    var matched = RuleMatches(rule, facts, CurrentScope.Value);
                     if (!matched) continue;
                     if (rejectionOnly)
                     {
@@ -564,13 +619,90 @@ public sealed partial class MailRuleService(
         + rule.Conditions.Sum(x => 128L + x.ValuesJson.Length * 2L)
         + rule.Actions.Sum(x => 96L + x.ValuesJson.Length * 2L);
 
-    private static CompiledRule Compile(MailRule rule) => new(
+    private static CompiledRule Compile(MailRule rule,
+        Dictionary<(MailRuleField, MailRuleOperator, string), CompiledCondition>? shared = null) => new(
         rule.Id,
         rule.Name,
         rule.MatchMode,
         rule.TargetMailboxName,
-        rule.Conditions.OrderBy(x => x.Position).Select(CompileCondition).ToArray(),
+        rule.Conditions.OrderBy(x => x.Position).Select(x => InternCondition(x, shared)).ToArray(),
         rule.Actions.OrderBy(x => x.Position).Select(ToActionView).ToArray());
+
+    private static CompiledCondition InternCondition(MailRuleCondition condition,
+        Dictionary<(MailRuleField, MailRuleOperator, string), CompiledCondition>? shared)
+    {
+        if (shared is null) return CompileCondition(condition);
+        var key = (condition.Field, condition.Operator, condition.ValuesJson);
+        if (shared.TryGetValue(key, out var compiled)) return compiled;
+        compiled = CompileCondition(condition);
+        shared[key] = compiled;
+        return compiled;
+    }
+
+    private static (CandidateIndex? Index, long Size) BuildIndex(CompiledRule[] rules, long budget)
+    {
+        if (rules.Length < 64 || budget < 512) return (null, 0);
+        var maps = new Dictionary<string, List<int>>[4];
+        for (var i = 0; i < maps.Length; i++) maps[i] = new(StringComparer.OrdinalIgnoreCase);
+        var fallback = new List<int>();
+        long size = 512;
+        for (var i = 0; i < rules.Length; i++)
+        {
+            var rule = rules[i];
+            var first = rule.Conditions.FirstOrDefault();
+            var slot = first?.Field switch
+            {
+                MailRuleField.Sender => 0,
+                MailRuleField.SenderDomain => 1,
+                MailRuleField.Recipient => 2,
+                MailRuleField.Cc => 3,
+                _ => -1
+            };
+            if (rule.MatchMode != MailRuleMatchMode.All || first?.Operator != MailRuleOperator.EqualsAny
+                || slot < 0 || first.Values.Count == 0 || first.Values.Any(x => x.Wildcard is not null))
+            {
+                fallback.Add(i);
+                size += 16;
+            }
+            else
+            {
+                foreach (var value in first.Values.Select(x => x.Text).Distinct(StringComparer.OrdinalIgnoreCase))
+                {
+                    if (!maps[slot].TryGetValue(value, out var entries))
+                    {
+                        entries = [];
+                        maps[slot][value] = entries;
+                        size += 192 + value.Length * 2L;
+                    }
+                    entries.Add(i);
+                    size += 16;
+                }
+            }
+            if (size > budget) return (null, 0);
+        }
+        if (fallback.Count > rules.Length / 2) return (null, 0);
+        static Dictionary<string, int[]> Freeze(Dictionary<string, List<int>> map) =>
+            map.ToDictionary(x => x.Key, x => x.Value.ToArray(), StringComparer.OrdinalIgnoreCase);
+        return (new CandidateIndex(Freeze(maps[0]), Freeze(maps[1]), Freeze(maps[2]), Freeze(maps[3]),
+            fallback.ToArray()), size);
+    }
+
+    private static IEnumerable<CompiledRule> Candidates(RuleSnapshot snapshot, MailRuleFacts facts)
+    {
+        if (snapshot.Index is not { } index) return snapshot.Rules;
+        var selected = new HashSet<int>(index.Fallback);
+        static void Add(Dictionary<string, int[]> map, IReadOnlyList<string> values, HashSet<int> selected)
+        {
+            foreach (var value in values)
+                if (map.TryGetValue(value, out var positions))
+                    selected.UnionWith(positions);
+        }
+        Add(index.Senders, facts.Senders, selected);
+        Add(index.SenderDomains, facts.SenderDomains, selected);
+        Add(index.Recipients, facts.Recipients, selected);
+        Add(index.Cc, facts.Cc, selected);
+        return selected.Order().Select(position => snapshot.Rules[position]);
+    }
 
     private static CompiledCondition CompileCondition(MailRuleCondition condition)
     {
@@ -607,19 +739,26 @@ public sealed partial class MailRuleService(
         DateTimeOffset messageTime)
     {
         var evaluation = CurrentScope.Value;
-        var factsKey = (message, envelopeSender, string.Join('\0', envelopeRecipients), messageSize, messageTime);
+        var recipientsKey = string.Join('\0', envelopeRecipients);
+        var factsKey = (message, envelopeSender, recipientsKey, messageSize, messageTime);
         if (evaluation is not null && evaluation.Facts.TryGetValue(factsKey, out var previous)) return previous;
-        var senders = new List<string>();
-        AddAddress(senders, envelopeSender);
-        foreach (var mailbox in message.From.Mailboxes) AddAddress(senders, mailbox.Address);
-        if (message.Sender is not null) AddAddress(senders, message.Sender.Address);
-        var recipients = envelopeRecipients.Select(AddressParser.Normalize).ToList();
-        foreach (var mailbox in message.To.Mailboxes) AddAddress(recipients, mailbox.Address);
-        var cc = message.Cc.Mailboxes.Select(x => AddressParser.Normalize(x.Address)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-        var domains = senders.Select(address => AddressParser.TrySplit(address, out _, out var domain) ? domain : string.Empty)
-            .Where(x => x.Length > 0)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToArray();
+        var addressKey = (message, envelopeSender, recipientsKey);
+        if (evaluation is null || !evaluation.Addresses.TryGetValue(addressKey, out var addresses))
+        {
+            var senders = new List<string>();
+            AddAddress(senders, envelopeSender);
+            foreach (var mailbox in message.From.Mailboxes) AddAddress(senders, mailbox.Address);
+            if (message.Sender is not null) AddAddress(senders, message.Sender.Address);
+            var recipients = envelopeRecipients.Select(AddressParser.Normalize).ToList();
+            foreach (var mailbox in message.To.Mailboxes) AddAddress(recipients, mailbox.Address);
+            var cc = message.Cc.Mailboxes.Select(x => AddressParser.Normalize(x.Address))
+                .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+            var domains = senders.Select(address => AddressParser.TrySplit(address, out _, out var domain) ? domain : string.Empty)
+                .Where(x => x.Length > 0).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+            addresses = (senders.Distinct(StringComparer.OrdinalIgnoreCase).ToArray(), domains,
+                recipients.Distinct(StringComparer.OrdinalIgnoreCase).ToArray(), cc);
+            if (evaluation is not null) evaluation.Addresses[addressKey] = addresses;
+        }
         if (evaluation is null || !evaluation.MimeContent.TryGetValue(message, out var content))
         {
             content = (new Lazy<string>(() => string.Join('\n', new[] { message.TextBody, NormalizeHtml(message.HtmlBody) }
@@ -633,10 +772,10 @@ public sealed partial class MailRuleService(
             if (evaluation is not null) evaluation.MimeContent[message] = content;
         }
         var facts = new MailRuleFacts(
-            senders.Distinct(StringComparer.OrdinalIgnoreCase).ToArray(),
-            domains,
-            recipients.Distinct(StringComparer.OrdinalIgnoreCase).ToArray(),
-            cc,
+            addresses.Senders,
+            addresses.Domains,
+            addresses.Recipients,
+            addresses.Cc,
             message.Subject ?? string.Empty,
             content.Body,
             content.Attachments,
@@ -690,16 +829,49 @@ public sealed partial class MailRuleService(
         };
     }
 
-    private static bool RuleMatches(CompiledRule rule, MailRuleFacts facts)
+    private static bool MatchesMemoized(CompiledCondition condition, MailRuleFacts facts, EvaluationScope? scope)
+    {
+        if (scope is null) return Matches(condition, facts);
+        object? dependency = condition.Field switch
+        {
+            MailRuleField.Sender => facts.Senders,
+            MailRuleField.SenderDomain => facts.SenderDomains,
+            MailRuleField.Recipient => facts.Recipients,
+            MailRuleField.Cc => facts.Cc,
+            MailRuleField.RecipientOrCc => facts.Recipients,
+            MailRuleField.Subject => facts.Subject,
+            MailRuleField.Body => facts.Body,
+            MailRuleField.AttachmentName => facts.AttachmentNames,
+            MailRuleField.MessageSize or MailRuleField.MessageTime or MailRuleField.HasAttachment => null,
+            _ => facts
+        };
+        var key = new ConditionResultKey(condition, dependency,
+            condition.Field == MailRuleField.RecipientOrCc ? facts.Cc : null,
+            condition.Field switch
+            {
+                MailRuleField.MessageSize => facts.MessageSize,
+                MailRuleField.HasAttachment => facts.HasAttachment ? 1 : 0,
+                _ => 0
+            },
+            condition.Field == MailRuleField.MessageTime ? facts.MessageTime : default);
+        if (scope.ConditionResults.TryGetValue(key, out var result)) return result;
+        result = Matches(condition, facts);
+        if (scope.ConditionResults.Count < ConditionResultLimit
+            && (scope.ConditionResults.Count + 1) * EstimatedConditionResultBytes <= ConditionResultBudgetBytes)
+            scope.ConditionResults[key] = result;
+        return result;
+    }
+
+    private static bool RuleMatches(CompiledRule rule, MailRuleFacts facts, EvaluationScope? scope)
     {
         if (rule.MatchMode == MailRuleMatchMode.All)
         {
             foreach (var condition in rule.Conditions)
-                if (!Matches(condition, facts)) return false;
+                if (!MatchesMemoized(condition, facts, scope)) return false;
             return true;
         }
         foreach (var condition in rule.Conditions)
-            if (Matches(condition, facts)) return true;
+            if (MatchesMemoized(condition, facts, scope)) return true;
         return false;
     }
 
