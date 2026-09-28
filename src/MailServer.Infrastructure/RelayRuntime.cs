@@ -135,7 +135,7 @@ public sealed class RelayRootService(
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
         timeout.CancelAfter(TimeSpan.FromSeconds(10));
         using var client = new TcpClient();
-        await client.ConnectAsync(current.Host, current.Port, timeout.Token);
+        await ConnectToRelayAsync(client, current.Host, current.Port, token, timeout.Token);
         await using var tls = new SslStream(client.GetStream(), false, (_, certificate, _, _) =>
             certificate is not null && RelayIdentity.FingerprintOf(new X509Certificate2(certificate)) == current.PeerFingerprint);
         await tls.AuthenticateAsClientAsync(new SslClientAuthenticationOptions
@@ -156,7 +156,7 @@ public sealed class RelayRootService(
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
         timeout.CancelAfter(TimeSpan.FromSeconds(10));
         using var client = new TcpClient();
-        await client.ConnectAsync(current.Host, current.Port, timeout.Token);
+        await ConnectToRelayAsync(client, current.Host, current.Port, token, timeout.Token);
         await using var tls = new SslStream(client.GetStream(), false, (_, certificate, _, _) =>
             certificate is not null && RelayIdentity.FingerprintOf(new X509Certificate2(certificate)) == current.PeerFingerprint);
         await tls.AuthenticateAsClientAsync(new SslClientAuthenticationOptions
@@ -286,7 +286,7 @@ public sealed class RelayRootService(
                 using var client = new TcpClient();
                 using var connectTimeout = CancellationTokenSource.CreateLinkedTokenSource(token);
                 connectTimeout.CancelAfter(TimeSpan.FromSeconds(10));
-                await client.ConnectAsync(current.Host, current.Port, connectTimeout.Token);
+                await ConnectToRelayAsync(client, current.Host, current.Port, token, connectTimeout.Token);
                 await using var tls = new SslStream(client.GetStream(), false, (_, certificate, _, _) =>
                     certificate is not null && RelayIdentity.FingerprintOf(new X509Certificate2(certificate)) == current.PeerFingerprint);
                 await tls.AuthenticateAsClientAsync(new SslClientAuthenticationOptions
@@ -373,6 +373,17 @@ public sealed class RelayRootService(
 
     private static RelayInboundLimits LimitsOf(RelaySettings value) => new(
         value.MaxInboundConnections, value.MaxConnectionsPerIp, value.IdleTimeoutSeconds);
+
+    private static async Task ConnectToRelayAsync(TcpClient client, string host, int port,
+        CancellationToken stoppingToken, CancellationToken timeoutToken)
+    {
+        try { await client.ConnectAsync(host, port, timeoutToken); }
+        catch (OperationCanceledException error) when (!stoppingToken.IsCancellationRequested)
+        {
+            throw new IOException($"Timed out connecting to relay {host}:{port} after 10 seconds. " +
+                "Check that 'mailserver relay run' is listening on this port and that DNS and firewall rules allow the connection.", error);
+        }
+    }
 
     private Task ReportAsync(CancellationToken token) => settings.ReportStatusAsync(
         new RelayProcessStatus(role, Connected, ActiveStreams, LastConnected, LastError,
