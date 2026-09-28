@@ -60,6 +60,8 @@ bash scripts/build-linux-release.sh v2.0.0
 
 Vue 管理后台的 HTML、JS、CSS 和字体已经嵌入二进制，不需要单独复制 `dist` 或 `wwwroot/admin`。启动时程序会在可执行文件旁释放 `wwwroot/admin`，因此目录需要写权限。上线后检查 `/admin/`、深层路由和 `/admin/assets/...`。
 
+拆分部署只需启动 API 服务即可在同源 `/admin/` 访问后台；前端开发服务器仅用于本地开发。侧栏底部的“API 文档”在新标签页打开同源 `/swagger/`，仍需登录。运维中心的邮件查询仅覆盖现有邮件记录与原文，遵循原有回收站与清理期限；`operations.mail.read` 只开放元数据，预览和下载还需 `operations.mail.content.read`。
+
 Linux 自包含发布不需要预装 .NET，但仍使用系统的 glibc、OpenSSL 和 ICU。Ubuntu 26.04 WSL2 实测需安装 `libicu78`；其它发行版安装对应的 ICU 运行库。配置、证书、邮件内容和数据库不会嵌入二进制，需要按环境独立保存并备份。
 
 ## 上线前

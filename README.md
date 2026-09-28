@@ -21,7 +21,7 @@ dotnet run --project src/MailServer.Cli -- init
 dotnet run --project src/MailServer.Cli -- run all
 ```
 
-管理后台默认地址为 `http://127.0.0.1:8080/admin`。所有命令默认读取 `./mailserver.json`，也支持 `--config <path>` 或 `MAILSERVER_CONFIG`。
+管理后台默认地址为 `http://127.0.0.1:8080/admin`，API 服务会在同源提供管理页面和登录后可访问的 `/swagger/`。正式环境不需要另启前端静态资源服务器。运维中心可查询现存邮件的元数据、按权限预览或下载原文；它不是长期邮件归档，彻底清理后的邮件无法查询。所有命令默认读取 `./mailserver.json`，也支持 `--config <path>` 或 `MAILSERVER_CONFIG`。
 
 Linux x64 的版本化单文件可通过 `bash scripts/build-linux-release.sh v2.0.0` 构建；Vue 管理后台已嵌入可执行文件。GitHub Actions 支持手动输入版本或推送 `vMAJOR.MINOR.PATCH` 标签，详见[部署文档](docs/deployment.md)。
 

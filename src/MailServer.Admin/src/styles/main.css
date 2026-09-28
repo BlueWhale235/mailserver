@@ -142,7 +142,11 @@ a { text-decoration: none; color: inherit; }
   border-radius: var(--radius-sm);
   font-size: 12px;
   background: #fafbfd;
+  color: var(--text);
+  text-decoration: none;
 }
+
+.nav-info:hover, .nav-info:focus-visible { background: var(--bg-app); border-color: var(--primary); }
 
 .nav-info b { display: block; }
 

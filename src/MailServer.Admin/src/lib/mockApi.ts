@@ -337,6 +337,8 @@ const previewPermissionCatalog = [
     { code: 'dns.manage', name: 'DNS 诊断管理', description: '管理 DNS 诊断配置。', groupKey: 'system', supportsDomainScope: false },
   ] },
   { key: 'operations', name: '任务中心', permissions: [
+    { code: 'operations.mail.read', name: '运维邮件查询', description: '查看现存邮件的元数据和收发记录。', groupKey: 'operations', supportsDomainScope: false },
+    { code: 'operations.mail.content.read', name: '运维邮件内容', description: '预览和下载现存邮件原文，另需查询权限。', groupKey: 'operations', supportsDomainScope: false },
     { code: 'task.read', name: '任务中心只读', description: '查看计划任务、执行历史和回收站。', groupKey: 'operations', supportsDomainScope: false },
     { code: 'task.manage', name: '任务中心管理', description: '配置和执行任务，管理回收项。', groupKey: 'operations', supportsDomainScope: false },
   ] },

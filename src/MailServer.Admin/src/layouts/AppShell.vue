@@ -2,7 +2,6 @@
 import { computed, onUnmounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
-import { isPreviewMode } from '../lib/mockApi'
 import { api, jsonBody } from '../lib/api'
 import ConsoleAlerts from '../components/ConsoleAlerts.vue'
 import { canAccessPage, getPageDefinition, primaryPages, searchablePages } from '../lib/pageAccess'
@@ -84,10 +83,10 @@ async function logout() {
       </v-list>
 
       <template #append>
-        <div class="nav-info">
-          <v-icon size="18">mdi-information-outline</v-icon>
-          <div><b>{{ isPreviewMode() ? '演示环境' : '邮件管理控制台' }}</b><small>{{ isPreviewMode() ? '当前展示预览数据' : '服务运行状态请查看概览' }}</small></div>
-        </div>
+        <a class="nav-info" href="/swagger/" target="_blank" rel="noopener noreferrer">
+          <v-icon size="18">mdi-api</v-icon>
+          <div><b>API 文档</b><small>在新标签页打开</small></div>
+        </a>
         <v-list nav density="comfortable">
           <v-list-item
             prepend-icon="mdi-account-circle-outline"

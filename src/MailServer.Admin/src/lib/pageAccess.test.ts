@@ -46,4 +46,12 @@ describe('admin page access catalog', () => {
     expect(canAccessPage(getPageDefinition('quarantine')!, permissions)).toBe(true)
     expect(canAccessPage(getPageDefinition('delivery')!, permissions)).toBe(false)
   })
+
+  it('shows operations for mail, status or task readers without granting unrelated tabs', () => {
+    for (const permission of ['operations.mail.read', 'settings.read', 'task.read']) {
+      const allowed = checker([permission])
+      expect(canAccessPage(getPageDefinition('operations')!, allowed)).toBe(true)
+    }
+    expect(canAccessPage(getPageDefinition('operations')!, checker(['audit.read']))).toBe(false)
+  })
 })
