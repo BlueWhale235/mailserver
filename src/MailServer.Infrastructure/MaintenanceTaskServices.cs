@@ -565,13 +565,21 @@ public sealed class StorageIntegrityTaskHandler(
     IDbContextFactory<MailDbContext> factory,
     IOptions<StorageOptions> storage) : IScheduledTaskHandler
 {
+    private sealed record ScanProgress(string? LastKey = null, long Scanned = 0,
+        long CompletedCycles = 0, DateTimeOffset? LastCompletedAt = null);
     public string Type => "storage.integrity-check";
     public async Task<ScheduledTaskRunResult> RunAsync(ScheduledTask task, CancellationToken cancellationToken)
     {
         await using var db = await factory.CreateDbContextAsync(cancellationToken);
         var root = Path.GetFullPath(storage.Value.RootPath);
-        var keys = await db.Messages.AsNoTracking().Select(x => x.ContentKey).Distinct().OrderBy(x => x)
-            .Take(Math.Clamp(task.BatchSize, 1, 10000)).ToListAsync(cancellationToken);
+        var scheduled = await db.ScheduledTasks.SingleAsync(x => x.Id == task.Id, cancellationToken);
+        var progress = JsonSerializer.Deserialize<ScanProgress>(scheduled.SettingsJson) ?? new ScanProgress();
+        var batchSize = Math.Clamp(task.BatchSize, 1, 10000);
+        var keys = await db.Database.SqlQuery<string>($"""
+            SELECT DISTINCT ContentKey AS Value FROM stored_messages
+            WHERE ContentKey > {progress.LastKey ?? string.Empty}
+            ORDER BY ContentKey LIMIT {batchSize}
+            """).ToListAsync(cancellationToken);
         var missing = keys.Where(key => !File.Exists(Path.Combine(root, key[..2], key[2..4], $"{key}.eml"))).ToArray();
         if (missing.Length > 0)
             db.AuditRecords.Add(new AuditRecord
@@ -579,8 +587,15 @@ public sealed class StorageIntegrityTaskHandler(
                 Actor = "system", Action = "storage.integrity.missing-content", Resource = "storage:messages",
                 Detail = string.Join(',', missing.Take(50))
             });
+        var finished = keys.Count < batchSize;
+        var next = finished
+            ? new ScanProgress(null, 0, progress.CompletedCycles + 1, DateTimeOffset.UtcNow)
+            : progress with { LastKey = keys[^1], Scanned = progress.Scanned + keys.Count };
+        scheduled.SettingsJson = JsonSerializer.Serialize(next);
         await db.SaveChangesAsync(cancellationToken);
-        return new ScheduledTaskRunResult(keys.Count, 0, $"Missing {missing.Length} content files.");
+        return new ScheduledTaskRunResult(keys.Count, 0,
+            $"Scanned {keys.Count} content keys; missing {missing.Length}; "
+            + (finished ? $"cycle {next.CompletedCycles} complete." : $"cycle progress {next.Scanned}."));
     }
 }
 

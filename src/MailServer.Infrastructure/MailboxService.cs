@@ -1,5 +1,4 @@
 using System.Data;
-using System.Collections.Concurrent;
 using System.Globalization;
 using System.Net;
 using System.Text;
@@ -25,7 +24,9 @@ public sealed partial class MailboxService(
 {
     private static long _lastUidValidity = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
     // 同一邮箱的写操作需要串行化，避免 UIDNEXT、序号和 MODSEQ 在并发 IMAP 命令下错乱。
-    private static readonly ConcurrentDictionary<Guid, SemaphoreSlim> MailboxLocks = new();
+    private static readonly SemaphoreSlim[] MailboxLocks = Enumerable.Range(0, 256)
+        .Select(_ => new SemaphoreSlim(1, 1)).ToArray();
+    private static SemaphoreSlim LockFor(Guid mailboxId) => MailboxLocks[mailboxId.GetHashCode() & 255];
     private const string SubscriptionPrefix = "imap.subscription.";
     private const string DefaultSubscriptionSeedPrefix = "imap.default-subscription-seeded.";
     private const string SuppressedDefaultFolderPrefix = "imap.default-folder-suppressed.";
@@ -436,7 +437,7 @@ public sealed partial class MailboxService(
         IReadOnlyCollection<string> flags,
         CancellationToken cancellationToken)
     {
-        var mailboxLock = MailboxLocks.GetOrAdd(mailboxId, _ => new SemaphoreSlim(1, 1));
+        var mailboxLock = LockFor(mailboxId);
         await mailboxLock.WaitAsync(cancellationToken);
         try
         {
@@ -495,7 +496,7 @@ public sealed partial class MailboxService(
 
     public async Task<IReadOnlyList<ExpungedMailboxItem>> ExpungeAsync(Guid mailboxId, CancellationToken cancellationToken)
     {
-        var mailboxLock = MailboxLocks.GetOrAdd(mailboxId, _ => new SemaphoreSlim(1, 1));
+        var mailboxLock = LockFor(mailboxId);
         await mailboxLock.WaitAsync(cancellationToken);
         try
         {
@@ -556,7 +557,7 @@ public sealed partial class MailboxService(
         bool move,
         CancellationToken cancellationToken)
     {
-        var mailboxLock = MailboxLocks.GetOrAdd(mailboxId, _ => new SemaphoreSlim(1, 1));
+        var mailboxLock = LockFor(mailboxId);
         await mailboxLock.WaitAsync(cancellationToken);
         try
         {
@@ -864,7 +865,7 @@ public sealed partial class MailboxService(
         IReadOnlyCollection<string> flags,
         CancellationToken cancellationToken)
     {
-        var mailboxLock = MailboxLocks.GetOrAdd(mailboxId, _ => new SemaphoreSlim(1, 1));
+        var mailboxLock = LockFor(mailboxId);
         await mailboxLock.WaitAsync(cancellationToken);
         try
         {
