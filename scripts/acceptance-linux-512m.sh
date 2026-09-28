@@ -27,9 +27,11 @@ docker run --rm "${COMMON[@]}" "$IMAGE" init --non-interactive \
   --http-port 8080 --https-port 0 --admin-password "$PASSWORD" \
   >"$RESULT_DIR/init-private.log" 2>&1
 chmod 600 "$RESULT_DIR/init-private.log"
-docker run --rm "${COMMON[@]}" "$IMAGE" domain add acceptance.test >"$RESULT_DIR/seed.log" 2>&1
-docker run --rm "${COMMON[@]}" "$IMAGE" account create alice@acceptance.test \
-  --password "$PASSWORD" >>"$RESULT_DIR/seed.log" 2>&1
+for domain in acceptance.test second.acceptance.test third.acceptance.test; do
+  docker run --rm "${COMMON[@]}" "$IMAGE" domain add "$domain" >>"$RESULT_DIR/seed.log" 2>&1
+  docker run --rm "${COMMON[@]}" "$IMAGE" account create "alice@$domain" \
+    --password "$PASSWORD" >>"$RESULT_DIR/seed.log" 2>&1
+done
 docker run -d --name "$CONTAINER" --memory 512m --memory-swap 512m \
   -p 127.0.0.1::25 -p 127.0.0.1::143 -p 127.0.0.1::8080 \
   "${COMMON[@]}" "$IMAGE" run all >"$RESULT_DIR/container-id.txt"
@@ -73,13 +75,19 @@ python3 "$ROOT/scripts/acceptance-traffic.py" --smtp-port "$SMTP_PORT" --imap-po
 TRAFFIC_RESULT=$?
 set -e
 docker inspect "$CONTAINER" --format '{{json .State}}' >"$RESULT_DIR/container-state.json"
+CONTAINER_STATE="$(docker inspect "$CONTAINER" --format '{{.State.Running}} {{.State.OOMKilled}}')"
 docker exec "$CONTAINER" cat /sys/fs/cgroup/memory.events >"$RESULT_DIR/memory-events.txt" 2>&1 || true
 docker exec "$CONTAINER" cat /proc/1/status >"$RESULT_DIR/process-status.txt" 2>&1 || true
 docker logs "$CONTAINER" >"$RESULT_DIR/server.log" 2>&1
 grep 'Runtime resource sample' "$RESULT_DIR/server.log" >"$RESULT_DIR/runtime-metrics.log" || true
 printf 'traffic_exit_code=%s\nfinished_utc=%s\n' "$TRAFFIC_RESULT" "$(date -u +%FT%TZ)" >>"$RESULT_DIR/parameters.txt"
+printf 'container_running_and_oom_killed=%s\n' "$CONTAINER_STATE" >>"$RESULT_DIR/parameters.txt"
 printf 'runtime_metric_samples=%s\n' "$(wc -l <"$RESULT_DIR/runtime-metrics.log")" >>"$RESULT_DIR/parameters.txt"
 kill "$SAMPLER" "$REFRESHER" >/dev/null 2>&1 || true
 wait "$SAMPLER" "$REFRESHER" 2>/dev/null || true
 echo "Results: $RESULT_DIR"
+if [ "$CONTAINER_STATE" != 'true false' ] || [ ! -s "$RESULT_DIR/runtime-metrics.log" ]; then
+  echo 'The container stopped, was OOM-killed, or produced no runtime metrics.' >&2
+  exit 1
+fi
 exit "$TRAFFIC_RESULT"

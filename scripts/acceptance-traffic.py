@@ -13,7 +13,8 @@ def send(port, index, attachment_bytes):
     started = time.monotonic()
     message = EmailMessage()
     message["From"] = "sender@outside.test"
-    message["To"] = "alice@acceptance.test"
+    domains = ("acceptance.test", "second.acceptance.test", "third.acceptance.test")
+    message["To"] = f"alice@{domains[index % len(domains)]}"
     message["Subject"] = f"acceptance-{index}"
     message.set_content("mailserver acceptance message")
     if index % 10 == 0:
