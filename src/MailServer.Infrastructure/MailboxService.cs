@@ -1,4 +1,5 @@
 using System.Data;
+using System.Data.Common;
 using System.Globalization;
 using System.Net;
 using System.Text;
@@ -379,8 +380,22 @@ public sealed partial class MailboxService(
         bool useUid,
         CancellationToken cancellationToken)
     {
-        await using var snapshot = await CreateFetchSnapshotAsync(mailboxId, "1:*", false, cancellationToken);
         var normalized = criteria.Trim().ToUpperInvariant();
+        if (TryParseFlagSearch(normalized, out var flag, out var hasFlag))
+        {
+            await using var searchDb = await dbFactory.CreateDbContextAsync(cancellationToken);
+            if (searchDb.Database.IsRelational())
+                return await SearchFlagsAsync(searchDb, mailboxId, flag, hasFlag, useUid, cancellationToken);
+        }
+        if (TryParseDateSearch(criteria, out var dateOperator, out var searchDate)
+            && searchDate.Year is >= 3 and <= 9997)
+        {
+            await using var searchDb = await dbFactory.CreateDbContextAsync(cancellationToken);
+            if (searchDb.Database.IsSqlite())
+                return await SearchSqliteDatesAsync(searchDb, mailboxId, dateOperator, searchDate,
+                    useUid, cancellationToken);
+        }
+        await using var snapshot = await CreateFetchSnapshotAsync(mailboxId, "1:*", false, cancellationToken);
         var dateSearch = TryParseDateSearch(criteria, out var operatorName, out var date);
         var charset = "UTF-8";
         var headerName = string.Empty;
@@ -442,6 +457,94 @@ public sealed partial class MailboxService(
             if (selected) matches.Add(useUid ? item.Uid : item.Sequence);
         }
         return matches;
+    }
+
+    private static async Task<IReadOnlyList<long>> SearchFlagsAsync(MailDbContext db, Guid mailboxId, string flag, bool hasFlag,
+        bool useUid, CancellationToken cancellationToken)
+    {
+        var sqlite = db.Database.IsSqlite();
+        var position = sqlite
+            ? "instr(lower(' ' || ranked.Flags || ' '), @flag)"
+            : "locate(@flag, lower(concat(' ', ranked.Flags, ' ')))";
+        // Number every message before filtering: IMAP sequence numbers must not be renumbered by SEARCH.
+        var sql = $"""
+            SELECT ranked.Uid, ranked.SequenceNumber
+            FROM (
+                SELECT Uid, Flags, ROW_NUMBER() OVER (ORDER BY Uid) AS SequenceNumber
+                FROM mailbox_messages WHERE MailboxId = @mailbox
+            ) AS ranked
+            WHERE {position} {(hasFlag ? ">" : "=")} 0
+            ORDER BY ranked.Uid
+            """;
+        await db.Database.OpenConnectionAsync(cancellationToken);
+        await using var command = db.Database.GetDbConnection().CreateCommand();
+        command.CommandText = sql;
+        AddParameter(command, "@mailbox", mailboxId);
+        AddParameter(command, "@flag", $" {flag.ToLowerInvariant()} ");
+        var matches = new List<long>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+            matches.Add(reader.GetInt64(useUid ? 0 : 1));
+        return matches;
+    }
+
+    private static async Task<IReadOnlyList<long>> SearchSqliteDatesAsync(MailDbContext db, Guid mailboxId,
+        string dateOperator, DateTime date, bool useUid, CancellationToken cancellationToken)
+    {
+        // SQLite stores DateTimeOffset as UTC ticks. A two-day SQL window is deliberately wider than
+        // any local UTC offset; the original LocalDateTime.Date comparison remains the final authority.
+        var lower = dateOperator == "BEFORE" ? DateTime.MinValue.Ticks : date.AddDays(-2).Ticks;
+        var upper = dateOperator == "SINCE" ? long.MaxValue : date.AddDays(2).Ticks;
+        const string sql = """
+            SELECT ranked.Uid, ranked.SequenceNumber, ranked.InternalDate
+            FROM (
+                SELECT Uid, InternalDate, ROW_NUMBER() OVER (ORDER BY Uid) AS SequenceNumber
+                FROM mailbox_messages WHERE MailboxId = @mailbox
+            ) AS ranked
+            WHERE ranked.InternalDate >= @lower AND ranked.InternalDate < @upper
+            ORDER BY ranked.Uid
+            """;
+        await db.Database.OpenConnectionAsync(cancellationToken);
+        await using var command = db.Database.GetDbConnection().CreateCommand();
+        command.CommandText = sql;
+        AddParameter(command, "@mailbox", mailboxId);
+        AddParameter(command, "@lower", lower);
+        AddParameter(command, "@upper", upper);
+        var matches = new List<long>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var itemDate = new DateTimeOffset(reader.GetInt64(2), TimeSpan.Zero).LocalDateTime.Date;
+            if (dateOperator switch
+                {
+                    "SINCE" => itemDate >= date,
+                    "BEFORE" => itemDate < date,
+                    _ => itemDate == date
+                })
+                matches.Add(reader.GetInt64(useUid ? 0 : 1));
+        }
+        return matches;
+    }
+
+    private static void AddParameter(DbCommand command, string name, object value)
+    {
+        var parameter = command.CreateParameter();
+        parameter.ParameterName = name;
+        parameter.Value = value;
+        command.Parameters.Add(parameter);
+    }
+
+    private static bool TryParseFlagSearch(string normalized, out string flag, out bool hasFlag)
+    {
+        (flag, hasFlag) = normalized switch
+        {
+            "SEEN" => ("\\Seen", true), "UNSEEN" => ("\\Seen", false),
+            "DELETED" => ("\\Deleted", true), "UNDELETED" => ("\\Deleted", false),
+            "FLAGGED" => ("\\Flagged", true), "UNFLAGGED" => ("\\Flagged", false),
+            "ANSWERED" => ("\\Answered", true), "UNANSWERED" => ("\\Answered", false),
+            _ => (string.Empty, false)
+        };
+        return flag.Length > 0;
     }
 
     public async Task StoreFlagsAsync(

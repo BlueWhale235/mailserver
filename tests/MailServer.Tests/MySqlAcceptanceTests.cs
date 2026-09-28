@@ -68,5 +68,27 @@ public sealed class MySqlAcceptanceTests
         var leased = (await first).Concat(await second).ToArray();
         Assert.Equal(4, leased.Length);
         Assert.Equal(4, leased.Select(x => x.Id).Distinct().Count());
+
+        Guid mailboxId;
+        await using (var db = await factory.CreateDbContextAsync())
+        {
+            var domain = new MailDomain { Name = $"search-{Guid.NewGuid():N}.example.test" };
+            var account = new MailAccount { Domain = domain, LocalPart = "alice", PasswordHash = "unused" };
+            var mailbox = new Mailbox { Account = account, Name = "INBOX" };
+            db.AddRange(domain, account, mailbox);
+            for (var uid = 1; uid <= 3; uid++)
+                db.MailboxMessages.Add(new MailboxMessage
+                {
+                    Mailbox = mailbox,
+                    Message = new StoredMessage { ContentKey = Guid.NewGuid().ToString("N"), EnvelopeFrom = "sender@example.test" },
+                    Uid = uid,
+                    Flags = uid switch { 1 => "\\SeenOther", 2 => "\\Seen", _ => "" }
+                });
+            await db.SaveChangesAsync();
+            mailboxId = mailbox.Id;
+        }
+        var mailboxService = new MailboxService(factory, null!, null!, null!);
+        Assert.Equal([2], await mailboxService.SearchAsync(mailboxId, "SEEN", false, CancellationToken.None));
+        Assert.Equal([1, 3], await mailboxService.SearchAsync(mailboxId, "UNSEEN", true, CancellationToken.None));
     }
 }

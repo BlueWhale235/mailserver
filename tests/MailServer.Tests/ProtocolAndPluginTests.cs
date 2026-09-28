@@ -1016,6 +1016,45 @@ public sealed class ProtocolAndPluginTests
     }
 
     [Fact]
+    public async Task ImapSearchFlagsKeepOriginalSequenceNumbersAndWholeFlagMatches()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-search-flags-{Guid.NewGuid():N}");
+        try
+        {
+            var scenario = await CreateImapInboxScenarioAsync(root);
+            await using (var db = await scenario.Factory.CreateDbContextAsync())
+            {
+                db.MailboxMessages.RemoveRange(db.MailboxMessages.Where(x => x.MailboxId == scenario.MailboxId));
+                await db.SaveChangesAsync();
+            }
+
+            for (var uid = 1; uid <= 3; uid++)
+                await AddInboxMessageAsync(scenario.Factory, scenario.Store, scenario.MailboxId, uid,
+                    $"Subject: message {uid}\r\n\r\nbody\r\n");
+            await using (var db = await scenario.Factory.CreateDbContextAsync())
+            {
+                var items = await db.MailboxMessages.Where(x => x.MailboxId == scenario.MailboxId)
+                    .OrderBy(x => x.Uid).ToListAsync();
+                items[0].Flags = "\\SeenOther";
+                items[1].Flags = "\\sEeN \\Flagged";
+                items[2].Flags = "\\Deleted";
+                await db.SaveChangesAsync();
+            }
+
+            var mailbox = scenario.Provider.GetRequiredService<IMailboxService>();
+            Assert.Equal([2], await mailbox.SearchAsync(scenario.MailboxId, "SEEN", false, CancellationToken.None));
+            Assert.Equal([1, 3], await mailbox.SearchAsync(scenario.MailboxId, "UNSEEN", false, CancellationToken.None));
+            Assert.Equal([2], await mailbox.SearchAsync(scenario.MailboxId, "FLAGGED", true, CancellationToken.None));
+            Assert.Equal([1, 2], await mailbox.SearchAsync(scenario.MailboxId, "UNDELETED", false, CancellationToken.None));
+            Assert.Equal([3], await mailbox.SearchAsync(scenario.MailboxId, "DELETED", true, CancellationToken.None));
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task ImapUnsupportedSortThreadAndInvalidStatesReturnTaggedErrors()
     {
         var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-state-{Guid.NewGuid():N}");
