@@ -271,6 +271,18 @@ public sealed class MailDbContext(DbContextOptions<MailDbContext> options) : DbC
             entity.Property(x => x.MtaStsMxPatterns).HasMaxLength(4096);
             entity.Property(x => x.TlsReportUris).HasMaxLength(4096);
             entity.Property(x => x.DaneTlsaRecords).HasMaxLength(8192);
+            if (Database.ProviderName == "MySql.EntityFrameworkCore")
+            {
+                entity.Property(x => x.SpfIpv4).HasColumnType("text");
+                entity.Property(x => x.SpfIpv6).HasColumnType("text");
+                entity.Property(x => x.SpfIncludes).HasColumnType("text");
+                entity.Property(x => x.SpfCustomMechanisms).HasColumnType("text");
+                entity.Property(x => x.DmarcAggregateReportUris).HasColumnType("text");
+                entity.Property(x => x.DmarcForensicReportUris).HasColumnType("text");
+                entity.Property(x => x.MtaStsMxPatterns).HasColumnType("text");
+                entity.Property(x => x.TlsReportUris).HasColumnType("text");
+                entity.Property(x => x.DaneTlsaRecords).HasColumnType("text");
+            }
             entity.HasOne(x => x.Domain)
                 .WithOne(x => x.DnsSettings)
                 .HasForeignKey<DomainDnsSettings>(x => x.DomainId)

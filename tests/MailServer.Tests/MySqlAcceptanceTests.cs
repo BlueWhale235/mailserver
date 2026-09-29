@@ -10,6 +10,30 @@ namespace MailServer.Tests;
 public sealed class MySqlAcceptanceTests
 {
     [Fact]
+    public void DnsSettingsLongFieldsUseOffRowMySqlTextColumns()
+    {
+        var options = new DbContextOptionsBuilder<MailDbContext>()
+            .UseMySQL("Server=localhost;Database=mailserver_model_test;User ID=unused;Password=unused")
+            .Options;
+        using var db = new MailDbContext(options);
+        var entity = db.Model.FindEntityType(typeof(DomainDnsSettings));
+        Assert.NotNull(entity);
+        foreach (var propertyName in new[]
+                 {
+                     nameof(DomainDnsSettings.SpfIpv4),
+                     nameof(DomainDnsSettings.SpfIpv6),
+                     nameof(DomainDnsSettings.SpfIncludes),
+                     nameof(DomainDnsSettings.SpfCustomMechanisms),
+                     nameof(DomainDnsSettings.DmarcAggregateReportUris),
+                     nameof(DomainDnsSettings.DmarcForensicReportUris),
+                     nameof(DomainDnsSettings.MtaStsMxPatterns),
+                     nameof(DomainDnsSettings.TlsReportUris),
+                     nameof(DomainDnsSettings.DaneTlsaRecords)
+                 })
+            Assert.Equal("text", entity.FindProperty(propertyName)?.GetColumnType());
+    }
+
+    [Fact]
     public async Task MySqlMigrationVersionContentionAndTwoWorkerLeases()
     {
         var connection = Environment.GetEnvironmentVariable("MAILSERVER_TEST_MYSQL_CONNECTION");

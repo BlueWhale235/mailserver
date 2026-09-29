@@ -557,12 +557,12 @@ namespace MailServer.Migrations.MySql.Migrations
                     b.Property<string>("DaneTlsaRecords")
                         .IsRequired()
                         .HasMaxLength(8192)
-                        .HasColumnType("varchar(8192)");
+                        .HasColumnType("text");
 
                     b.Property<string>("DmarcAggregateReportUris")
                         .IsRequired()
                         .HasMaxLength(4096)
-                        .HasColumnType("varchar(4096)");
+                        .HasColumnType("text");
 
                     b.Property<string>("DmarcDkimAlignment")
                         .IsRequired()
@@ -577,7 +577,7 @@ namespace MailServer.Migrations.MySql.Migrations
                     b.Property<string>("DmarcForensicReportUris")
                         .IsRequired()
                         .HasMaxLength(4096)
-                        .HasColumnType("varchar(4096)");
+                        .HasColumnType("text");
 
                     b.Property<int>("DmarcPercentage")
                         .HasColumnType("int");
@@ -607,7 +607,7 @@ namespace MailServer.Migrations.MySql.Migrations
                     b.Property<string>("MtaStsMxPatterns")
                         .IsRequired()
                         .HasMaxLength(4096)
-                        .HasColumnType("varchar(4096)");
+                        .HasColumnType("text");
 
                     b.Property<string>("MtaStsPolicyId")
                         .IsRequired()
@@ -622,7 +622,7 @@ namespace MailServer.Migrations.MySql.Migrations
                     b.Property<string>("SpfCustomMechanisms")
                         .IsRequired()
                         .HasMaxLength(4096)
-                        .HasColumnType("varchar(4096)");
+                        .HasColumnType("text");
 
                     b.Property<bool>("SpfIncludeA")
                         .HasColumnType("tinyint(1)");
@@ -633,22 +633,22 @@ namespace MailServer.Migrations.MySql.Migrations
                     b.Property<string>("SpfIncludes")
                         .IsRequired()
                         .HasMaxLength(4096)
-                        .HasColumnType("varchar(4096)");
+                        .HasColumnType("text");
 
                     b.Property<string>("SpfIpv4")
                         .IsRequired()
                         .HasMaxLength(4096)
-                        .HasColumnType("varchar(4096)");
+                        .HasColumnType("text");
 
                     b.Property<string>("SpfIpv6")
                         .IsRequired()
                         .HasMaxLength(4096)
-                        .HasColumnType("varchar(4096)");
+                        .HasColumnType("text");
 
                     b.Property<string>("TlsReportUris")
                         .IsRequired()
                         .HasMaxLength(4096)
-                        .HasColumnType("varchar(4096)");
+                        .HasColumnType("text");
 
                     b.Property<DateTimeOffset>("UpdatedAt")
                         .HasColumnType("datetime");

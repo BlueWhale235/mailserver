@@ -190,6 +190,7 @@ public sealed class SentCopyService(
         await using (var cleanupDb = await dbFactory.CreateDbContextAsync(cancellationToken))
         {
             await cleanupDb.SentCopyJobs
+                .IgnoreQueryFilters()
                 .Where(x => x.State == SentCopyState.Completed && x.DeduplicateUntil < now)
                 .ExecuteDeleteAsync(cancellationToken);
         }
