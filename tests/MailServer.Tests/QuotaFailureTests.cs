@@ -328,6 +328,45 @@ public sealed class QuotaFailureTests
     }
 
     [Fact]
+    public async Task ConcurrentSameMailboxDeliveriesKeepUidAndQuotaConsistent()
+    {
+        await using var env = await Environment.CreateAsync();
+        const int attempts = 8;
+        var size = Encoding.UTF8.GetByteCount(Message);
+        await env.SetQuotaAsync(size * 3L, false);
+        await env.SetQuotaAsync(size * 3L, true);
+        using var start = new ManualResetEventSlim();
+        async Task<Exception?> Attempt(int index)
+        {
+            start.Wait();
+            var raw = Message.Replace("hello", $"body{index}", StringComparison.Ordinal);
+            await using var content = new MemoryStream(Encoding.UTF8.GetBytes(raw));
+            try { await env.Inbound.AcceptAsync(Envelope(), content, CancellationToken.None); return null; }
+            catch (Exception exception) { return exception; }
+        }
+
+        var tasks = Enumerable.Range(0, attempts).Select(index => Task.Run(() => Attempt(index))).ToArray();
+        start.Set();
+        var results = await Task.WhenAll(tasks).WaitAsync(TimeSpan.FromSeconds(45));
+        var accepted = results.Count(exception => exception is null);
+        Assert.InRange(accepted, 1, 3);
+        Assert.All(results.Where(exception => exception is not null), exception =>
+            Assert.True(exception is MailboxQuotaExceededException or DomainQuotaExceededException
+                || DatabaseFailurePolicy.IsConcurrencyConflict(exception!), exception!.ToString()));
+
+        await using var db = await env.Factory.CreateDbContextAsync();
+        var mailbox = await db.Mailboxes.SingleAsync(x => x.Account.LocalPart == "alice" && x.Name == "INBOX");
+        var uids = await db.MailboxMessages.Where(x => x.MailboxId == mailbox.Id)
+            .OrderBy(x => x.Uid).Select(x => x.Uid).ToListAsync();
+        Assert.Equal(Enumerable.Range(1, accepted).Select(x => (long)x), uids);
+        Assert.Equal(accepted + 1, mailbox.UidNext);
+        Assert.Equal(accepted * size, (await db.Accounts.SingleAsync(x => x.LocalPart == "alice")).UsedBytes);
+        Assert.Equal(accepted * size, (await db.Domains.SingleAsync(x => x.Name == "example.test")).UsedBytes);
+        Assert.Equal(accepted, await db.QuotaLedger.CountAsync());
+        Assert.Equal(accepted, await db.Messages.CountAsync());
+    }
+
+    [Fact]
     public void DatabaseConflictClassificationDoesNotTreatQuotaOrOtherErrorsAsTransient()
     {
         Assert.True(DatabaseFailurePolicy.IsConcurrencyConflict(new DbUpdateException("conflict", new SqliteException("busy", 5))));
