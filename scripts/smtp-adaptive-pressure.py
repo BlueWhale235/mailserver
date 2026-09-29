@@ -26,6 +26,8 @@ def arguments():
     parser.add_argument("--recipient", required=True)
     parser.add_argument("--size-mib", type=int, default=10)
     parser.add_argument("--max-concurrency", type=int, default=32)
+    parser.add_argument("--fixed-concurrency", type=int, help="Repeat one concurrency level instead of ramping")
+    parser.add_argument("--rounds", type=int, default=5, help="Rounds in fixed-concurrency mode")
     parser.add_argument("--messages-per-worker", type=int, default=2)
     parser.add_argument("--timeout-seconds", type=int, default=120)
     parser.add_argument("--health-url")
@@ -38,6 +40,8 @@ def arguments():
     args = parser.parse_args()
     if min(args.size_mib, args.max_concurrency, args.messages_per_worker, args.timeout_seconds) < 1:
         parser.error("size, concurrency, messages per worker, and timeout must be positive")
+    if args.fixed_concurrency is not None and (args.fixed_concurrency < 1 or args.rounds < 1):
+        parser.error("fixed concurrency and rounds must be positive")
     return args
 
 
@@ -139,6 +143,20 @@ def main():
         emit(record, args.output)
         return record
 
+    def failure_reasons(result):
+        reasons = []
+        if result["accepted"] != result["attempted"]:
+            reasons.append("delivery_failure")
+        if not result["health_ok"] or not result["server_alive"]:
+            reasons.append("server_unhealthy")
+        if result["p95_ok_ms"] is None or result["p95_ok_ms"] > args.max_p95_seconds * 1000:
+            reasons.append("p95_limit")
+        if result["peak_process_swap_mib"] is not None and result["peak_process_swap_mib"] > args.max_process_swap_mib:
+            reasons.append("process_swap_limit")
+        if result["min_available_mib"] is not None and result["min_available_mib"] < args.min_available_mib:
+            reasons.append("available_memory_limit")
+        return reasons
+
     try:
         emit({"event": "start", "size_mib": args.size_mib, "host": args.host,
               "port": args.port, "server_pid": args.server_pid}, args.output)
@@ -146,21 +164,24 @@ def main():
         if warmup["accepted"] != 1 or not warmup["health_ok"]:
             emit({"event": "stop", "reason": "warmup_failed"}, args.output)
             return 1
+        if args.fixed_concurrency is not None:
+            for round_number in range(1, args.rounds + 1):
+                result = run(args.fixed_concurrency,
+                             max(4, args.fixed_concurrency * args.messages_per_worker))
+                reasons = failure_reasons(result)
+                if reasons:
+                    emit({"event": "stop", "failed_round": round_number,
+                          "concurrency": args.fixed_concurrency, "reasons": reasons}, args.output)
+                    break
+            else:
+                emit({"event": "stop", "reason": "all_rounds_acceptable",
+                      "concurrency": args.fixed_concurrency, "rounds": args.rounds}, args.output)
+            return 0
         previous = None
         concurrency = 1
         while concurrency <= args.max_concurrency:
             result = run(concurrency, max(4, concurrency * args.messages_per_worker))
-            reasons = []
-            if result["accepted"] != result["attempted"]:
-                reasons.append("delivery_failure")
-            if not result["health_ok"] or not result["server_alive"]:
-                reasons.append("server_unhealthy")
-            if result["p95_ok_ms"] is None or result["p95_ok_ms"] > args.max_p95_seconds * 1000:
-                reasons.append("p95_limit")
-            if result["peak_process_swap_mib"] is not None and result["peak_process_swap_mib"] > args.max_process_swap_mib:
-                reasons.append("process_swap_limit")
-            if result["min_available_mib"] is not None and result["min_available_mib"] < args.min_available_mib:
-                reasons.append("available_memory_limit")
+            reasons = failure_reasons(result)
             if previous and result["accepted_mib_per_second"] < previous["accepted_mib_per_second"] * args.min_throughput_ratio:
                 reasons.append("throughput_regression")
             if reasons:
