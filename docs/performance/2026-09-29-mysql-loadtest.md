@@ -1,34 +1,34 @@
-# Test-server MySQL SMTP load test — 2026-09-29
+# 测试服务器 MySQL SMTP 压测报告（2026-09-29）
 
-## Environment
+## 测试环境
 
-- Server: Ubuntu 24.04, Linux x64, about 887 MiB RAM and 2 GiB swap.
-- Application: `cf7fa9c`, self-contained Linux x64 binary, SHA-256 `4cf2bbd7bf402f7e6133d15756a9e50f42e44dcdf22ccae7616d099665a14122`.
-- Database: Azure MySQL, new empty schema migrated through all seven migrations.
-- SMTP client and server ran on the same host over loopback port 25. Mail was sent only to the local `inbox@loadtest.invalid` account.
-- Original SQLite instance, including its database, messages, configuration, security assets and logs, was preserved at `/www/mailserver-archive-20260929-pre-loadtest`. The new MySQL instance is at `/www/mailserver`.
-- SMTP connection limits and database pooling settings were left at their defaults.
+- 服务器：Ubuntu 24.04、Linux x64，内存约 887 MiB，交换空间 2 GiB。
+- 程序：提交 `cf7fa9c` 对应的独立发布版 Linux x64 二进制文件；SHA-256 为 `4cf2bbd7bf402f7e6133d15756a9e50f42e44dcdf22ccae7616d099665a14122`。
+- 数据库：Azure MySQL，从空数据库完成全部七项迁移。
+- SMTP 客户端和服务端运行在同一台服务器上，通过本机回环地址的 25 端口通信。邮件只投递到本地测试邮箱 `inbox@loadtest.invalid`。
+- 原 SQLite 实例的数据库、邮件文件、配置、安全材料和日志已整体保存在 `/www/mailserver-archive-20260929-pre-loadtest`；新 MySQL 实例位于 `/www/mailserver`。
+- SMTP 连接限制和数据库连接池均保持默认设置。
 
-## Method
+## 测试方法与结果
 
-One 1 MiB message warmed the path. The final deployed binary was then measured with five sequential 1 MiB sends, sixteen 1 MiB sends through eight concurrent connections, and five sequential 10 MiB sends. Each message used a fresh SMTP connection; the duration includes connect, envelope and DATA acknowledgement. The DATA duration isolates the command and server acknowledgement. P95 is the nearest-rank observation from each small sample. Peak RSS was sampled from `/proc` during each run. These are short diagnostic runs, not a steady-state throughput benchmark.
+先发送一封 1 MiB 邮件预热，然后使用最终部署的二进制文件分别测量：顺序发送五封 1 MiB 邮件、通过八个并发连接发送十六封 1 MiB 邮件、顺序发送五封 10 MiB 邮件。每封邮件都新建 SMTP 连接。总耗时包括建立连接、提交信封和等待 DATA 确认；DATA 耗时仅覆盖 DATA 命令及其确认。P95 按最近秩法从各组样本计算。峰值常驻内存（RSS）在测试期间从 `/proc` 采样。本次是短时诊断测试，不代表稳态吞吐量。
 
-| Scenario | Accepted / attempted | Median total | P95 total | Median DATA | P95 DATA | Peak RSS |
+| 场景 | 成功／尝试 | 总耗时中位数 | 总耗时 P95 | DATA 中位数 | DATA P95 | 峰值 RSS |
 |---|---:|---:|---:|---:|---:|---:|
-| 1 MiB, sequential | 5 / 5 | 276 ms | 445 ms | 126 ms | 178 ms | 228 MiB |
-| 1 MiB, 8 concurrent | 5 / 16 | 591 ms | 1,069 ms | 333 ms | 671 ms | 279 MiB |
-| 10 MiB, sequential | 5 / 5 | 2,727 ms | 4,664 ms | 2,666 ms | 4,609 ms | 394 MiB |
+| 1 MiB，单连接顺序发送 | 5／5 | 276 ms | 445 ms | 126 ms | 178 ms | 228 MiB |
+| 1 MiB，8 并发 | 5／16 | 591 ms | 1,069 ms | 333 ms | 671 ms | 279 MiB |
+| 10 MiB，单连接顺序发送 | 5／5 | 2,727 ms | 4,664 ms | 2,666 ms | 4,609 ms | 394 MiB |
 
-Concurrent duration percentiles cover only accepted messages. Eleven concurrent attempts returned SMTP 451. Server logs identify MySQL transaction deadlocks; the application correctly returned a temporary failure rather than accepting a message it could not commit. A separate retry probe completed all eight deliveries in each of its first two rounds, but rapid successive rounds exhausted the default per-source connection burst allowance and later attempts were rejected by connection protection. The test driver was not paced to this allowance, so those later rounds do not measure database recovery.
+并发场景的耗时统计仅包含成功投递的邮件。另有 11 次投递收到 SMTP 451 临时失败；服务器日志显示原因是 MySQL 事务死锁，程序没有把未提交的邮件误报为成功。单独进行的重试测试中，前两轮各八封邮件最终全部投递成功；随后连续快速建连耗尽了默认的单来源连接突发额度，后续连接被连接防护拒绝。测试客户端没有按该额度限速，因此后面几轮不能用于评估数据库死锁后的恢复能力。
 
-The performance table contained 21 sampled/slow successful SMTP DATA operations from both pre-fix and final-binary runs. Their mean SQL count was 10.4 and mean SQL time was 58 ms; these figures are diagnostic only and are not a matched before/after comparison. No allocation measurement or pool-disabled comparison was captured in this server run.
+性能追踪表中有 21 条成功的 SMTP DATA 记录，来自修复前及最终二进制文件的混合测试。其平均 SQL 次数为 10.4，平均 SQL 耗时为 58 ms。这些数字仅用于诊断，不能作为严格的修改前后对照。本次服务器压测未测量内存分配量，也未进行禁用连接池的对照测试。
 
-## Findings and validation
+## 发现与验证
 
-- A fresh MySQL installation initially failed at `domain_dns_settings` because several long `varchar` columns exceeded the row-size limit. The unindexed long fields were changed to MySQL `text`, and a clean migration then succeeded.
-- The sent-copy cleanup worker initially generated a MySQL DELETE that read from the same target table in a subquery. Removing the soft-delete query filter from this cleanup query produces a direct DELETE. The error did not recur after the final binary started.
-- The health endpoint returned HTTP 200 after deployment. Local SMTP smoke delivery succeeded. All 400 automated tests passed. The server remained running after the final test.
-- The opt-in MySQL acceptance suite was not run against a separate acceptance schema: the supplied MySQL account cannot create one. The fresh-schema migration, application startup, and SMTP persistence were verified against the dedicated load-test schema.
-- Eight simultaneous deliveries to one mailbox have a high temporary-failure rate due to MySQL deadlocks. This is the next optimization target. The current test is insufficient to claim any throughput gain over the old SQLite deployment, and the concurrent result should block a claim of improved concurrency.
+- 全新 MySQL 数据库起初在创建 `domain_dns_settings` 表时失败：多列较长的 `varchar` 超过了 MySQL 行大小上限。将没有索引的长字段改为 MySQL `text` 后，从空数据库迁移成功。
+- 已发送邮件副本的清理任务起初生成了 MySQL 不支持的删除语句：在子查询中读取待删除的同一张表。清理查询取消软删除过滤后，生成了直接删除语句；最终二进制文件启动后，该错误未再出现。
+- 部署后健康检查返回 HTTP 200，本机 SMTP 冒烟投递成功。400 项自动化测试通过；最终压测后服务保持运行。
+- 由于提供的 MySQL 账户不能新建独立验收库，未运行需要该库的 MySQL 专项验收测试。已在专用压测库验证从空库迁移、程序启动和 SMTP 邮件入库。
+- 同一邮箱八路并发投递时，MySQL 死锁导致较高的临时失败率，这是下一步优化重点。本次没有与旧 SQLite 部署进行同条件对照，不能据此宣称吞吐量提升；并发结果也不能支持并发能力改善的结论。
 
-The original data archive can be restored by stopping the Supervisor program and swapping the two application directories back. MySQL test data remains in the new schema until explicitly removed.
+需要回退时，可停止 Supervisor 托管的程序，再将新旧两个应用目录互换。新 MySQL 库中的测试数据会保留，直至明确清理。
