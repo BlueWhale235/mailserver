@@ -1174,6 +1174,15 @@ public sealed class CoreTests
     }
 
     [Fact]
+    public void SequenceRangesMergeOverlapAndAdjacencyWithoutOverflow()
+    {
+        Assert.Equal([(1L, 5L), (10L, 12L)],
+            SequenceSet.MergeRanges(SequenceSet.ParseRanges("12:10,1:3,3:5", 12)));
+        Assert.Equal([(long.MaxValue - 1, long.MaxValue)],
+            SequenceSet.MergeRanges(SequenceSet.ParseRanges($"{long.MaxValue - 1}:*", long.MaxValue)));
+    }
+
+    [Fact]
     public async Task ContentStoreUsesSha256AndDeduplicates()
     {
         var root = Path.Combine(Path.GetTempPath(), $"mailserver-tests-{Guid.NewGuid():N}");

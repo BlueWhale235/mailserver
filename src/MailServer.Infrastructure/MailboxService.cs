@@ -341,27 +341,61 @@ public sealed partial class MailboxService(
         var baseQuery = db.MailboxMessages.AsNoTracking().Where(x => x.MailboxId == mailboxId);
         var maximumUid = await baseQuery.MaxAsync(x => (long?)x.Uid, cancellationToken) ?? 0;
         var maximum = useUid ? maximumUid : await baseQuery.LongCountAsync(cancellationToken);
-        var ranges = SequenceSet.ParseRanges(sequenceSet, maximum);
+        var ranges = SequenceSet.MergeRanges(SequenceSet.ParseRanges(sequenceSet, maximum));
         var snapshot = new MailboxSelectionSnapshot();
         try
         {
-            var lastUid = long.MinValue;
-            long sequence = 0;
-            while (true)
+            if (useUid)
             {
-                var page = await baseQuery.Where(x => x.Uid > lastUid && x.Uid <= maximumUid)
-                    .OrderBy(x => x.Uid).Take(256)
-                    .Select(x => new MailboxItem(x.Id, 0, x.Uid, x.Flags, x.ModSeq,
-                        x.InternalDate, x.Message.Size, x.Message.ContentKey))
-                    .ToListAsync(cancellationToken);
-                foreach (var item in page)
+                foreach (var (start, end) in ranges)
                 {
-                    sequence++;
-                    if (SequenceSet.Contains(ranges, useUid ? item.Uid : sequence))
-                        await snapshot.AddAsync(item with { Sequence = sequence }, cancellationToken);
+                    var sequence = await baseQuery.LongCountAsync(x => x.Uid < start, cancellationToken);
+                    var lastUid = start == long.MinValue ? long.MinValue : start - 1;
+                    while (true)
+                    {
+                        var page = await baseQuery.Where(x => x.Uid >= start && x.Uid > lastUid && x.Uid <= end)
+                            .OrderBy(x => x.Uid).Take(256)
+                            .Select(x => new MailboxItem(x.Id, 0, x.Uid, x.Flags, x.ModSeq,
+                                x.InternalDate, x.Message.Size, x.Message.ContentKey))
+                            .ToListAsync(cancellationToken);
+                        foreach (var item in page)
+                            await snapshot.AddAsync(item with { Sequence = ++sequence }, cancellationToken);
+                        if (page.Count < 256) break;
+                        lastUid = page[^1].Uid;
+                    }
                 }
-                if (page.Count < 256) break;
-                lastUid = page[^1].Uid;
+            }
+            else if (ranges.Count > 0)
+            {
+                var lastUid = long.MinValue;
+                var maximumSequence = ranges[^1].End;
+                long sequence = 0;
+                while (sequence < maximumSequence)
+                {
+                    var page = await baseQuery.Where(x => x.Uid > lastUid && x.Uid <= maximumUid)
+                        .OrderBy(x => x.Uid).Take((int)Math.Min(256, maximumSequence - sequence))
+                        .Select(x => new { x.Id, x.Uid })
+                        .ToListAsync(cancellationToken);
+                    if (page.Count == 0) break;
+                    var selected = new List<(Guid Id, long Sequence)>();
+                    foreach (var item in page)
+                    {
+                        sequence++;
+                        if (SequenceSet.Contains(ranges, sequence)) selected.Add((item.Id, sequence));
+                    }
+                    if (selected.Count > 0)
+                    {
+                        var ids = selected.Select(x => x.Id).ToArray();
+                        var details = await baseQuery.Where(x => ids.Contains(x.Id))
+                            .Select(x => new MailboxItem(x.Id, 0, x.Uid, x.Flags, x.ModSeq,
+                                x.InternalDate, x.Message.Size, x.Message.ContentKey))
+                            .ToDictionaryAsync(x => x.Id, cancellationToken);
+                        foreach (var (id, number) in selected)
+                            await snapshot.AddAsync(details[id] with { Sequence = number }, cancellationToken);
+                    }
+                    lastUid = page[^1].Uid;
+                    if (page.Count < 256) break;
+                }
             }
             await transaction.CommitAsync(cancellationToken);
             await snapshot.SealAsync(cancellationToken);
@@ -1287,6 +1321,22 @@ internal static class SequenceSet
                 var end = range.Length == 1 ? start : Parse(range[1], maximum);
                 return (Math.Min(start, end), Math.Max(start, end));
             }).ToArray();
+
+    public static IReadOnlyList<(long Start, long End)> MergeRanges(IReadOnlyList<(long Start, long End)> ranges)
+    {
+        var merged = new List<(long Start, long End)>();
+        foreach (var range in ranges.OrderBy(x => x.Start).ThenBy(x => x.End))
+        {
+            if (merged.Count > 0 && (range.Start <= merged[^1].End
+                || merged[^1].End != long.MaxValue && range.Start == merged[^1].End + 1))
+            {
+                var previous = merged[^1];
+                merged[^1] = (previous.Start, Math.Max(previous.End, range.End));
+            }
+            else merged.Add(range);
+        }
+        return merged;
+    }
 
     public static bool Contains(IReadOnlyList<(long Start, long End)> ranges, long value) =>
         ranges.Any(range => value >= range.Start && value <= range.End);

@@ -1289,6 +1289,34 @@ public sealed class ProtocolAndPluginTests
     }
 
     [Fact]
+    public async Task ImapUidFetchUsesExistingMessageSequenceAcrossSparseAndOverlappingRanges()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-uid-ranges-{Guid.NewGuid():N}");
+        try
+        {
+            var scenario = await CreateImapInboxScenarioAsync(root);
+            await AddInboxMessageAsync(scenario.Factory, scenario.Store, scenario.MailboxId, 3,
+                "Subject: third\r\n\r\nbody\r\n");
+            await AddInboxMessageAsync(scenario.Factory, scenario.Store, scenario.MailboxId, 10,
+                "Subject: tenth\r\n\r\nbody\r\n");
+            await using var stream = new DuplexMemoryStream(string.Empty);
+            await using var connection = new ImapConnection(stream, TimeSpan.FromSeconds(1), 4096);
+
+            await scenario.Service.ExecuteLineAsync(connection, scenario.State,
+                "A001 UID FETCH 10,3:3,10:10 FLAGS", "local", ConnectionSecurity.StartTls, true, CancellationToken.None);
+
+            Assert.Equal(2, Regex.Matches(stream.OutputText, @"\* \d+ FETCH").Count);
+            Assert.Contains("* 2 FETCH (UID 3", stream.OutputText);
+            Assert.Contains("* 3 FETCH (UID 10", stream.OutputText);
+            Assert.DoesNotContain("UID 1 ", stream.OutputText);
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task ImapEmptyMailboxCommandsReturnEmptyResults()
     {
         var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-empty-{Guid.NewGuid():N}");
