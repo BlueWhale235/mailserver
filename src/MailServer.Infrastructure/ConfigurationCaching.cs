@@ -302,11 +302,13 @@ public sealed class ConfigurationSnapshotCache : IDisposable
     private async Task LoadAsync<T>(string key, string scope, long version,
         Func<CancellationToken, Task<(T Value, long Size)>> loader, TaskCompletionSource<CacheValue> source) where T : class
     {
+        using var performance = PerformanceTelemetry.Stage("cache.load");
         IDisposable? admission = null;
         var stopwatch = Stopwatch.StartNew();
         try
         {
-            admission = await _loadLimit.AcquireAsync(_lifetime.Token);
+            using (PerformanceTelemetry.Stage("cache.admission"))
+                admission = await _loadLimit.AcquireAsync(_lifetime.Token);
             var loaded = await loader(_lifetime.Token);
             var value = new CacheValue(loaded.Value, version, DateTimeOffset.UtcNow, Math.Max(1, loaded.Size));
             lock (_sync)

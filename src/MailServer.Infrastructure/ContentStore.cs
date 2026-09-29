@@ -13,6 +13,7 @@ public sealed class FileMessageContentStore(
 
     public async Task<ContentDescriptor> SaveAsync(Stream content, CancellationToken cancellationToken)
     {
+        using var performance = PerformanceTelemetry.Stage("storage.write");
         var root = Path.GetFullPath(_options.RootPath);
         var temporaryDirectory = Path.Combine(root, ".tmp");
         Directory.CreateDirectory(temporaryDirectory);

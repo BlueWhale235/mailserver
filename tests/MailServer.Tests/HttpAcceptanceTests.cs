@@ -20,6 +20,58 @@ namespace MailServer.Tests;
 public sealed class HttpAcceptanceTests
 {
     [Fact]
+    public async Task PerformanceRoutesEnforcePermissionsPaginateAndAuditConfiguration()
+    {
+        await using var host = await AcceptanceHost.StartAsync();
+        const string path = "/api/v1/operations/performance";
+        using (var anonymous = await host.Anonymous.GetAsync(path + "/settings"))
+            Assert.Equal(HttpStatusCode.Unauthorized, anonymous.StatusCode);
+        await host.JsonAsync(HttpMethod.Post, "/api/v1/admins", new { userName = "performance-reader", password = AcceptanceHost.Password,
+            isEnabled = true, grants = new[] { new { permissionCode = "performance.read", resourceType = "", resourceKey = "" } } }, 201);
+        using var reader = await host.LoginAsync("performance-reader");
+        using (var response = await reader.GetAsync(path + "/settings")) Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        using (var response = await reader.PutAsJsonAsync(path + "/settings", new PerformanceSettings())) Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        using (var response = await reader.PostAsJsonAsync(path + "/diagnostic", new { enabled = true })) Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        await host.JsonAsync(HttpMethod.Put, path + "/settings", new PerformanceSettings { SampleRate = -1 }, 400);
+        await host.JsonAsync(HttpMethod.Put, path + "/settings", new PerformanceSettings { SampleRate = .1 });
+        var diagnostic = await host.JsonAsync(HttpMethod.Post, path + "/diagnostic", new { enabled = true });
+        Assert.InRange(diagnostic.GetProperty("diagnosticUntil").GetDateTimeOffset() - DateTimeOffset.UtcNow, TimeSpan.FromMinutes(14), TimeSpan.FromMinutes(16));
+        await host.JsonAsync(HttpMethod.Get, "/api/v1/domains");
+        var recorded = false;
+        for (var attempt = 0; attempt < 30 && !recorded; attempt++)
+        {
+            await using var db = await host.Factory.CreateDbContextAsync();
+            recorded = await db.PerformanceOperations.AnyAsync(x => x.Module == "api" && x.Name.Contains("/domains"));
+            if (!recorded) await Task.Delay(100);
+        }
+        Assert.True(recorded, "An actual HTTP request should reach diagnostic storage in diagnostic mode.");
+        await host.JsonAsync(HttpMethod.Post, path + "/diagnostic", new { enabled = false });
+        var at = DateTimeOffset.UtcNow.AddMinutes(-5);
+        await using (var db = await host.Factory.CreateDbContextAsync())
+        {
+            db.PerformanceOperations.AddRange(Enumerable.Range(0, 55).Select(_ => new PerformanceOperation
+                { Module = "test", Name = "test-pagination", TraceId = new string('a', 32), ProcessId = "test", StartedAt = at, Slow = true }));
+            await db.SaveChangesAsync();
+        }
+        var first = await host.JsonAsync(HttpMethod.Get, path + "/operations?module=test");
+        Assert.Equal(50, first.GetProperty("items").GetArrayLength());
+        var cursor = first.GetProperty("nextCursor").GetString()!;
+        var second = await host.JsonAsync(HttpMethod.Get, path + "/operations?module=test&cursor=" + Uri.EscapeDataString(cursor));
+        Assert.Equal(5, second.GetProperty("items").GetArrayLength());
+        var ids = first.GetProperty("items").EnumerateArray().Concat(second.GetProperty("items").EnumerateArray()).Select(x => x.GetProperty("id").GetGuid()).ToArray();
+        Assert.Equal(55, ids.Distinct().Count());
+        var detail = await host.JsonAsync(HttpMethod.Get, path + "/operations/" + ids[0]);
+        Assert.Empty(detail.GetProperty("stages").EnumerateArray());
+        await host.JsonAsync(HttpMethod.Get, path + "/operations?cursor=bnVsbA==", expected: 400);
+        await host.JsonAsync(HttpMethod.Get, path + "/summary?kind=invalid", expected: 400);
+        var summary = await host.JsonAsync(HttpMethod.Get, path + "/summary");
+        Assert.True(summary.GetProperty("approximatePercentiles").GetBoolean());
+        await using var check = await host.Factory.CreateDbContextAsync();
+        Assert.True(await check.AuditRecords.AnyAsync(x => x.Action == "performance.configure"));
+        Assert.False(await check.PerformanceOperations.AnyAsync(x => x.Name.Contains("operations/performance")));
+    }
+
+    [Fact]
     public async Task OperationsMailSeparatesMetadataAndContentPermissionsAndAuditsContentAccess()
     {
         await using var host = await AcceptanceHost.StartAsync();

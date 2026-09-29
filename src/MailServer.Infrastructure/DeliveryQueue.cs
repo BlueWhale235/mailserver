@@ -61,6 +61,9 @@ public sealed class DeliveryQueue(
             _ => throw new ArgumentOutOfRangeException()
         };
 
+        var timings = jobs.ToDictionary(job => job.Id, job => (
+            Wait: (now - job.NextAttemptAt).TotalMilliseconds,
+            Backoff: job.Status == DeliveryStatus.Deferred ? (job.NextAttemptAt - job.UpdatedAt).TotalMilliseconds : 0));
         foreach (var job in jobs)
         {
             // 租约过期后 Processing 任务可被其它 Worker 重新领取，用于进程崩溃后的自动恢复。
@@ -82,7 +85,11 @@ public sealed class DeliveryQueue(
                 now.Add(duration));
         }
 
-        return jobs.Select(job => new DeliveryLease(job, owner, job.Attempts, job.LeaseUntil!.Value)).ToArray();
+        return jobs.Select(job => new DeliveryLease(job, owner, job.Attempts, job.LeaseUntil!.Value)
+        {
+            QueueWaitMilliseconds = timings[job.Id].Wait,
+            RetryBackoffMilliseconds = timings[job.Id].Backoff
+        }).ToArray();
     }
 
     public async Task<bool> RenewAsync(DeliveryLease lease, TimeSpan duration, CancellationToken cancellationToken)

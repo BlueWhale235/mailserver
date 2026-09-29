@@ -35,6 +35,24 @@ public sealed class MySqlAcceptanceTests
             await db.Database.MigrateAsync();
             Assert.True(await db.ConfigurationVersions.AnyAsync(x => x.Scope == ConfigurationScopes.Routing));
         }
+        var performance = provider.GetRequiredService<PerformanceCollector>();
+        performance.Settings = new() { SampleRate = 1 };
+        using (performance.Start("api", "mysql-acceptance"))
+        {
+            await using var db = await factory.CreateDbContextAsync();
+            await using var transaction = await db.Database.BeginTransactionAsync();
+            await db.Messages.CountAsync();
+            await transaction.CommitAsync();
+        }
+        var performanceStorage = new PerformanceStorage(factory, performance, provider.GetRequiredService<ResourceRuntime>(),
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<PerformanceStorage>.Instance);
+        await performanceStorage.FlushAsync(CancellationToken.None);
+        Assert.False(performance.StorageUnavailable);
+        await using (var db = await factory.CreateDbContextAsync())
+        {
+            Assert.True(await db.PerformanceOperations.AnyAsync(x => x.Name == "mysql-acceptance" && x.SqlCount > 0));
+            Assert.True(await db.PerformanceMinutes.AnyAsync(x => x.ProcessId == performance.ProcessId));
+        }
         long before;
         await using (var db = await factory.CreateDbContextAsync())
             before = await db.ConfigurationVersions.Where(x => x.Scope == ConfigurationScopes.Rules)

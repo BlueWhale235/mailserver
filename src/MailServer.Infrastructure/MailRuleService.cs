@@ -406,6 +406,7 @@ public sealed partial class MailRuleService(
         CancellationToken cancellationToken)
     {
         var evaluation = CurrentScope.Value;
+        using var performance = PerformanceTelemetry.Stage("rules.match");
         var resultKey = (domainId, direction, facts);
         if (evaluation is not null && evaluation.Matches.TryGetValue(resultKey, out var prior)) return prior;
         var snapshot = await GetSnapshotAsync(domainId, direction, cancellationToken);

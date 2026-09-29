@@ -328,6 +328,7 @@ public sealed class PluginPipeline(
                 ? new PluginSettingsSnapshot(true, new Dictionary<string, JsonElement>())
                 : await settingsProvider.GetAsync(manifest.Id, cancellationToken);
             if (!settings.Enabled) continue;
+            using var performance = PerformanceTelemetry.Stage("plugin." + (manifest?.Id ?? "builtin"));
             try
             {
                 var stopwatch = Stopwatch.StartNew();
@@ -342,6 +343,7 @@ public sealed class PluginPipeline(
             }
             catch (Exception exception)
             {
+                performance?.Fail(exception);
                 logger.LogError(exception, "Authentication plugin {Plugin} failed", middleware.GetType().FullName);
                 await RecordPluginErrorAsync("authentication", manifest, exception, cancellationToken);
                 if (string.Equals(manifest?.FailureMode, "reject", StringComparison.OrdinalIgnoreCase))
@@ -380,6 +382,7 @@ public sealed class PluginPipeline(
                 ? new PluginSettingsSnapshot(true, new Dictionary<string, JsonElement>())
                 : await settingsProvider.GetAsync(manifest.Id, cancellationToken);
             if (!settings.Enabled) continue;
+            using var performance = PerformanceTelemetry.Stage("plugin." + (manifest?.Id ?? "builtin"));
             try
             {
                 var stopwatch = Stopwatch.StartNew();
@@ -396,6 +399,7 @@ public sealed class PluginPipeline(
             }
             catch (Exception exception)
             {
+                performance?.Fail(exception);
                 logger.LogError(exception, "Message acceptance plugin {Plugin} failed", middleware.GetType().FullName);
                 await RecordPluginErrorAsync("message-acceptance", manifest, exception, cancellationToken);
                 if (string.Equals(manifest?.FailureMode, "reject", StringComparison.OrdinalIgnoreCase))
@@ -423,6 +427,7 @@ public sealed class PluginPipeline(
                 ? new PluginSettingsSnapshot(true, new Dictionary<string, JsonElement>())
                 : await settingsProvider.GetAsync(manifest.Id, cancellationToken);
             if (!settings.Enabled) continue;
+            using var performance = PerformanceTelemetry.Stage("plugin." + (manifest?.Id ?? "builtin"));
             try
             {
                 // 内容检查会反复读取同一个内存/文件流，调用前后复位 Position 是插件兼容性的关键。
@@ -446,6 +451,7 @@ public sealed class PluginPipeline(
             catch (Exception exception)
             {
                 content.Position = 0;
+                performance?.Fail(exception);
                 logger.LogError(exception, "Message content plugin {Plugin} failed", middleware.GetType().FullName);
                 await RecordPluginErrorAsync("message-content", manifest, exception, cancellationToken);
                 if (string.Equals(manifest?.FailureMode, "reject", StringComparison.OrdinalIgnoreCase))
@@ -505,6 +511,7 @@ public sealed class PluginPipeline(
         {
             cancellationToken.ThrowIfCancellationRequested();
             var manifest = middleware is null ? null : catalog.FindManifest(middleware.GetType().Assembly);
+            using var performance = PerformanceTelemetry.Stage("plugin.policy." + (manifest?.Id ?? "builtin"));
             try
             {
                 if (manifest is not null
@@ -525,6 +532,7 @@ public sealed class PluginPipeline(
             }
             catch (Exception exception)
             {
+                PerformanceTelemetry.Fail(exception);
                 logger.LogError(exception, "Plugin middleware {Plugin} failed", middleware?.GetType().FullName);
                 await RecordPluginErrorAsync(typeof(T).Name, manifest, exception, cancellationToken);
                 if (string.Equals(manifest?.FailureMode, "reject", StringComparison.OrdinalIgnoreCase))
@@ -550,6 +558,7 @@ public sealed class PluginPipeline(
                 ? new PluginSettingsSnapshot(true, new Dictionary<string, JsonElement>())
                 : await settingsProvider.GetAsync(manifest.Id, cancellationToken);
             if (!settings.Enabled) continue;
+            using var performance = PerformanceTelemetry.Stage("plugin." + (manifest?.Id ?? "builtin"));
             try
             {
                 var stopwatch = Stopwatch.StartNew();
@@ -566,6 +575,7 @@ public sealed class PluginPipeline(
             }
             catch (Exception exception)
             {
+                PerformanceTelemetry.Fail(exception);
                 logger.LogError(exception, "Plugin middleware {Plugin} failed", middleware?.GetType().FullName);
                 await RecordPluginErrorAsync(typeof(T).Name, manifest, exception, cancellationToken);
                 if (string.Equals(manifest?.FailureMode, "reject", StringComparison.OrdinalIgnoreCase))
@@ -600,12 +610,14 @@ public sealed class PluginPipeline(
                     ? new PluginSettingsSnapshot(true, new Dictionary<string, JsonElement>())
                     : await settingsProvider.GetAsync(manifest.Id, cancellationToken);
                 if (!settings.Enabled) continue;
+                using var performance = PerformanceTelemetry.Stage("plugin." + (manifest?.Id ?? "builtin"));
                 var invocation = invoke(middleware, settings);
                 if (manifest is null) await invocation;
                 else await invocation.WaitAsync(TimeSpan.FromMilliseconds(manifest.TimeoutMilliseconds), cancellationToken);
             }
             catch (Exception exception)
             {
+                PerformanceTelemetry.Fail(exception);
                 // 通知型插件不应影响主业务结果，异常只进入日志。
                 logger.LogError(exception, "Plugin notification {EventName} failed in {Plugin}", eventName, middleware?.GetType().FullName);
             }

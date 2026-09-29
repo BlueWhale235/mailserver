@@ -280,10 +280,10 @@ namespace MailServer.Migrations.MySql.Migrations
                         .HasMaxLength(128)
                         .HasColumnType("varchar(128)");
 
-                    b.Property<long>("RulesVersion")
+                    b.Property<long>("RoutingVersion")
                         .HasColumnType("bigint");
 
-                    b.Property<long>("RoutingVersion")
+                    b.Property<long>("RulesVersion")
                         .HasColumnType("bigint");
 
                     b.Property<long>("SettingsVersion")
@@ -439,6 +439,10 @@ namespace MailServer.Migrations.MySql.Migrations
                         .IsRequired()
                         .HasMaxLength(320)
                         .HasColumnType("varchar(320)");
+
+                    b.Property<string>("SourceTraceId")
+                        .HasMaxLength(32)
+                        .HasColumnType("varchar(32)");
 
                     b.Property<string>("Status")
                         .IsRequired()
@@ -1490,6 +1494,13 @@ namespace MailServer.Migrations.MySql.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("char(36)");
 
+                    b.Property<Guid?>("AuthenticatedAccountId")
+                        .HasColumnType("char(36)");
+
+                    b.Property<string>("AuthenticatedAccountName")
+                        .HasMaxLength(320)
+                        .HasColumnType("varchar(320)");
+
                     b.Property<string>("ContentKey")
                         .IsRequired()
                         .HasMaxLength(64)
@@ -1508,26 +1519,23 @@ namespace MailServer.Migrations.MySql.Migrations
                         .HasMaxLength(64)
                         .HasColumnType("varchar(64)");
 
-                    b.Property<Guid?>("AuthenticatedAccountId")
-                        .HasColumnType("char(36)");
-
-                    b.Property<string>("AuthenticatedAccountName")
-                        .HasMaxLength(320)
-                        .HasColumnType("varchar(320)");
-
-                    b.Property<string>("SourceIp")
-                        .HasMaxLength(128)
-                        .HasColumnType("varchar(128)");
-
-                    b.Property<string>("SourceType")
-                        .HasMaxLength(32)
-                        .HasColumnType("varchar(32)");
-
                     b.Property<DateTimeOffset>("ReceivedAt")
                         .HasColumnType("datetime");
 
                     b.Property<long>("Size")
                         .HasColumnType("bigint");
+
+                    b.Property<string>("SourceIp")
+                        .HasMaxLength(128)
+                        .HasColumnType("varchar(128)");
+
+                    b.Property<string>("SourceTraceId")
+                        .HasMaxLength(32)
+                        .HasColumnType("varchar(32)");
+
+                    b.Property<string>("SourceType")
+                        .HasMaxLength(32)
+                        .HasColumnType("varchar(32)");
 
                     b.HasKey("Id");
 
@@ -1542,12 +1550,24 @@ namespace MailServer.Migrations.MySql.Migrations
 
             modelBuilder.Entity("MailServer.Domain.StoredMessageRecipient", b =>
                 {
-                    b.Property<Guid>("Id").ValueGeneratedOnAdd().HasColumnType("char(36)");
-                    b.Property<Guid>("MessageId").HasColumnType("char(36)");
-                    b.Property<string>("Address").IsRequired().HasMaxLength(320).HasColumnType("varchar(320)");
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("char(36)");
+
+                    b.Property<string>("Address")
+                        .IsRequired()
+                        .HasMaxLength(320)
+                        .HasColumnType("varchar(320)");
+
+                    b.Property<Guid>("MessageId")
+                        .HasColumnType("char(36)");
+
                     b.HasKey("Id");
+
                     b.HasIndex("Address");
+
                     b.HasIndex("MessageId");
+
                     b.ToTable("stored_message_recipients", (string)null);
                 });
 
@@ -1745,6 +1765,218 @@ namespace MailServer.Migrations.MySql.Migrations
                     b.ToTable("tls_report_deliveries", (string)null);
                 });
 
+            modelBuilder.Entity("MailServer.Infrastructure.PerformanceMinute", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("char(36)");
+
+                    b.Property<long>("Count")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("Errors")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("HistogramJson")
+                        .IsRequired()
+                        .HasColumnType("longtext");
+
+                    b.Property<string>("Kind")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("varchar(16)");
+
+                    b.Property<double>("MaximumMilliseconds")
+                        .HasColumnType("double");
+
+                    b.Property<DateTimeOffset>("Minute")
+                        .HasColumnType("datetime");
+
+                    b.Property<string>("Module")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("varchar(32)");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("varchar(128)");
+
+                    b.Property<string>("ProcessId")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("varchar(128)");
+
+                    b.Property<long>("Slow")
+                        .HasColumnType("bigint");
+
+                    b.Property<double>("TotalMilliseconds")
+                        .HasColumnType("double");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Minute", "Kind");
+
+                    b.HasIndex("ProcessId", "Minute", "Kind", "Module", "Name")
+                        .IsUnique();
+
+                    b.ToTable("performance_minutes", (string)null);
+                });
+
+            modelBuilder.Entity("MailServer.Infrastructure.PerformanceOperation", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("char(36)");
+
+                    b.Property<int?>("Attempt")
+                        .HasColumnType("int");
+
+                    b.Property<bool>("ClockAnomaly")
+                        .HasColumnType("tinyint(1)");
+
+                    b.Property<Guid?>("DeliveryJobId")
+                        .HasColumnType("char(36)");
+
+                    b.Property<int>("DetailBytes")
+                        .HasColumnType("int");
+
+                    b.Property<string>("DetailsJson")
+                        .IsRequired()
+                        .HasColumnType("longtext");
+
+                    b.Property<double>("DurationMilliseconds")
+                        .HasColumnType("double");
+
+                    b.Property<Guid?>("MessageId")
+                        .HasColumnType("char(36)");
+
+                    b.Property<string>("Module")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("varchar(32)");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("varchar(128)");
+
+                    b.Property<string>("ProcessId")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("varchar(128)");
+
+                    b.Property<double>("ProcessingMilliseconds")
+                        .HasColumnType("double");
+
+                    b.Property<double?>("QueueWaitMilliseconds")
+                        .HasColumnType("double");
+
+                    b.Property<double?>("RetryBackoffMilliseconds")
+                        .HasColumnType("double");
+
+                    b.Property<bool>("Slow")
+                        .HasColumnType("tinyint(1)");
+
+                    b.Property<string>("SourceTraceId")
+                        .HasMaxLength(32)
+                        .HasColumnType("varchar(32)");
+
+                    b.Property<int>("SqlCount")
+                        .HasColumnType("int");
+
+                    b.Property<double>("SqlMilliseconds")
+                        .HasColumnType("double");
+
+                    b.Property<DateTimeOffset>("StartedAt")
+                        .HasColumnType("datetime");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("varchar(16)");
+
+                    b.Property<string>("TraceId")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("varchar(32)");
+
+                    b.Property<bool>("Truncated")
+                        .HasColumnType("tinyint(1)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("DeliveryJobId");
+
+                    b.HasIndex("MessageId");
+
+                    b.HasIndex("SourceTraceId");
+
+                    b.HasIndex("TraceId");
+
+                    b.HasIndex("StartedAt", "Id");
+
+                    b.ToTable("performance_operations", (string)null);
+                });
+
+            modelBuilder.Entity("MailServer.Infrastructure.PerformanceProcess", b =>
+                {
+                    b.Property<string>("ProcessId")
+                        .HasMaxLength(128)
+                        .HasColumnType("varchar(128)");
+
+                    b.Property<long>("BudgetBytes")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("BufferBytes")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("DroppedAggregates")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("DroppedOperations")
+                        .HasColumnType("bigint");
+
+                    b.Property<DateTimeOffset>("LastSeenAt")
+                        .HasColumnType("datetime");
+
+                    b.Property<bool>("StorageUnavailable")
+                        .HasColumnType("tinyint(1)");
+
+                    b.Property<long>("TruncatedOperations")
+                        .HasColumnType("bigint");
+
+                    b.HasKey("ProcessId");
+
+                    b.ToTable("performance_processes", (string)null);
+                });
+
+            modelBuilder.Entity("MailServer.Infrastructure.PerformanceSql", b =>
+                {
+                    b.Property<string>("Fingerprint")
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
+
+                    b.Property<DateTimeOffset>("LastSeenAt")
+                        .HasColumnType("datetime");
+
+                    b.Property<string>("Provider")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("varchar(16)");
+
+                    b.Property<string>("Template")
+                        .IsRequired()
+                        .HasMaxLength(2048)
+                        .HasColumnType("varchar(2048)");
+
+                    b.HasKey("Fingerprint");
+
+                    b.HasIndex("LastSeenAt");
+
+                    b.ToTable("performance_sql", (string)null);
+                });
+
             modelBuilder.Entity("MailServer.Domain.DeliveryAttempt", b =>
                 {
                     b.HasOne("MailServer.Domain.DeliveryJob", "DeliveryJob")
@@ -1911,16 +2143,6 @@ namespace MailServer.Migrations.MySql.Migrations
                     b.Navigation("Message");
                 });
 
-            modelBuilder.Entity("MailServer.Domain.StoredMessageRecipient", b =>
-                {
-                    b.HasOne("MailServer.Domain.StoredMessage", "Message")
-                        .WithMany()
-                        .HasForeignKey("MessageId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-                    b.Navigation("Message");
-                });
-
             modelBuilder.Entity("MailServer.Domain.QuarantineRecord", b =>
                 {
                     b.HasOne("MailServer.Domain.MailDomain", "Domain")
@@ -1975,6 +2197,17 @@ namespace MailServer.Migrations.MySql.Migrations
                         .IsRequired();
 
                     b.Navigation("Domain");
+                });
+
+            modelBuilder.Entity("MailServer.Domain.StoredMessageRecipient", b =>
+                {
+                    b.HasOne("MailServer.Domain.StoredMessage", "Message")
+                        .WithMany()
+                        .HasForeignKey("MessageId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Message");
                 });
 
             modelBuilder.Entity("MailServer.Domain.TaskExecution", b =>

@@ -11,8 +11,15 @@ public sealed class MailDbContext(DbContextOptions<MailDbContext> options) : DbC
 {
     public override async Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
     {
+        using var performance = PerformanceTelemetry.Stage("database.save-changes");
         ChangeTracker.DetectChanges();
-        var routingChanged = ChangeTracker.Entries().Any(entry =>
+        var entries = ChangeTracker.Entries().ToArray();
+        foreach (var entry in entries.Where(x => x.State == EntityState.Added))
+        {
+            if (entry.Entity is StoredMessage message) message.SourceTraceId ??= PerformanceTelemetry.TraceId;
+            if (entry.Entity is DeliveryJob job) job.SourceTraceId ??= PerformanceTelemetry.TraceId ?? job.Message?.SourceTraceId;
+        }
+        var routingChanged = entries.Any(entry =>
             entry.Entity switch
             {
                 MailDomain => RoutingFieldsChanged(entry, nameof(MailDomain.Name), nameof(MailDomain.IsActive),
@@ -86,9 +93,55 @@ public sealed class MailDbContext(DbContextOptions<MailDbContext> options) : DbC
     public DbSet<CleanupQueueItem> CleanupQueue => Set<CleanupQueueItem>();
     public DbSet<QuotaLedgerEntry> QuotaLedger => Set<QuotaLedgerEntry>();
     public DbSet<QuarantineRecord> QuarantineRecords => Set<QuarantineRecord>();
+    public DbSet<PerformanceOperation> PerformanceOperations => Set<PerformanceOperation>();
+    public DbSet<PerformanceMinute> PerformanceMinutes => Set<PerformanceMinute>();
+    public DbSet<PerformanceSql> PerformanceSql => Set<PerformanceSql>();
+    public DbSet<PerformanceProcess> PerformanceProcesses => Set<PerformanceProcess>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
+        modelBuilder.Entity<PerformanceOperation>(entity =>
+        {
+            entity.ToTable("performance_operations");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.TraceId).HasMaxLength(32);
+            entity.Property(x => x.SourceTraceId).HasMaxLength(32);
+            entity.Property(x => x.ProcessId).HasMaxLength(128);
+            entity.Property(x => x.Module).HasMaxLength(32);
+            entity.Property(x => x.Name).HasMaxLength(128);
+            entity.Property(x => x.Status).HasMaxLength(16);
+            entity.HasIndex(x => new { x.StartedAt, x.Id });
+            entity.HasIndex(x => x.TraceId);
+            entity.HasIndex(x => x.SourceTraceId);
+            entity.HasIndex(x => x.MessageId);
+            entity.HasIndex(x => x.DeliveryJobId);
+        });
+        modelBuilder.Entity<PerformanceMinute>(entity =>
+        {
+            entity.ToTable("performance_minutes");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.ProcessId).HasMaxLength(128);
+            entity.Property(x => x.Kind).HasMaxLength(16);
+            entity.Property(x => x.Module).HasMaxLength(32);
+            entity.Property(x => x.Name).HasMaxLength(128);
+            entity.HasIndex(x => new { x.Minute, x.Kind });
+            entity.HasIndex(x => new { x.ProcessId, x.Minute, x.Kind, x.Module, x.Name }).IsUnique();
+        });
+        modelBuilder.Entity<PerformanceSql>(entity =>
+        {
+            entity.ToTable("performance_sql"); entity.HasKey(x => x.Fingerprint);
+            entity.Property(x => x.Fingerprint).HasMaxLength(64);
+            entity.Property(x => x.Provider).HasMaxLength(16);
+            entity.Property(x => x.Template).HasMaxLength(2048);
+            entity.HasIndex(x => x.LastSeenAt);
+        });
+        modelBuilder.Entity<PerformanceProcess>(entity =>
+        {
+            entity.ToTable("performance_processes"); entity.HasKey(x => x.ProcessId);
+            entity.Property(x => x.ProcessId).HasMaxLength(128);
+        });
+        modelBuilder.Entity<StoredMessage>().Property(x => x.SourceTraceId).HasMaxLength(32);
+        modelBuilder.Entity<DeliveryJob>().Property(x => x.SourceTraceId).HasMaxLength(32);
         if (Database.IsSqlite())
         {
             // SQLite 没有原生 DateTimeOffset 类型，统一转成 UTC ticks，保证三种数据库的时间比较语义接近。

@@ -13,6 +13,8 @@ public static class PermissionCodes
     public const string IamManage = "iam.manage";
     public const string DashboardRead = "dashboard.read";
     public const string AuditRead = "audit.read";
+    public const string PerformanceRead = "performance.read";
+    public const string PerformanceManage = "performance.manage";
     public const string DomainRead = "domain.read";
     public const string DomainManage = "domain.manage";
     public const string DomainQuarantineRead = "domain.quarantine.read";
@@ -274,6 +276,8 @@ public sealed class PermissionService(IDbContextFactory<MailDbContext> dbFactory
         [
             Item(PermissionCodes.DashboardRead, "概览只读", "查看后台概览。", domainScope: false),
             Item(PermissionCodes.AuditRead, "审计日志只读", "查看全局审计日志、详情和导出审计 JSON。", domainScope: false),
+            Item(PermissionCodes.PerformanceRead, "性能分析只读", "查看全局慢操作、阶段计时和脱敏 SQL。", domainScope: false),
+            Item(PermissionCodes.PerformanceManage, "性能采集管理", "修改性能采集配置及限时全量诊断。", domainScope: false),
             Item(PermissionCodes.FirewallRead, "防火墙只读", "查看防火墙规则。", domainScope: false),
             Item(PermissionCodes.FirewallManage, "防火墙管理", "创建、启停、编辑和删除防火墙规则。", domainScope: false),
             Item(PermissionCodes.QueueRead, "投递队列只读", "查看外发投递队列和原始邮件。", domainScope: false),

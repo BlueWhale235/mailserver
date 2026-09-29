@@ -278,10 +278,10 @@ namespace MailServer.Migrations.Sqlite.Migrations
                         .HasMaxLength(128)
                         .HasColumnType("TEXT");
 
-                    b.Property<long>("RulesVersion")
+                    b.Property<long>("RoutingVersion")
                         .HasColumnType("INTEGER");
 
-                    b.Property<long>("RoutingVersion")
+                    b.Property<long>("RulesVersion")
                         .HasColumnType("INTEGER");
 
                     b.Property<long>("SettingsVersion")
@@ -436,6 +436,10 @@ namespace MailServer.Migrations.Sqlite.Migrations
                     b.Property<string>("Sender")
                         .IsRequired()
                         .HasMaxLength(320)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("SourceTraceId")
+                        .HasMaxLength(32)
                         .HasColumnType("TEXT");
 
                     b.Property<string>("Status")
@@ -1488,6 +1492,13 @@ namespace MailServer.Migrations.Sqlite.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("TEXT");
 
+                    b.Property<Guid?>("AuthenticatedAccountId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("AuthenticatedAccountName")
+                        .HasMaxLength(320)
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("ContentKey")
                         .IsRequired()
                         .HasMaxLength(64)
@@ -1506,26 +1517,23 @@ namespace MailServer.Migrations.Sqlite.Migrations
                         .HasMaxLength(64)
                         .HasColumnType("TEXT");
 
-                    b.Property<Guid?>("AuthenticatedAccountId")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("AuthenticatedAccountName")
-                        .HasMaxLength(320)
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("SourceIp")
-                        .HasMaxLength(128)
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("SourceType")
-                        .HasMaxLength(32)
-                        .HasColumnType("TEXT");
-
                     b.Property<long>("ReceivedAt")
                         .HasColumnType("INTEGER");
 
                     b.Property<long>("Size")
                         .HasColumnType("INTEGER");
+
+                    b.Property<string>("SourceIp")
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("SourceTraceId")
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("SourceType")
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
 
                     b.HasKey("Id");
 
@@ -1540,12 +1548,24 @@ namespace MailServer.Migrations.Sqlite.Migrations
 
             modelBuilder.Entity("MailServer.Domain.StoredMessageRecipient", b =>
                 {
-                    b.Property<Guid>("Id").ValueGeneratedOnAdd().HasColumnType("TEXT");
-                    b.Property<Guid>("MessageId").HasColumnType("TEXT");
-                    b.Property<string>("Address").IsRequired().HasMaxLength(320).HasColumnType("TEXT");
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Address")
+                        .IsRequired()
+                        .HasMaxLength(320)
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("MessageId")
+                        .HasColumnType("TEXT");
+
                     b.HasKey("Id");
+
                     b.HasIndex("Address");
+
                     b.HasIndex("MessageId");
+
                     b.ToTable("stored_message_recipients", (string)null);
                 });
 
@@ -1743,6 +1763,218 @@ namespace MailServer.Migrations.Sqlite.Migrations
                     b.ToTable("tls_report_deliveries", (string)null);
                 });
 
+            modelBuilder.Entity("MailServer.Infrastructure.PerformanceMinute", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("Count")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("Errors")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("HistogramJson")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Kind")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("TEXT");
+
+                    b.Property<double>("MaximumMilliseconds")
+                        .HasColumnType("REAL");
+
+                    b.Property<long>("Minute")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Module")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ProcessId")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("Slow")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<double>("TotalMilliseconds")
+                        .HasColumnType("REAL");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Minute", "Kind");
+
+                    b.HasIndex("ProcessId", "Minute", "Kind", "Module", "Name")
+                        .IsUnique();
+
+                    b.ToTable("performance_minutes", (string)null);
+                });
+
+            modelBuilder.Entity("MailServer.Infrastructure.PerformanceOperation", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<int?>("Attempt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<bool>("ClockAnomaly")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<Guid?>("DeliveryJobId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("DetailBytes")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("DetailsJson")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<double>("DurationMilliseconds")
+                        .HasColumnType("REAL");
+
+                    b.Property<Guid?>("MessageId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Module")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ProcessId")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT");
+
+                    b.Property<double>("ProcessingMilliseconds")
+                        .HasColumnType("REAL");
+
+                    b.Property<double?>("QueueWaitMilliseconds")
+                        .HasColumnType("REAL");
+
+                    b.Property<double?>("RetryBackoffMilliseconds")
+                        .HasColumnType("REAL");
+
+                    b.Property<bool>("Slow")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("SourceTraceId")
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("SqlCount")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<double>("SqlMilliseconds")
+                        .HasColumnType("REAL");
+
+                    b.Property<long>("StartedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("TraceId")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.Property<bool>("Truncated")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("DeliveryJobId");
+
+                    b.HasIndex("MessageId");
+
+                    b.HasIndex("SourceTraceId");
+
+                    b.HasIndex("TraceId");
+
+                    b.HasIndex("StartedAt", "Id");
+
+                    b.ToTable("performance_operations", (string)null);
+                });
+
+            modelBuilder.Entity("MailServer.Infrastructure.PerformanceProcess", b =>
+                {
+                    b.Property<string>("ProcessId")
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("BudgetBytes")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("BufferBytes")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("DroppedAggregates")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("DroppedOperations")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("LastSeenAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<bool>("StorageUnavailable")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("TruncatedOperations")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("ProcessId");
+
+                    b.ToTable("performance_processes", (string)null);
+                });
+
+            modelBuilder.Entity("MailServer.Infrastructure.PerformanceSql", b =>
+                {
+                    b.Property<string>("Fingerprint")
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("LastSeenAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Provider")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Template")
+                        .IsRequired()
+                        .HasMaxLength(2048)
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Fingerprint");
+
+                    b.HasIndex("LastSeenAt");
+
+                    b.ToTable("performance_sql", (string)null);
+                });
+
             modelBuilder.Entity("MailServer.Domain.DeliveryAttempt", b =>
                 {
                     b.HasOne("MailServer.Domain.DeliveryJob", "DeliveryJob")
@@ -1909,16 +2141,6 @@ namespace MailServer.Migrations.Sqlite.Migrations
                     b.Navigation("Message");
                 });
 
-            modelBuilder.Entity("MailServer.Domain.StoredMessageRecipient", b =>
-                {
-                    b.HasOne("MailServer.Domain.StoredMessage", "Message")
-                        .WithMany()
-                        .HasForeignKey("MessageId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-                    b.Navigation("Message");
-                });
-
             modelBuilder.Entity("MailServer.Domain.QuarantineRecord", b =>
                 {
                     b.HasOne("MailServer.Domain.MailDomain", "Domain")
@@ -1973,6 +2195,17 @@ namespace MailServer.Migrations.Sqlite.Migrations
                         .IsRequired();
 
                     b.Navigation("Domain");
+                });
+
+            modelBuilder.Entity("MailServer.Domain.StoredMessageRecipient", b =>
+                {
+                    b.HasOne("MailServer.Domain.StoredMessage", "Message")
+                        .WithMany()
+                        .HasForeignKey("MessageId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Message");
                 });
 
             modelBuilder.Entity("MailServer.Domain.TaskExecution", b =>

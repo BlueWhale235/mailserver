@@ -266,6 +266,25 @@ app.Use(async (context, next) =>
 
     await next();
 });
+app.Use(async (context, next) =>
+{
+    if (!context.Request.Path.StartsWithSegments("/api/v1")
+        || context.Request.Path.StartsWithSegments("/api/v1/operations/performance"))
+    {
+        using var suppressed = PerformanceTelemetry.Suppress();
+        await next();
+        return;
+    }
+    var route = (context.GetEndpoint() as RouteEndpoint)?.RoutePattern.RawText ?? "unmatched";
+    using var operation = PerformanceTelemetry.Operation("api", context.Request.Method + " " + route);
+    try
+    {
+        await next();
+        if (context.Response.StatusCode >= 500) operation?.SetStatus("error");
+        else if (context.Response.StatusCode >= 400) operation?.SetStatus("rejected");
+    }
+    catch (Exception error) { operation?.Fail(error); throw; }
+});
 app.UseAuthentication();
 app.UseAuthorization();
 app.Use(async (context, next) =>
@@ -358,6 +377,7 @@ app.MapPost("/api/v1/auth/token", async (
 
 var api = app.MapGroup("/api/v1").RequireAuthorization("admin")
     .AddEndpointFilterFactory(RequiredInputValidation.Create);
+api.MapPerformanceEndpoints();
 
 api.MapGet("/overview", async (
     AdminApplicationService administration,

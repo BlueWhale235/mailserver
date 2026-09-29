@@ -371,6 +371,7 @@ public sealed class MailboxFolderDeletionJob
 
 public sealed class StoredMessage
 {
+    public string? SourceTraceId { get; set; }
     public Guid Id { get; set; } = Guid.NewGuid();
     public required string ContentKey { get; set; }
     public required string EnvelopeFrom { get; set; }
@@ -519,6 +520,7 @@ public sealed class SentCopyJob
 
 public sealed class DeliveryJob
 {
+    public string? SourceTraceId { get; set; }
     public Guid Id { get; set; } = Guid.NewGuid();
     public Guid MessageId { get; set; }
     public StoredMessage Message { get; set; } = null!;

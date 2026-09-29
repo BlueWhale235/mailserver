@@ -88,6 +88,7 @@ public sealed class InboundMessageService(
         CancellationToken cancellationToken)
     {
         using var ruleEvaluation = MailRuleService.BeginEvaluationScope();
+        using var performance = PerformanceTelemetry.Operation("smtp", "message.accept");
         logger.LogInformation(
             "Inbound message received from {RemoteAddress}: sender={Sender}, recipientCount={RecipientCount}, authenticatedUser={AuthenticatedUser}, helo={HeloName}.",
             envelope.RemoteAddress,
@@ -123,6 +124,7 @@ public sealed class InboundMessageService(
                 ReceivedAt = receivedAt
             };
             db.Messages.Add(storedMessage);
+            PerformanceTelemetry.Resource(messageId: storedMessage.Id);
             foreach (var address in envelope.Recipients.Distinct(StringComparer.OrdinalIgnoreCase))
                 db.MessageRecipients.Add(new StoredMessageRecipient { Message = storedMessage, Address = address });
 
@@ -235,6 +237,7 @@ public sealed class InboundMessageService(
         }
         catch (Exception failure)
         {
+            performance?.Fail(failure);
             // 只要事务失败，就尝试删除还没有任何数据库引用的内容文件，避免孤儿附件堆积。
             try
             {
@@ -253,6 +256,7 @@ public sealed class InboundMessageService(
         string contentKey,
         CancellationToken cancellationToken)
     {
+        using var performance = PerformanceTelemetry.Stage("mime.parse");
         await using var parseStream = await contentStore.OpenReadAsync(contentKey, cancellationToken);
         try
         {
@@ -382,6 +386,7 @@ public sealed class InboundMessageService(
         DeliveryCounters counters,
         CancellationToken cancellationToken)
     {
+        using var performance = PerformanceTelemetry.Stage("mailbox.deliver-local");
         if (account.UsedBytes + descriptor.Size > account.QuotaBytes)
             throw new MailboxQuotaExceededException($"{account.LocalPart}@{account.Domain.Name}");
         if (account.Domain.UsedBytes + descriptor.Size > account.Domain.QuotaBytes)
@@ -635,6 +640,7 @@ public sealed class InboundMessageService(
         IReadOnlyList<string> recipients,
         CancellationToken cancellationToken)
     {
+        using var performance = PerformanceTelemetry.Stage("routing.expand");
         var result = new List<ExpandedRecipient>();
         foreach (var rawRecipient in recipients)
         {

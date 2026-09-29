@@ -46,9 +46,16 @@ public static class DependencyInjection
         services.AddHttpContextAccessor();
         services.AddSingleton<DeliveryNotificationService>();
         services.AddSingleton<AuditStampInterceptor>();
+        services.AddSingleton<PerformanceCollector>();
+        services.AddSingleton<PerformanceSqlInterceptor>();
+        services.AddSingleton<PerformanceConnectionInterceptor>();
+        services.AddSingleton<PerformanceTransactionInterceptor>();
+        services.AddHostedService<PerformanceStorage>();
         services.AddPooledDbContextFactory<MailDbContext>((provider, options) =>
         {
             options.AddInterceptors(provider.GetRequiredService<AuditStampInterceptor>());
+            options.AddInterceptors(provider.GetRequiredService<PerformanceSqlInterceptor>());
+            options.AddInterceptors(provider.GetRequiredService<PerformanceConnectionInterceptor>(), provider.GetRequiredService<PerformanceTransactionInterceptor>());
             var migrationsAssembly = database.Provider.MigrationsAssemblyName();
             switch (database.Provider)
             {

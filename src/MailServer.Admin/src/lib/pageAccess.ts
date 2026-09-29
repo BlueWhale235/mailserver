@@ -36,7 +36,8 @@ export const adminPages: AdminPageDefinition[] = [
   { routeName: 'account-create', path: '/domains/:id/accounts/new', title: '新建账号', icon: 'mdi-account-plus-outline', accessAny: [routeDomainAccess('domain.account.manage')] },
   { routeName: 'account-settings', path: '/domains/:id/accounts/:accountId', title: '账号配置', icon: 'mdi-account-cog-outline', accessAny: [routeDomainAccess('domain.account.read'), routeDomainAccess('domain.alias.read')] },
   { routeName: 'delivery', path: '/delivery', title: '投递', icon: 'mdi-send-outline', accessAny: [systemAccess('queue.read')], primary: true, searchable: true },
-  { routeName: 'operations', path: '/operations', title: '运维中心', icon: 'mdi-tools', accessAny: [systemAccess('operations.mail.read'), systemAccess('settings.read'), systemAccess('task.read')], primary: true, searchable: true },
+  { routeName: 'operations', path: '/operations', title: '运维中心', icon: 'mdi-tools', accessAny: [systemAccess('operations.mail.read'), systemAccess('settings.read'), systemAccess('task.read'), systemAccess('performance.read')], primary: true, searchable: true },
+  { routeName: 'performance', path: '/operations/performance', title: '性能分析', icon: 'mdi-chart-timeline-variant', accessAny: [systemAccess('performance.read')], searchable: true },
   {
     routeName: 'security', path: '/security', title: '邮件安全', icon: 'mdi-shield-check-outline',
     accessAny: [systemAccess('firewall.read'), anyDomainAccess('domain.quarantine.read')], primary: true, searchable: true,

@@ -358,6 +358,11 @@ public sealed partial class ImapServerService(
         bool isTls,
         CancellationToken cancellationToken)
     {
+        using var performance = command == "IDLE" ? null : PerformanceTelemetry.Operation("imap",
+            command is "FETCH" or "SEARCH" or "APPEND" or "STORE" or "COPY" or "MOVE" or "EXPUNGE" or "SELECT"
+                or "EXAMINE" or "LIST" or "LSUB" or "STATUS" or "LOGIN" or "AUTHENTICATE" or "STARTTLS"
+                or "NOOP" or "LOGOUT" or "CREATE" or "DELETE" or "RENAME" or "SUBSCRIBE" or "UNSUBSCRIBE"
+                or "CLOSE" or "UNSELECT" or "CAPABILITY" or "CHECK" ? (useUid ? "UID " : "") + command : "OTHER");
         var peer = IpFirewallRules.TryParseRemoteAddress(remote);
         if (protection is not null && peer is not null && state.AccountId is null
             && (command is "LOGIN" or "AUTHENTICATE")
@@ -382,6 +387,7 @@ public sealed partial class ImapServerService(
         }
         catch (CredentialRejectedException exception)
         {
+            performance?.SetStatus("rejected");
             var blocked = protection is not null && peer is not null
                 && protection.RecordAuthFailure(ProtectedLoginProtocol.Imap, peer, DateTimeOffset.UtcNow);
             await connection.WriteLineAsync($"{tag} NO {Quote(exception.Message)}", cancellationToken);
@@ -393,10 +399,12 @@ public sealed partial class ImapServerService(
         }
         catch (KeyNotFoundException exception)
         {
+            performance?.SetStatus("rejected");
             await connection.WriteLineAsync($"{tag} NO {Quote(exception.Message)}", cancellationToken);
         }
         catch (FormatException exception)
         {
+            performance?.SetStatus("rejected");
             logger.LogInformation(
                 "IMAP command {Command} from {Remote} was rejected as malformed: {Message}; argumentLength={ArgumentLength}, hasLiteralMarker={HasLiteralMarker}, hasUtf8Wrapper={HasUtf8Wrapper}.",
                 command,
@@ -409,12 +417,16 @@ public sealed partial class ImapServerService(
         }
         catch (InvalidDataException exception)
         {
+            performance?.SetStatus("rejected");
             await connection.WriteLineAsync($"{tag} BAD {Quote(exception.Message)}", cancellationToken);
         }
         catch (InvalidOperationException exception)
         {
+            performance?.Fail(exception);
             await connection.WriteLineAsync($"{tag} NO {Quote(exception.Message)}", cancellationToken);
         }
+
+        catch (Exception error) { performance?.Fail(error); throw; }
 
         return true;
     }
@@ -1302,7 +1314,7 @@ public sealed partial class ImapServerService(
                     {
                         try
                         {
-                            message = await MimeMessage.LoadAsync(body, cancellationToken);
+                            message = await PerformanceTelemetry.MeasureAsync("mime.parse", () => MimeMessage.LoadAsync(body, cancellationToken));
                         }
                         catch (Exception exception) when (exception is FormatException or InvalidOperationException or IOException)
                         {
@@ -1431,6 +1443,7 @@ public sealed partial class ImapServerService(
         IReadOnlyList<ImapFetchResponsePart> parts,
         CancellationToken cancellationToken)
     {
+        using var performance = PerformanceTelemetry.Stage("imap.response", "wait");
         await connection.WriteAsync($"* {sequence} FETCH (", cancellationToken);
         for (var index = 0; index < parts.Count; index++)
         {
@@ -2528,6 +2541,7 @@ internal sealed class ImapConnection(Stream stream, TimeSpan timeout, long maxim
 
     public async Task<Stream> ReadLiteralAsync(long length, CancellationToken cancellationToken)
     {
+        using var performance = PerformanceTelemetry.Stage("imap.literal-upload", "wait");
         if (length < 0 || length > maximumLiteralBytes)
             throw new InvalidDataException($"Literal exceeds the {maximumLiteralBytes} byte limit.");
         var path = Path.Combine(Path.GetTempPath(), $"mailserver-imap-{Guid.NewGuid():N}.tmp");

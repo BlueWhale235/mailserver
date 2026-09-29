@@ -54,7 +54,7 @@ public sealed class DirectMxTransport(
         try
         {
             // MX 解析失败通常是临时性 DNS 问题；没有 MX 时按 SMTP 标准回退到域名本身。
-            var response = await lookupClient.QueryAsync(domain, QueryType.MX, cancellationToken: cancellationToken);
+            var response = await PerformanceTelemetry.MeasureAsync("dns.mx", () => lookupClient.QueryAsync(domain, QueryType.MX, cancellationToken: cancellationToken));
             mxDnssecAuthenticated = transportSecurity.IsTrustedDnssecResponse(response);
             var mxRecords = response.Answers.MxRecords().ToArray();
             if (mxRecords.Any(x => x.Exchange.Value == "."))
@@ -173,6 +173,8 @@ public sealed class DirectMxTransport(
                     ? await (relay ?? throw new IOException("Relay process is not available."))
                         .OpenOutboundAsync(host, cancellationToken)
                     : null;
+                using (PerformanceTelemetry.Stage("smtp.connect-and-tls"))
+                {
                 if (relayConnection is not null)
                 {
                     await client.ConnectAsync(relayConnection.Stream, host, DeliveryPort, deliverySecurity, cancellationToken);
@@ -184,11 +186,12 @@ public sealed class DirectMxTransport(
                         client, host, DeliveryPort, deliverySecurity,
                         profile.SourceAddresses, cancellationToken)).ToString();
                 }
-                var response = await client.SendAsync(
+                }
+                var response = await PerformanceTelemetry.MeasureAsync("smtp.send-and-peer-response", () => client.SendAsync(
                     message,
                     MailboxAddress.Parse(job.Sender),
                     [MailboxAddress.Parse(job.Recipient)],
-                    cancellationToken);
+                    cancellationToken));
                 var tlsProtocol = client.IsSecure ? client.SslProtocol.ToString() : null;
                 var tlsCipherSuite = client.IsSecure ? client.SslCipherSuite.ToString() : null;
                 await client.DisconnectAsync(true, cancellationToken);
@@ -372,6 +375,7 @@ internal static class OutboundMessage
         SrsService? srs,
         CancellationToken cancellationToken)
     {
+        using var performance = PerformanceTelemetry.Stage("mime.parse-and-sign");
         var message = await MimeMessage.LoadAsync(content, cancellationToken);
         var hasSenderDomain = AddressParser.TrySplit(sender, out _, out var domainName);
         var hasForwardingTrace = job?.OriginRuleId is not null && job.ForwardDepth > 0 && srs is not null;

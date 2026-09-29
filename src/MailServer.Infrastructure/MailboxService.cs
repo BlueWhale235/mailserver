@@ -336,6 +336,7 @@ public sealed partial class MailboxService(
     public async Task<IMailboxSelectionSnapshot> CreateFetchSnapshotAsync(
         Guid mailboxId, string sequenceSet, bool useUid, CancellationToken cancellationToken)
     {
+        using var performance = PerformanceTelemetry.Stage("mailbox.snapshot");
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
         var baseQuery = db.MailboxMessages.AsNoTracking().Where(x => x.MailboxId == mailboxId);

@@ -143,6 +143,7 @@ onMounted(() => {
 
 <template>
   <PageHeader title="运维中心" description="查询现存邮件、服务状态和维护检查结果" />
+  <v-btn v-if="auth.can('performance.read')" to="/operations/performance" prepend-icon="mdi-chart-timeline-variant" class="mb-4">性能分析</v-btn>
   <v-tabs :model-value="tab" class="mb-5" @update:model-value="selectTab(String($event))">
     <v-tab v-if="canMail" value="mail">邮件查询</v-tab>
     <v-tab v-if="canStatus" value="status">服务状态</v-tab>

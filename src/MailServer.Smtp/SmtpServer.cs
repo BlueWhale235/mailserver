@@ -328,6 +328,9 @@ public sealed class SmtpServerService(
                     var separator = line.IndexOf(' ');
                     var command = (separator < 0 ? line : line[..separator]).ToUpperInvariant();
                     var arguments = separator < 0 ? string.Empty : line[(separator + 1)..].Trim();
+                    using var operation = PerformanceTelemetry.Operation("smtp", command is "EHLO" or "HELO" or "MAIL" or "RCPT" or "DATA" or "AUTH" or "STARTTLS" or "QUIT" or "RSET" or "NOOP" ? command : "UNKNOWN");
+                    try
+                    {
                     switch (command)
                     {
                         case "EHLO":
@@ -817,6 +820,8 @@ public sealed class SmtpServerService(
                             await connection.ReplyAsync("502 5.5.1 Command not implemented", serverCancellationToken);
                             break;
                     }
+                    }
+                    catch (Exception error) { operation?.Fail(error); throw; }
                 }
             }
             catch (TimeoutException)
@@ -1727,6 +1732,7 @@ internal sealed class SmtpConnection(Stream stream, TimeSpan timeout, long maxim
 
     public async Task<Stream> ReadDataAsync(CancellationToken cancellationToken)
     {
+        using var performance = PerformanceTelemetry.Stage("smtp.upload", "wait");
         var path = Path.Combine(Path.GetTempPath(), $"mailserver-{Guid.NewGuid():N}.eml");
         try
         {
@@ -1830,6 +1836,9 @@ internal sealed class SmtpConnection(Stream stream, TimeSpan timeout, long maxim
 
     public async Task ReplyAsync(string response, CancellationToken cancellationToken)
     {
+        using var performance = PerformanceTelemetry.Stage("smtp.response", "wait");
+        if (response.StartsWith('4')) PerformanceTelemetry.Status("error");
+        else if (response.StartsWith('5')) PerformanceTelemetry.Status("rejected");
         var bytes = Encoding.ASCII.GetBytes(response + "\r\n");
         await _stream.WriteAsync(bytes, cancellationToken);
         await _stream.FlushAsync(cancellationToken);

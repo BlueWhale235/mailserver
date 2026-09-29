@@ -98,9 +98,15 @@ public sealed class DeliveryWorker(
     {
         using (permit)
         {
+            using var performance = PerformanceTelemetry.Operation("worker", "delivery.attempt", lease.Job.SourceTraceId ?? lease.Job.Message.SourceTraceId);
+            PerformanceTelemetry.Resource(lease.Job.Message.Id, lease.Job.Id, lease.Job.Attempts);
+            if (performance is not null)
+            {
+                performance.SetQueueTimes(lease.QueueWaitMilliseconds, lease.RetryBackoffMilliseconds);
+            }
             try { await ProcessAsync(lease, options, token); }
-            catch (OperationCanceledException) when (token.IsCancellationRequested) { }
-            catch (Exception error) { logger.LogError(error, "Delivery task {JobId} failed without stopping the worker.", lease.Id); }
+            catch (OperationCanceledException error) when (token.IsCancellationRequested) { performance?.Fail(error); }
+            catch (Exception error) { performance?.Fail(error); logger.LogError(error, "Delivery task {JobId} failed without stopping the worker.", lease.Id); }
         }
     }
 
@@ -164,6 +170,7 @@ public sealed class DeliveryWorker(
             }
 
             DeliveryCompletion completion;
+            if (!result.Succeeded) PerformanceTelemetry.Status("error");
             if (Volatile.Read(ref leaseLost) == 1) return;
             try
             {

@@ -22,6 +22,7 @@ const router = createRouter({
         { path: 'domains/:id/:tab?/:section?', name: 'domain-detail', component: () => import('./views/DomainDetailView.vue'), beforeEnter: to => ['accounts', 'aliases'].includes(String(to.params.tab)) ? { name: 'account-directory', params: { id: to.params.id }, query: to.query } : true },
         { path: 'delivery', name: 'delivery', component: () => import('./views/DeliveryView.vue') },
         { path: 'operations', name: 'operations', component: () => import('./views/OperationsView.vue') },
+        { path: 'operations/performance', name: 'performance', component: () => import('./views/PerformanceView.vue') },
         { path: 'security', name: 'security', component: () => import('./views/SecurityView.vue') },
         { path: 'security/quarantine', name: 'quarantine', component: () => import('./views/QuarantineView.vue') },
         { path: 'system', name: 'system', component: () => import('./views/SystemView.vue') },

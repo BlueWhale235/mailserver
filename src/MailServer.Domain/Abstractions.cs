@@ -185,6 +185,8 @@ public sealed record DeliveryLease(
     int Attempt,
     DateTimeOffset LeaseUntil)
 {
+    public double QueueWaitMilliseconds { get; init; }
+    public double RetryBackoffMilliseconds { get; init; }
     public Guid Id => Job.Id;
     public Guid MessageId => Job.MessageId;
     public DeliveryStatus Status => Job.Status;
