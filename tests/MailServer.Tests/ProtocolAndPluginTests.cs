@@ -2918,6 +2918,8 @@ public sealed class ProtocolAndPluginTests
 
         Assert.Equal("sales@example.com", state.Sender);
         Assert.Contains("250 2.1.0 Sender OK", stream.OutputText);
+        await using var auditDb = await scenario.Factory.CreateDbContextAsync();
+        Assert.Empty(await auditDb.AuditRecords.ToListAsync());
     }
 
     [Fact]
@@ -2962,6 +2964,8 @@ public sealed class ProtocolAndPluginTests
 
         Assert.Null(state.Sender);
         Assert.Contains("553 5.7.1 Sender address is not authorized for authenticated user", stream.OutputText);
+        await using var auditDb = await scenario.Factory.CreateDbContextAsync();
+        Assert.Empty(await auditDb.AuditRecords.ToListAsync());
 
         await scenario.Service.HandleMailFromAsync(
             connection,
@@ -3542,7 +3546,7 @@ public sealed class ProtocolAndPluginTests
             Options.Create(new SmtpServerOptions()),
             null!,
             NullLogger<SmtpServerService>.Instance);
-        return new SmtpSenderScenario(provider, service, accountId);
+        return new SmtpSenderScenario(provider, service, factory, accountId);
     }
 
     private static SmtpEndpointOptions AuthenticatedEndpoint() =>
@@ -3576,6 +3580,7 @@ public sealed class ProtocolAndPluginTests
     private sealed record SmtpSenderScenario(
         ServiceProvider Provider,
         SmtpServerService Service,
+        IDbContextFactory<MailDbContext> Factory,
         Guid AccountId)
     {
         public SmtpSessionState AuthenticatedState() =>

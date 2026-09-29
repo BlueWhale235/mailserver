@@ -1312,9 +1312,7 @@ public sealed class CoreTests
             var delivered = await verification.MailboxMessages.Include(x => x.Message).SingleAsync();
             Assert.Equal(1, delivered.Uid);
             Assert.Equal("sender@example.net", delivered.Message.EnvelopeFrom);
-            var inspectionAudit = await verification.AuditRecords.SingleAsync(x => x.Action == "smtp.inbound.mime-inspection");
-            Assert.Contains("authenticationResults=1", inspectionAudit.Detail);
-            Assert.Contains("dkim=1", inspectionAudit.Detail);
+            Assert.Empty(await verification.AuditRecords.ToListAsync());
         }
         finally
         {
@@ -1323,7 +1321,7 @@ public sealed class CoreTests
     }
 
     [Fact]
-    public async Task InboundDeliveryAcceptsBodyOnlyAndAuditsDuplicateHeadersSpoofingAndRetries()
+    public async Task InboundDeliveryAcceptsBodyOnlyAndDuplicateHeadersWithoutProtocolAudit()
     {
         var root = Path.Combine(Path.GetTempPath(), $"mailserver-edge-31-40-{Guid.NewGuid():N}");
         try
@@ -1371,9 +1369,7 @@ public sealed class CoreTests
             await using var verification = await factory.CreateDbContextAsync();
             Assert.Equal(3, await verification.Messages.CountAsync());
             Assert.Equal(3, await verification.MailboxMessages.CountAsync());
-            Assert.Contains(await verification.AuditRecords.ToListAsync(), x => x.Action == "smtp.inbound.duplicate-header");
-            Assert.Contains(await verification.AuditRecords.ToListAsync(), x => x.Action == "smtp.inbound.local-domain-spoof");
-            Assert.Contains(await verification.AuditRecords.ToListAsync(), x => x.Action == "smtp.inbound.duplicate-suspected");
+            Assert.Empty(await verification.AuditRecords.ToListAsync());
         }
         finally
         {

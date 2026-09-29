@@ -328,19 +328,6 @@ public sealed class QuotaFailureTests
     }
 
     [Fact]
-    public async Task MimeInspectionDoesNotHoldTheInboundDatabaseTransaction()
-    {
-        await using var env = await Environment.CreateAsync(configure: services =>
-            services.AddSingleton<IMimeInspectionService>(provider => new WritingInspectionService(
-                provider.GetRequiredService<IDbContextFactory<MailDbContext>>())));
-        await using var content = Content();
-        var accepted = await env.Inbound.AcceptAsync(Envelope(), content, CancellationToken.None);
-        Assert.Equal(1, accepted.LocalDeliveries);
-        await using var db = await env.Factory.CreateDbContextAsync();
-        Assert.Single(await db.MailboxMessages.ToListAsync());
-    }
-
-    [Fact]
     public void DatabaseConflictClassificationDoesNotTreatQuotaOrOtherErrorsAsTransient()
     {
         Assert.True(DatabaseFailurePolicy.IsConcurrencyConflict(new DbUpdateException("conflict", new SqliteException("busy", 5))));
@@ -514,23 +501,6 @@ public sealed class QuotaFailureTests
         public bool IsEnabled(LogLevel logLevel) => true;
         public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) =>
             Entries.Add((logLevel, formatter(state, exception)));
-    }
-
-    private sealed class WritingInspectionService(IDbContextFactory<MailDbContext> factory) : IMimeInspectionService
-    {
-        private readonly MimeInspectionService _inner = new();
-
-        public MimeInspectionResult Inspect(Stream content)
-        {
-            using var db = factory.CreateDbContext();
-            db.Database.ExecuteSqlRaw("UPDATE mail_domains SET Name = Name WHERE Name = 'origin.test'");
-            return _inner.Inspect(content);
-        }
-
-        public MimeInspectionResult Inspect(byte[] raw) => _inner.Inspect(raw);
-        public string ExtractSearchableText(byte[] raw) => _inner.ExtractSearchableText(raw);
-        public string SanitizeFileName(string? fileName) => _inner.SanitizeFileName(fileName);
-        public string SanitizeHeaderPhrase(string value) => _inner.SanitizeHeaderPhrase(value);
     }
 
     private sealed class ConflictInboundService : IInboundMessageService

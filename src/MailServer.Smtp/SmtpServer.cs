@@ -9,7 +9,6 @@ using MailServer.Infrastructure;
 using MailServer.PluginSdk;
 using MailServer.PluginSdk.Security;
 using MailServer.PluginSdk.Smtp;
-using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using MimeKit;
 
@@ -942,12 +941,6 @@ public sealed class SmtpServerService(
                     remote,
                     sender,
                     state.AuthenticatedUser ?? string.Empty);
-                await WriteSecurityAuditAsync(
-                    "smtp.sender.rejected",
-                    $"sender:{sender}",
-                    state.AuthenticatedUser ?? "anonymous",
-                    remote,
-                    cancellationToken);
                 await connection.ReplyAsync("553 5.7.1 Sender address is not authorized for authenticated user", cancellationToken);
                 return;
             }
@@ -985,12 +978,6 @@ public sealed class SmtpServerService(
             remote,
             sender,
             state.AuthenticatedUser ?? string.Empty);
-        await WriteSecurityAuditAsync(
-            "smtp.sender.accepted",
-            $"sender:{sender}",
-            state.AuthenticatedUser ?? "anonymous",
-            remote,
-            cancellationToken);
         await connection.ReplyAsync("250 2.1.0 Sender OK", cancellationToken);
     }
 
@@ -1276,12 +1263,6 @@ public sealed class SmtpServerService(
         }
         state.AuthenticatedAccountId = accountId.Value;
         state.AuthenticatedUser = AddressParserForSmtp.Normalize(result.Identity);
-        await WriteSecurityAuditAsync(
-            "smtp.auth.succeeded",
-            $"account:{state.AuthenticatedUser}",
-            state.AuthenticatedUser,
-            remote,
-            cancellationToken);
         await connection.ReplyAsync("235 2.7.0 Authentication successful", cancellationToken);
         return true;
     }
@@ -1365,12 +1346,6 @@ public sealed class SmtpServerService(
                 "SMTP authentication failed for {UserName} from {Remote}.",
                 userName,
                 remote);
-            await WriteSecurityAuditAsync(
-                "smtp.auth.failed",
-                $"account:{AddressParserForSmtp.TryNormalizeForAudit(userName)}",
-                "anonymous",
-                remote,
-                cancellationToken);
             await connection.ReplyAsync("535 5.7.8 Authentication credentials invalid", cancellationToken);
             return false;
         }
@@ -1381,35 +1356,8 @@ public sealed class SmtpServerService(
             "SMTP authentication succeeded for {UserName} from {Remote}.",
             state.AuthenticatedUser,
             remote);
-        await WriteSecurityAuditAsync(
-            "smtp.auth.succeeded",
-            $"account:{state.AuthenticatedUser}",
-            state.AuthenticatedUser,
-            remote,
-            cancellationToken);
         await connection.ReplyAsync("235 2.7.0 Authentication successful", cancellationToken);
         return true;
-    }
-
-    private async Task WriteSecurityAuditAsync(
-        string action,
-        string resource,
-        string actor,
-        string remote,
-        CancellationToken cancellationToken)
-    {
-        using var scope = scopeFactory.CreateScope();
-        var factory = scope.ServiceProvider.GetService<IDbContextFactory<MailDbContext>>();
-        if (factory is null) return;
-        await using var db = await factory.CreateDbContextAsync(cancellationToken);
-        db.AuditRecords.Add(new AuditRecord
-        {
-            Actor = actor,
-            Action = action,
-            Resource = resource,
-            RemoteAddress = remote
-        });
-        await db.SaveChangesAsync(cancellationToken);
     }
 
     private static string DecodeBase64Utf8(string encoded) =>
