@@ -101,7 +101,7 @@ public sealed class InboundMessageService(
             var mimeMessage = MailRuleService.GetParsedMessage(content)
                 ?? await LoadMimeMessageWithFallbackAsync(descriptor.Key, cancellationToken);
 
-            const int maximumAttempts = 5;
+            const int maximumAttempts = 8;
             for (var attempt = 1; ; attempt++)
             {
                 try
@@ -244,8 +244,8 @@ public sealed class InboundMessageService(
                     && !cancellationToken.IsCancellationRequested
                     && DatabaseFailurePolicy.IsMySqlRetryableConflict(conflict))
                 {
-                    var delay = TimeSpan.FromMilliseconds(attempt * Random.Shared.Next(25, 76));
-                    logger.LogWarning(
+                    var delay = TimeSpan.FromMilliseconds(attempt * Random.Shared.Next(50, 101));
+                    logger.LogInformation(
                         "Inbound database transaction conflicted; retrying attempt {Attempt} of {MaximumAttempts} after {DelayMilliseconds} ms.",
                         attempt + 1, maximumAttempts, delay.TotalMilliseconds);
                     using (PerformanceTelemetry.Stage("database.retry-conflict"))
