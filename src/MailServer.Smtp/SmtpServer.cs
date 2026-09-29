@@ -1704,33 +1704,25 @@ internal static class AddressParserForSmtp
 
 internal sealed class SmtpConnection(Stream stream, TimeSpan timeout, long maximumMessageBytes) : IAsyncDisposable
 {
+    private static readonly byte[] CrLf = "\r\n"u8.ToArray();
     private Stream _stream = stream;
-    private readonly byte[] _singleByte = new byte[1];
+    private readonly BufferedProtocolReader _reader = new(stream);
 
-    public void Attach(Stream stream) => _stream = stream;
-    public Stream Detach() => _stream;
+    public void Attach(Stream stream)
+    {
+        _stream = stream;
+        _reader.Attach(stream);
+    }
+    public Stream Detach()
+    {
+        _reader.DiscardBufferedPlaintext();
+        return _stream;
+    }
 
     public async Task<string?> ReadLineAsync(CancellationToken cancellationToken)
     {
-        var bytes = new List<byte>(128);
-        while (bytes.Count <= 8192)
-        {
-            var read = await _stream.ReadAsync(_singleByte, cancellationToken).AsTask().WaitAsync(timeout, cancellationToken);
-            if (read == 0)
-            {
-                return bytes.Count == 0 ? null : Encoding.UTF8.GetString(bytes.ToArray());
-            }
-
-            if (_singleByte[0] == (byte)'\n')
-            {
-                if (bytes.Count > 0 && bytes[^1] == (byte)'\r') bytes.RemoveAt(bytes.Count - 1);
-                return Encoding.UTF8.GetString(bytes.ToArray());
-            }
-
-            bytes.Add(_singleByte[0]);
-        }
-
-        throw new InvalidDataException("SMTP line exceeds 8192 bytes.");
+        var line = await _reader.ReadLineAsync(8192, false, timeout, cancellationToken);
+        return line is null ? null : Encoding.UTF8.GetString(line.Value.Span);
     }
 
     public async Task<Stream> ReadDataAsync(CancellationToken cancellationToken)
@@ -1747,10 +1739,10 @@ internal sealed class SmtpConnection(Stream stream, TimeSpan timeout, long maxim
                 var receivedHeaders = 0;
                 while (true)
                 {
-                    var line = await ReadDataLineAsync(cancellationToken);
-                    if (line is null) throw new EndOfStreamException("SMTP DATA ended before the terminator.");
-                    if (line.AsSpan().SequenceEqual("."u8)) break;
-                    if (line.Length >= 2 && line[0] == (byte)'.' && line[1] == (byte)'.')
+                    var line = await ReadDataLineAsync(cancellationToken)
+                        ?? throw new EndOfStreamException("SMTP DATA ended before the terminator.");
+                    if (line.Span.SequenceEqual("."u8)) break;
+                    if (line.Length >= 2 && line.Span[0] == (byte)'.' && line.Span[1] == (byte)'.')
                     {
                         line = line[1..];
                     }
@@ -1765,7 +1757,7 @@ internal sealed class SmtpConnection(Stream stream, TimeSpan timeout, long maxim
                         {
                             if (!TryValidateHeaderLine(line, hasHeader, out var fieldName))
                             {
-                                if (!hasHeader && line[0] is not ((byte)' ' or (byte)'\t'))
+                                if (!hasHeader && line.Span[0] is not ((byte)' ' or (byte)'\t'))
                                 {
                                     inHeaders = false;
                                 }
@@ -1799,7 +1791,7 @@ internal sealed class SmtpConnection(Stream stream, TimeSpan timeout, long maxim
                         throw new InvalidDataException($"Message exceeds the {maximumMessageBytes} byte limit.");
                     }
                     await output.WriteAsync(line, cancellationToken);
-                    await output.WriteAsync("\r\n"u8.ToArray(), cancellationToken);
+                    await output.WriteAsync(CrLf, cancellationToken);
                 }
             }
 
@@ -1812,38 +1804,13 @@ internal sealed class SmtpConnection(Stream stream, TimeSpan timeout, long maxim
         }
     }
 
-    private async Task<byte[]?> ReadDataLineAsync(CancellationToken cancellationToken)
-    {
-        var bytes = new List<byte>(256);
-        while (bytes.Count <= 65_536)
-        {
-            var read = await _stream.ReadAsync(_singleByte, cancellationToken).AsTask().WaitAsync(timeout, cancellationToken);
-            if (read == 0)
-            {
-                if (bytes.Count == 0) return null;
-                throw new EndOfStreamException("SMTP DATA ended before a complete CRLF line.");
-            }
+    private ValueTask<ReadOnlyMemory<byte>?> ReadDataLineAsync(CancellationToken cancellationToken) =>
+        _reader.ReadLineAsync(65_536, true, timeout, cancellationToken);
 
-            if (_singleByte[0] == (byte)'\n')
-            {
-                if (bytes.Count == 0 || bytes[^1] != (byte)'\r')
-                    throw new InvalidDataException("SMTP DATA contains an invalid line ending.");
-                bytes.RemoveAt(bytes.Count - 1);
-                return bytes.ToArray();
-            }
-            if (bytes.Count > 0 && bytes[^1] == (byte)'\r')
-                throw new InvalidDataException("SMTP DATA contains an invalid line ending.");
-
-            bytes.Add(_singleByte[0]);
-        }
-
-        throw new InvalidDataException("SMTP DATA line exceeds 65536 bytes.");
-    }
-
-    private static bool TryValidateHeaderLine(byte[] line, bool hasHeader, out string fieldName)
+    private static bool TryValidateHeaderLine(ReadOnlyMemory<byte> line, bool hasHeader, out string fieldName)
     {
         fieldName = string.Empty;
-        if (line[0] is (byte)' ' or (byte)'\t')
+        if (line.Span[0] is (byte)' ' or (byte)'\t')
         {
             if (!hasHeader)
                 return false;
@@ -1851,13 +1818,13 @@ internal sealed class SmtpConnection(Stream stream, TimeSpan timeout, long maxim
             return true;
         }
 
-        var colon = Array.IndexOf(line, (byte)':');
+        var colon = line.Span.IndexOf((byte)':');
         if (colon <= 0
-            || line.AsSpan(0, colon).IndexOfAnyExceptInRange((byte)33, (byte)126) >= 0)
+            || line.Span[..colon].IndexOfAnyExceptInRange((byte)33, (byte)126) >= 0)
         {
             return false;
         }
-        fieldName = Encoding.ASCII.GetString(line, 0, colon);
+        fieldName = Encoding.ASCII.GetString(line.Span[..colon]);
         return true;
     }
 
@@ -1868,7 +1835,11 @@ internal sealed class SmtpConnection(Stream stream, TimeSpan timeout, long maxim
         await _stream.FlushAsync(cancellationToken);
     }
 
-    public ValueTask DisposeAsync() => _stream.DisposeAsync();
+    public ValueTask DisposeAsync()
+    {
+        _reader.Dispose();
+        return _stream.DisposeAsync();
+    }
 }
 
 internal sealed class DeleteOnDisposeFileStream(string path)

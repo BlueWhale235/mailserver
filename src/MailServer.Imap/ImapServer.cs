@@ -2507,26 +2507,23 @@ internal static class ImapTokenizer
 internal sealed class ImapConnection(Stream stream, TimeSpan timeout, long maximumLiteralBytes) : IAsyncDisposable
 {
     private Stream _stream = stream;
-    private readonly byte[] _singleByte = new byte[1];
+    private readonly BufferedProtocolReader _reader = new(stream);
 
-    public Stream Detach() => _stream;
-    public void Attach(Stream stream) => _stream = stream;
+    public Stream Detach()
+    {
+        _reader.DiscardBufferedPlaintext();
+        return _stream;
+    }
+    public void Attach(Stream stream)
+    {
+        _stream = stream;
+        _reader.Attach(stream);
+    }
 
     public async Task<string?> ReadLineAsync(CancellationToken cancellationToken)
     {
-        var bytes = new List<byte>(128);
-        while (bytes.Count <= 65_536)
-        {
-            var read = await _stream.ReadAsync(_singleByte, cancellationToken).AsTask().WaitAsync(timeout, cancellationToken);
-            if (read == 0) return bytes.Count == 0 ? null : Encoding.UTF8.GetString(bytes.ToArray());
-            if (_singleByte[0] == (byte)'\n')
-            {
-                if (bytes.Count > 0 && bytes[^1] == (byte)'\r') bytes.RemoveAt(bytes.Count - 1);
-                return Encoding.UTF8.GetString(bytes.ToArray());
-            }
-            bytes.Add(_singleByte[0]);
-        }
-        throw new InvalidDataException("IMAP command line is too long.");
+        var line = await _reader.ReadLineAsync(65_536, false, timeout, cancellationToken);
+        return line is null ? null : Encoding.UTF8.GetString(line.Value.Span);
     }
 
     public async Task<Stream> ReadLiteralAsync(long length, CancellationToken cancellationToken)
@@ -2538,17 +2535,7 @@ internal sealed class ImapConnection(Stream stream, TimeSpan timeout, long maxim
         {
             await using (var output = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None, 64 * 1024, FileOptions.Asynchronous))
             {
-                var buffer = new byte[64 * 1024];
-                var remaining = length;
-                while (remaining > 0)
-                {
-                    var read = await _stream.ReadAsync(
-                        buffer.AsMemory(0, (int)Math.Min(buffer.Length, remaining)),
-                        cancellationToken).AsTask().WaitAsync(timeout, cancellationToken);
-                    if (read == 0) throw new EndOfStreamException();
-                    await output.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
-                    remaining -= read;
-                }
+                await _reader.CopyExactlyAsync(output, length, timeout, cancellationToken);
             }
 
             return new DeleteOnDisposeImapFileStream(path);
@@ -2590,7 +2577,11 @@ internal sealed class ImapConnection(Stream stream, TimeSpan timeout, long maxim
         await _stream.FlushAsync(cancellationToken);
     }
 
-    public ValueTask DisposeAsync() => _stream.DisposeAsync();
+    public ValueTask DisposeAsync()
+    {
+        _reader.Dispose();
+        return _stream.DisposeAsync();
+    }
 }
 
 internal sealed class DeleteOnDisposeImapFileStream(string path)
