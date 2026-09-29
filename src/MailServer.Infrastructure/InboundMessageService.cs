@@ -100,6 +100,7 @@ public sealed class InboundMessageService(
         {
             var mimeMessage = MailRuleService.GetParsedMessage(content)
                 ?? await LoadMimeMessageWithFallbackAsync(descriptor.Key, cancellationToken);
+            var mimeAuditDetail = await InspectMimeForAuditAsync(descriptor.Key, cancellationToken);
 
             const int maximumAttempts = 8;
             for (var attempt = 1; ; attempt++)
@@ -109,12 +110,22 @@ public sealed class InboundMessageService(
                     using var ruleEvaluation = MailRuleService.BeginEvaluationScope();
                     var receivedAt = clock.UtcNow;
                     await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
-                    // 入站分发需要在一个可串行化事务内完成，防止别名展开、配额和队列写入之间出现竞态。
-                    await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
+                    // These diagnostics do not decide delivery. Run their reads before SERIALIZABLE
+                    // so they cannot hold range locks while other messages are inserted.
                     await AuditDuplicateInboundAsync(db, envelope, descriptor, mimeMessage, receivedAt, cancellationToken);
                     await AuditLocalDomainSpoofAsync(db, envelope, cancellationToken);
                     AuditDuplicateSingletonHeaders(db, envelope, descriptor, mimeMessage);
-                    await AuditMimeInspectionAsync(db, envelope, descriptor.Key, cancellationToken);
+                    if (mimeAuditDetail is not null)
+                        db.AuditRecords.Add(new AuditRecord
+                        {
+                            Actor = envelope.AuthenticatedUser ?? "anonymous",
+                            Action = "smtp.inbound.mime-inspection",
+                            Resource = $"content:{descriptor.Key}",
+                            RemoteAddress = envelope.RemoteAddress,
+                            Detail = mimeAuditDetail
+                        });
+                    // 路由、配额、UID 和持久化仍在同一个可串行化事务内完成。
+                    await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
                     var storedMessage = new StoredMessage
                     {
                         ContentKey = descriptor.Key,
@@ -294,9 +305,7 @@ public sealed class InboundMessageService(
         }
     }
 
-    private async Task AuditMimeInspectionAsync(
-        MailDbContext db,
-        InboundEnvelope envelope,
+    private async Task<string?> InspectMimeForAuditAsync(
         string contentKey,
         CancellationToken cancellationToken)
     {
@@ -307,17 +316,10 @@ public sealed class InboundMessageService(
             && inspection.Authentication.ArcResults.Count == 0
             && inspection.Authentication.DkimSignatures.Count == 0)
         {
-            return;
+            return null;
         }
 
-        db.AuditRecords.Add(new AuditRecord
-        {
-            Actor = envelope.AuthenticatedUser ?? "anonymous",
-            Action = "smtp.inbound.mime-inspection",
-            Resource = $"content:{contentKey}",
-            RemoteAddress = envelope.RemoteAddress,
-            Detail = $"risks={string.Join(',', inspection.RiskFlags)}; authenticationResults={inspection.Authentication.AuthenticationResults.Count}; arc={inspection.Authentication.ArcResults.Count}; dkim={inspection.Authentication.DkimSignatures.Count}; attachments={inspection.Attachments.Count}"
-        });
+        return $"risks={string.Join(',', inspection.RiskFlags)}; authenticationResults={inspection.Authentication.AuthenticationResults.Count}; arc={inspection.Authentication.ArcResults.Count}; dkim={inspection.Authentication.DkimSignatures.Count}; attachments={inspection.Attachments.Count}";
     }
 
     private static async Task AuditDuplicateInboundAsync(
