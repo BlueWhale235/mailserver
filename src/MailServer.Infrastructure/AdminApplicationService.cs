@@ -322,34 +322,37 @@ public sealed class AdminApplicationService(
         var last24Hours = now.AddHours(-24);
         var domains = await db.Domains.CountAsync(x => x.DeletedAt == null, cancellationToken);
         var activeDomains = db.Domains.Where(x => x.DeletedAt == null && x.IsActive);
-        var healthyDomains = await activeDomains.CountAsync(x =>
-            db.DomainDnsChecks.Any(check => check.DomainId == x.Id && check.Status == DomainDnsCheckStatus.Healthy), cancellationToken);
-        var attentionDomains = await activeDomains.CountAsync(x =>
-            db.DomainDnsChecks.Any(check => check.DomainId == x.Id && check.Status == DomainDnsCheckStatus.Unhealthy), cancellationToken);
-        var checkedDomains = await activeDomains.CountAsync(x =>
-            db.DomainDnsChecks.Any(check => check.DomainId == x.Id
-                && (check.Status == DomainDnsCheckStatus.Healthy || check.Status == DomainDnsCheckStatus.Unhealthy)), cancellationToken);
-        var activeDomainCount = await activeDomains.CountAsync(cancellationToken);
+        var domainStatus = await activeDomains.GroupBy(_ => 1).Select(group => new
+        {
+            Active = group.Count(),
+            Healthy = group.Count(x => db.DomainDnsChecks.Any(check => check.DomainId == x.Id && check.Status == DomainDnsCheckStatus.Healthy)),
+            Attention = group.Count(x => db.DomainDnsChecks.Any(check => check.DomainId == x.Id && check.Status == DomainDnsCheckStatus.Unhealthy)),
+            Checked = group.Count(x => db.DomainDnsChecks.Any(check => check.DomainId == x.Id
+                && (check.Status == DomainDnsCheckStatus.Healthy || check.Status == DomainDnsCheckStatus.Unhealthy)))
+        }).SingleOrDefaultAsync(cancellationToken);
+        var deliveryStatus = await db.DeliveryJobs.GroupBy(_ => 1).Select(group => new
+        {
+            Pending = group.Count(x => x.Status == DeliveryStatus.Pending || x.Status == DeliveryStatus.Deferred),
+            Failed = group.Count(x => x.Status == DeliveryStatus.Failed),
+            DeliveredLast24Hours = group.Count(x => x.Status == DeliveryStatus.Delivered && x.UpdatedAt >= last24Hours),
+            FailedLast24Hours = group.Count(x => x.Status == DeliveryStatus.Failed && x.UpdatedAt >= last24Hours),
+            OldestPending = group.Where(x => x.Status == DeliveryStatus.Pending || x.Status == DeliveryStatus.Deferred)
+                .Min(x => (DateTimeOffset?)x.CreatedAt)
+        }).SingleOrDefaultAsync(cancellationToken);
         return new AdminDashboard(
             domains,
             await db.Accounts.CountAsync(cancellationToken),
             await db.Aliases.CountAsync(cancellationToken),
-            await db.DeliveryJobs.CountAsync(
-                x => x.Status == DeliveryStatus.Pending || x.Status == DeliveryStatus.Deferred,
-                cancellationToken),
-            await db.DeliveryJobs.CountAsync(x => x.Status == DeliveryStatus.Failed, cancellationToken),
+            deliveryStatus?.Pending ?? 0,
+            deliveryStatus?.Failed ?? 0,
             await db.Messages.SumAsync(x => (long?)x.Size, cancellationToken) ?? 0,
-            healthyDomains,
-            attentionDomains,
-            Math.Max(0, activeDomainCount - checkedDomains),
+            domainStatus?.Healthy ?? 0,
+            domainStatus?.Attention ?? 0,
+            Math.Max(0, (domainStatus?.Active ?? 0) - (domainStatus?.Checked ?? 0)),
             await db.DomainCertificates.CountAsync(x => x.NotAfter <= now.AddDays(30), cancellationToken),
-            await db.DeliveryJobs.CountAsync(x => x.Status == DeliveryStatus.Delivered && x.UpdatedAt >= last24Hours, cancellationToken),
-            await db.DeliveryJobs.CountAsync(x => x.Status == DeliveryStatus.Failed && x.UpdatedAt >= last24Hours, cancellationToken),
-            await db.DeliveryJobs.AsNoTracking()
-                .Where(x => x.Status == DeliveryStatus.Pending || x.Status == DeliveryStatus.Deferred)
-                .OrderBy(x => x.CreatedAt)
-                .Select(x => (DateTimeOffset?)x.CreatedAt)
-                .FirstOrDefaultAsync(cancellationToken),
+            deliveryStatus?.DeliveredLast24Hours ?? 0,
+            deliveryStatus?.FailedLast24Hours ?? 0,
+            deliveryStatus?.OldestPending,
             now);
     }
 
@@ -363,18 +366,38 @@ public sealed class AdminApplicationService(
         var bucketCount = days == 1 ? 6 : 7;
         var bucketHours = days == 1 ? 4 : 24;
         var start = now.AddDays(-days);
+        var ends = Enumerable.Range(1, 7)
+            .Select(index => index >= bucketCount ? now : start.AddHours(index * bucketHours))
+            .ToArray();
+        var messageCounts = await db.Messages.AsNoTracking()
+            .Where(x => x.ReceivedAt >= start && x.ReceivedAt < now)
+            .GroupBy(x => x.ReceivedAt < ends[0] ? 0 : x.ReceivedAt < ends[1] ? 1
+                : x.ReceivedAt < ends[2] ? 2 : x.ReceivedAt < ends[3] ? 3
+                : x.ReceivedAt < ends[4] ? 4 : x.ReceivedAt < ends[5] ? 5 : 6)
+            .Select(group => new { Bucket = group.Key, Count = group.Count() })
+            .ToDictionaryAsync(x => x.Bucket, x => x.Count, cancellationToken);
+        var attemptCounts = await db.DeliveryAttempts.AsNoTracking()
+            .Where(x => x.CreatedAt >= start && x.CreatedAt < now)
+            .GroupBy(x => x.CreatedAt < ends[0] ? 0 : x.CreatedAt < ends[1] ? 1
+                : x.CreatedAt < ends[2] ? 2 : x.CreatedAt < ends[3] ? 3
+                : x.CreatedAt < ends[4] ? 4 : x.CreatedAt < ends[5] ? 5 : 6)
+            .Select(group => new
+            {
+                Bucket = group.Key,
+                Delivered = group.Count(x => x.Succeeded),
+                TemporaryFailures = group.Count(x => !x.Succeeded && !x.PermanentFailure),
+                PermanentFailures = group.Count(x => !x.Succeeded && x.PermanentFailure)
+            })
+            .ToDictionaryAsync(x => x.Bucket, cancellationToken);
         var buckets = new List<OverviewTrafficBucket>(bucketCount);
         for (var index = 0; index < bucketCount; index++)
         {
             var from = start.AddHours(index * bucketHours);
-            var to = index == bucketCount - 1 ? now : from.AddHours(bucketHours);
-            buckets.Add(new OverviewTrafficBucket(
-                from,
-                to,
-                await db.Messages.CountAsync(x => x.ReceivedAt >= from && x.ReceivedAt < to, cancellationToken),
-                await db.DeliveryAttempts.CountAsync(x => x.CreatedAt >= from && x.CreatedAt < to && x.Succeeded, cancellationToken),
-                await db.DeliveryAttempts.CountAsync(x => x.CreatedAt >= from && x.CreatedAt < to && !x.Succeeded && !x.PermanentFailure, cancellationToken),
-                await db.DeliveryAttempts.CountAsync(x => x.CreatedAt >= from && x.CreatedAt < to && !x.Succeeded && x.PermanentFailure, cancellationToken)));
+            var to = ends[index];
+            attemptCounts.TryGetValue(index, out var attempts);
+            buckets.Add(new OverviewTrafficBucket(from, to,
+                messageCounts.GetValueOrDefault(index), attempts?.Delivered ?? 0,
+                attempts?.TemporaryFailures ?? 0, attempts?.PermanentFailures ?? 0));
         }
 
         var successful = db.DeliveryAttempts.AsNoTracking()
