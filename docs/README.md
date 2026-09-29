@@ -17,6 +17,7 @@
 ## 测试文档
 
 - [SMTP、IMAP、MIME、存储与安全异常场景](testing/mail-system-edge-cases.md)
+- [首轮性能优化测量（2026-09-29）](first-round-performance-2026-09-29.md)
 
 ## 阅读建议
 

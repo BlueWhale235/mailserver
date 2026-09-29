@@ -90,5 +90,21 @@ public sealed class MySqlAcceptanceTests
         var mailboxService = new MailboxService(factory, null!, null!, null!);
         Assert.Equal([2], await mailboxService.SearchAsync(mailboxId, "SEEN", false, CancellationToken.None));
         Assert.Equal([1, 3], await mailboxService.SearchAsync(mailboxId, "UNSEEN", true, CancellationToken.None));
+        await using (var db = await factory.CreateDbContextAsync())
+        {
+            var middle = await db.MailboxMessages.SingleAsync(x => x.MailboxId == mailboxId && x.Uid == 2);
+            middle.DeletedAt = DateTimeOffset.UtcNow;
+            await db.SaveChangesAsync();
+        }
+        await using (var snapshot = await mailboxService.CreateFetchSnapshotAsync(
+            mailboxId, "3,1", true, CancellationToken.None))
+        {
+            var items = new List<MailboxItem>();
+            await foreach (var item in snapshot.ReadAsync(CancellationToken.None)) items.Add(item);
+            Assert.Equal([(1L, 1L), (3L, 2L)], items.Select(x => (x.Uid, x.Sequence)).ToArray());
+        }
+        var administration = provider.GetRequiredService<AdminApplicationService>();
+        Assert.Equal(7, (await administration.GetOverviewTrafficAsync(7, CancellationToken.None)).Buckets.Count);
+        Assert.True((await administration.GetDashboardAsync(CancellationToken.None)).Domains >= 1);
     }
 }
