@@ -530,25 +530,34 @@ public sealed partial class MailRuleService(
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         var candidates = db.MailRules.AsNoTracking()
             .Where(x => x.DomainId == domainId && x.Direction == direction && x.IsEnabled);
-        var count = await candidates.CountAsync(cancellationToken);
+        int count;
+        using (PerformanceTelemetry.Stage("rules.snapshot.count"))
+            count = await candidates.CountAsync(cancellationToken);
         if (count == 0) return (new RuleSnapshot([], false), 128);
-        var estimate = 512L + await candidates.Select(x =>
-            512L + x.Name.Length * 2L + x.TargetMailboxName.Length * 2L
-            + x.Conditions.Sum(condition => 128L + condition.ValuesJson.Length * 2L)
-            + x.Actions.Sum(action => 96L + action.ValuesJson.Length * 2L))
-            .SumAsync(cancellationToken);
+        long estimate;
+        using (PerformanceTelemetry.Stage("rules.snapshot.estimate"))
+            estimate = 512L + await candidates.Select(x =>
+                512L + x.Name.Length * 2L + x.TargetMailboxName.Length * 2L
+                + x.Conditions.Sum(condition => 128L + condition.ValuesJson.Length * 2L)
+                + x.Actions.Sum(action => 96L + action.ValuesJson.Length * 2L))
+                .SumAsync(cancellationToken);
         if (cache is not null && estimate > cache.Options.MaximumEntryBytes)
             return (new RuleSnapshot([], true), Math.Max(1, Math.Min(128, cache.Options.MaximumEntryBytes)));
-        var rows = await LoadRuleBatchAsync(db, domainId, direction, 0, Math.Max(1, count), cancellationToken);
-        var sharedConditions = new Dictionary<(MailRuleField, MailRuleOperator, string), CompiledCondition>();
-        var rules = rows.Select(row => Compile(row, sharedConditions)).ToArray();
-        estimate = 512L + rows.Sum(EstimateRuleSize);
-        var oversized = estimate > (cache?.Options.MaximumEntryBytes ?? long.MaxValue);
-        if (oversized) return (new RuleSnapshot([], true), Math.Max(1, Math.Min(128, cache!.Options.MaximumEntryBytes)));
-        var indexBudget = cache is null ? long.MaxValue
-            : Math.Min(cache.Options.MaximumEntryBytes / 4, Math.Max(0, cache.Options.MaximumEntryBytes - estimate));
-        var (index, indexSize) = BuildIndex(rules, indexBudget);
-        return (new RuleSnapshot(rules, false, index), estimate + indexSize);
+        List<MailRule> rows;
+        using (PerformanceTelemetry.Stage("rules.snapshot.fetch"))
+            rows = await LoadRuleBatchAsync(db, domainId, direction, 0, Math.Max(1, count), cancellationToken);
+        using (PerformanceTelemetry.Stage("rules.snapshot.compile"))
+        {
+            var sharedConditions = new Dictionary<(MailRuleField, MailRuleOperator, string), CompiledCondition>();
+            var rules = rows.Select(row => Compile(row, sharedConditions)).ToArray();
+            estimate = 512L + rows.Sum(EstimateRuleSize);
+            var oversized = estimate > (cache?.Options.MaximumEntryBytes ?? long.MaxValue);
+            if (oversized) return (new RuleSnapshot([], true), Math.Max(1, Math.Min(128, cache!.Options.MaximumEntryBytes)));
+            var indexBudget = cache is null ? long.MaxValue
+                : Math.Min(cache.Options.MaximumEntryBytes / 4, Math.Max(0, cache.Options.MaximumEntryBytes - estimate));
+            var (index, indexSize) = BuildIndex(rules, indexBudget);
+            return (new RuleSnapshot(rules, false, index), estimate + indexSize);
+        }
     }
 
     private async Task<object?> MatchBatchedAsync(

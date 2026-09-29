@@ -12,35 +12,56 @@ public sealed class MailDbContext(DbContextOptions<MailDbContext> options) : DbC
     public override async Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
     {
         using var performance = PerformanceTelemetry.Stage("database.save-changes");
-        ChangeTracker.DetectChanges();
-        var entries = ChangeTracker.Entries().ToArray();
-        foreach (var entry in entries.Where(x => x.State == EntityState.Added))
+        using (PerformanceTelemetry.Stage("database.detect-changes"))
+            ChangeTracker.DetectChanges();
+
+        // Entries() and EF's SaveChanges both detect changes automatically. The explicit pass above
+        // has already detected the inbound graph, so avoid scanning it twice more on the common path.
+        var autoDetect = ChangeTracker.AutoDetectChangesEnabled;
+        ChangeTracker.AutoDetectChangesEnabled = false;
+        bool routingChanged;
+        try
         {
-            if (entry.Entity is StoredMessage message) message.SourceTraceId ??= PerformanceTelemetry.TraceId;
-            if (entry.Entity is DeliveryJob job) job.SourceTraceId ??= PerformanceTelemetry.TraceId ?? job.Message?.SourceTraceId;
-        }
-        var routingChanged = entries.Any(entry =>
-            entry.Entity switch
+            using (PerformanceTelemetry.Stage("database.prepare-entries"))
             {
-                MailDomain => RoutingFieldsChanged(entry, nameof(MailDomain.Name), nameof(MailDomain.IsActive),
-                    nameof(MailDomain.DeletedAt)),
-                MailAccount => RoutingFieldsChanged(entry, nameof(MailAccount.DomainId), nameof(MailAccount.LocalPart),
-                    nameof(MailAccount.IsEnabled), nameof(MailAccount.DeletedAt)),
-                MailAlias => RoutingFieldsChanged(entry, nameof(MailAlias.DomainId), nameof(MailAlias.SourceLocalPart),
-                    nameof(MailAlias.TargetAccountId), nameof(MailAlias.Mode), nameof(MailAlias.IsEnabled)),
-                _ => false
-            });
-        if (!routingChanged) return await base.SaveChangesAsync(cancellationToken);
+                var entries = ChangeTracker.Entries().ToArray();
+                foreach (var entry in entries.Where(x => x.State == EntityState.Added))
+                {
+                    if (entry.Entity is StoredMessage message) message.SourceTraceId ??= PerformanceTelemetry.TraceId;
+                    if (entry.Entity is DeliveryJob job) job.SourceTraceId ??= PerformanceTelemetry.TraceId ?? job.Message?.SourceTraceId;
+                }
+                routingChanged = entries.Any(entry =>
+                    entry.Entity switch
+                    {
+                        MailDomain => RoutingFieldsChanged(entry, nameof(MailDomain.Name), nameof(MailDomain.IsActive),
+                            nameof(MailDomain.DeletedAt)),
+                        MailAccount => RoutingFieldsChanged(entry, nameof(MailAccount.DomainId), nameof(MailAccount.LocalPart),
+                            nameof(MailAccount.IsEnabled), nameof(MailAccount.DeletedAt)),
+                        MailAlias => RoutingFieldsChanged(entry, nameof(MailAlias.DomainId), nameof(MailAlias.SourceLocalPart),
+                            nameof(MailAlias.TargetAccountId), nameof(MailAlias.Mode), nameof(MailAlias.IsEnabled)),
+                        _ => false
+                    });
+            }
+            if (!routingChanged)
+            {
+                using var persist = PerformanceTelemetry.Stage("database.persist");
+                return await base.SaveChangesAsync(cancellationToken);
+            }
+        }
+        finally { ChangeTracker.AutoDetectChangesEnabled = autoDetect; }
 
         if (!Database.IsRelational() || Database.CurrentTransaction is not null)
         {
             await ConfigurationVersionService.BumpAsync(this, ConfigurationScopes.Routing, cancellationToken);
+            using var persist = PerformanceTelemetry.Stage("database.persist");
             return await base.SaveChangesAsync(cancellationToken);
         }
 
         await using var transaction = await Database.BeginTransactionAsync(cancellationToken);
         var version = await ConfigurationVersionService.BumpAsync(this, ConfigurationScopes.Routing, cancellationToken);
-        var saved = await base.SaveChangesAsync(cancellationToken);
+        int saved;
+        using (PerformanceTelemetry.Stage("database.persist"))
+            saved = await base.SaveChangesAsync(cancellationToken);
         await transaction.CommitAsync(cancellationToken);
         ConfigurationSnapshotCache.NotifyRoutingCommitted(version);
         return saved;

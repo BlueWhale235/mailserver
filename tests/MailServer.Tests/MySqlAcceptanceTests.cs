@@ -105,6 +105,20 @@ public sealed class MySqlAcceptanceTests
             await db.SaveChangesAsync();
             mailboxId = mailbox.Id;
         }
+        await using (var db = await factory.CreateDbContextAsync())
+        {
+            var mailbox = await db.Mailboxes.Include(x => x.Account).SingleAsync(x => x.Id == mailboxId);
+            db.ChangeTracker.AutoDetectChangesEnabled = false;
+            mailbox.Account.UsedBytes += 123;
+            db.AuditRecords.Add(new AuditRecord { Actor = "acceptance", Action = "save-graph", Resource = "mailbox" });
+            var message = new StoredMessage { ContentKey = Guid.NewGuid().ToString("N"), EnvelopeFrom = "sender@example.test" };
+            db.MessageRecipients.Add(new StoredMessageRecipient { Message = message, Address = "alice@example.test" });
+            await db.SaveChangesAsync();
+            Assert.False(db.ChangeTracker.AutoDetectChangesEnabled);
+            db.ChangeTracker.Clear();
+            Assert.Equal(123, await db.Accounts.Where(x => x.Id == mailbox.AccountId).Select(x => x.UsedBytes).SingleAsync());
+            Assert.True(await db.MessageRecipients.AnyAsync(x => x.MessageId == message.Id));
+        }
         var mailboxService = new MailboxService(factory, null!, null!, null!);
         Assert.Equal([2], await mailboxService.SearchAsync(mailboxId, "SEEN", false, CancellationToken.None));
         Assert.Equal([1, 3], await mailboxService.SearchAsync(mailboxId, "UNSEEN", true, CancellationToken.None));

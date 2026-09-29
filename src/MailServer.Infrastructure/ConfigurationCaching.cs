@@ -309,7 +309,9 @@ public sealed class ConfigurationSnapshotCache : IDisposable
         {
             using (PerformanceTelemetry.Stage("cache.admission"))
                 admission = await _loadLimit.AcquireAsync(_lifetime.Token);
-            var loaded = await loader(_lifetime.Token);
+            (T Value, long Size) loaded;
+            using (PerformanceTelemetry.Stage("cache.populate"))
+                loaded = await loader(_lifetime.Token);
             var value = new CacheValue(loaded.Value, version, DateTimeOffset.UtcNow, Math.Max(1, loaded.Size));
             lock (_sync)
             {
