@@ -87,7 +87,6 @@ public sealed class InboundMessageService(
         Stream content,
         CancellationToken cancellationToken)
     {
-        using var ruleEvaluation = MailRuleService.BeginEvaluationScope();
         using var performance = PerformanceTelemetry.Operation("smtp", "message.accept");
         logger.LogInformation(
             "Inbound message received from {RemoteAddress}: sender={Sender}, recipientCount={RecipientCount}, authenticatedUser={AuthenticatedUser}, helo={HeloName}.",
@@ -102,138 +101,157 @@ public sealed class InboundMessageService(
             var mimeMessage = MailRuleService.GetParsedMessage(content)
                 ?? await LoadMimeMessageWithFallbackAsync(descriptor.Key, cancellationToken);
 
-            var receivedAt = clock.UtcNow;
-            await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
-            // 入站分发需要在一个可串行化事务内完成，防止别名展开、配额和队列写入之间出现竞态。
-            await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
-            await AuditDuplicateInboundAsync(db, envelope, descriptor, mimeMessage, receivedAt, cancellationToken);
-            await AuditLocalDomainSpoofAsync(db, envelope, cancellationToken);
-            AuditDuplicateSingletonHeaders(db, envelope, descriptor, mimeMessage);
-            await AuditMimeInspectionAsync(db, envelope, descriptor.Key, cancellationToken);
-            var storedMessage = new StoredMessage
+            const int maximumAttempts = 5;
+            for (var attempt = 1; ; attempt++)
             {
-                ContentKey = descriptor.Key,
-                EnvelopeFrom = envelope.Sender,
-                InternetMessageId = mimeMessage.MessageId,
-                InternetMessageIdHash = MessageIdLookup.Hash(mimeMessage.MessageId),
-                SourceType = envelope.SourceType ?? (envelope.RemoteAddress == "local" ? "system" : "smtp"),
-                AuthenticatedAccountId = envelope.AuthenticatedAccountId,
-                AuthenticatedAccountName = envelope.AuthenticatedAccountId is null ? null : envelope.AuthenticatedUser,
-                SourceIp = IPAddress.TryParse(envelope.RemoteAddress, out _) ? envelope.RemoteAddress : null,
-                Size = descriptor.Size,
-                ReceivedAt = receivedAt
-            };
-            db.Messages.Add(storedMessage);
-            PerformanceTelemetry.Resource(messageId: storedMessage.Id);
-            foreach (var address in envelope.Recipients.Distinct(StringComparer.OrdinalIgnoreCase))
-                db.MessageRecipients.Add(new StoredMessageRecipient { Message = storedMessage, Address = address });
-
-            var decodedEnvelopeSender = await srs.TryDecodeAsync(db, envelope.Sender, cancellationToken);
-            var forwardingTraces = await srs.ReadForwardingTracesAsync(
-                db,
-                mimeMessage.MessageId,
-                mimeMessage.Headers
-                    .Where(header => header.Field.Equals(SrsService.ForwardingTraceHeader, StringComparison.OrdinalIgnoreCase))
-                    .Select(header => header.Value),
-                cancellationToken);
-            var forwarding = new ForwardContext(
-                decodedEnvelopeSender?.OriginalSender ?? envelope.Sender,
-                Math.Max(
-                    decodedEnvelopeSender?.ForwardDepth ?? 0,
-                    forwardingTraces.Select(trace => trace.ForwardDepth).DefaultIfEmpty(0).Max()),
-                forwardingTraces.Select(trace => trace.RuleId).ToHashSet(),
-                new HashSet<Guid>(),
-                new HashSet<string>(StringComparer.OrdinalIgnoreCase));
-            var counters = new DeliveryCounters();
-            // 收件人先展开成账号或外部地址，再按账号/地址分组，避免同一封信经多个别名重复投递。
-            var expandedRecipients = await ExpandRecipientsAsync(db, envelope.Recipients, cancellationToken);
-            foreach (var group in expandedRecipients.GroupBy(
-                         x => x.Account is null ? $"external:{x.Address}" : $"account:{x.Account.Id}",
-                         StringComparer.OrdinalIgnoreCase))
-            {
-                var recipient = group.First();
-                if (recipient.Account is { } account)
+                try
                 {
-                    if (!forwarding.DeliveredAccounts.Add(account.Id)) continue;
-                    await DeliverLocallyAsync(
+                    using var ruleEvaluation = MailRuleService.BeginEvaluationScope();
+                    var receivedAt = clock.UtcNow;
+                    await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+                    // 入站分发需要在一个可串行化事务内完成，防止别名展开、配额和队列写入之间出现竞态。
+                    await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
+                    await AuditDuplicateInboundAsync(db, envelope, descriptor, mimeMessage, receivedAt, cancellationToken);
+                    await AuditLocalDomainSpoofAsync(db, envelope, cancellationToken);
+                    AuditDuplicateSingletonHeaders(db, envelope, descriptor, mimeMessage);
+                    await AuditMimeInspectionAsync(db, envelope, descriptor.Key, cancellationToken);
+                    var storedMessage = new StoredMessage
+                    {
+                        ContentKey = descriptor.Key,
+                        EnvelopeFrom = envelope.Sender,
+                        InternetMessageId = mimeMessage.MessageId,
+                        InternetMessageIdHash = MessageIdLookup.Hash(mimeMessage.MessageId),
+                        SourceType = envelope.SourceType ?? (envelope.RemoteAddress == "local" ? "system" : "smtp"),
+                        AuthenticatedAccountId = envelope.AuthenticatedAccountId,
+                        AuthenticatedAccountName = envelope.AuthenticatedAccountId is null ? null : envelope.AuthenticatedUser,
+                        SourceIp = IPAddress.TryParse(envelope.RemoteAddress, out _) ? envelope.RemoteAddress : null,
+                        Size = descriptor.Size,
+                        ReceivedAt = receivedAt
+                    };
+                    db.Messages.Add(storedMessage);
+                    PerformanceTelemetry.Resource(messageId: storedMessage.Id);
+                    foreach (var address in envelope.Recipients.Distinct(StringComparer.OrdinalIgnoreCase))
+                        db.MessageRecipients.Add(new StoredMessageRecipient { Message = storedMessage, Address = address });
+
+                    var decodedEnvelopeSender = await srs.TryDecodeAsync(db, envelope.Sender, cancellationToken);
+                    var forwardingTraces = await srs.ReadForwardingTracesAsync(
                         db,
-                        storedMessage,
-                        descriptor,
-                        mimeMessage,
-                        envelope,
-                        account,
-                        group.Select(x => x.OriginalAddress).Distinct(StringComparer.OrdinalIgnoreCase).ToArray(),
-                        receivedAt,
-                        forwarding,
-                        counters,
+                        mimeMessage.MessageId,
+                        mimeMessage.Headers
+                            .Where(header => header.Field.Equals(SrsService.ForwardingTraceHeader, StringComparison.OrdinalIgnoreCase))
+                            .Select(header => header.Value),
                         cancellationToken);
-                    continue;
-                }
+                    var forwarding = new ForwardContext(
+                        decodedEnvelopeSender?.OriginalSender ?? envelope.Sender,
+                        Math.Max(
+                            decodedEnvelopeSender?.ForwardDepth ?? 0,
+                            forwardingTraces.Select(trace => trace.ForwardDepth).DefaultIfEmpty(0).Max()),
+                        forwardingTraces.Select(trace => trace.RuleId).ToHashSet(),
+                        new HashSet<Guid>(),
+                        new HashSet<string>(StringComparer.OrdinalIgnoreCase));
+                    var counters = new DeliveryCounters();
+                    // 收件人先展开成账号或外部地址，再按账号/地址分组，避免同一封信经多个别名重复投递。
+                    var expandedRecipients = await ExpandRecipientsAsync(db, envelope.Recipients, cancellationToken);
+                    foreach (var group in expandedRecipients.GroupBy(
+                                 x => x.Account is null ? $"external:{x.Address}" : $"account:{x.Account.Id}",
+                                 StringComparer.OrdinalIgnoreCase))
+                    {
+                        var recipient = group.First();
+                        if (recipient.Account is { } account)
+                        {
+                            if (!forwarding.DeliveredAccounts.Add(account.Id)) continue;
+                            await DeliverLocallyAsync(
+                                db,
+                                storedMessage,
+                                descriptor,
+                                mimeMessage,
+                                envelope,
+                                account,
+                                group.Select(x => x.OriginalAddress).Distinct(StringComparer.OrdinalIgnoreCase).ToArray(),
+                                receivedAt,
+                                forwarding,
+                                counters,
+                                cancellationToken);
+                            continue;
+                        }
 
-                if (envelope.AuthenticatedUser is null && !recipient.AuthorizedRelay)
-                {
-                    // 未认证入站只能给本地账号投递；别名转发产生的外部目标必须显式授权。
+                        if (envelope.AuthenticatedUser is null && !recipient.AuthorizedRelay)
+                        {
+                            // 未认证入站只能给本地账号投递；别名转发产生的外部目标必须显式授权。
+                            logger.LogInformation(
+                                "Inbound message {MessageId} rejected for {Recipient}: unauthenticated relay is forbidden.",
+                                storedMessage.Id,
+                                recipient.Address);
+                            throw new InvalidOperationException($"Unauthenticated relay to {recipient.Address} is forbidden.");
+                        }
+
+                        var route = recipient.RelayDomainId is { } relayDomainId
+                            ? await ResolveOutboundRouteAsync(db, relayDomainId, cancellationToken)
+                            : await ResolveOutboundRouteAsync(db, envelope.Sender, cancellationToken);
+                        db.DeliveryJobs.Add(new DeliveryJob
+                        {
+                            Message = storedMessage,
+                            Sender = envelope.Sender,
+                            Recipient = recipient.Address,
+                            RouteDomainId = route.DomainId
+                        });
+                        counters.Queued++;
+                    }
+
+                    if (envelope.AuthenticatedAccountId is { } authenticatedAccountId)
+                    {
+                        // 已认证发信会尝试排队保存 Sent 副本，用于弥补部分客户端不主动 APPEND 到 Sent 的情况。
+                        var outgoingMatch = await QueueSentCopyAsync(
+                            db,
+                            authenticatedAccountId,
+                            storedMessage,
+                            mimeMessage,
+                            envelope,
+                            descriptor.Size,
+                            receivedAt,
+                            cancellationToken);
+                        if (outgoingMatch is not null)
+                        {
+                            // 发信规则的转发动作基于已认证账号的域，转发副本单独排队/投递，原收件人不受影响。
+                            await ApplyOutgoingForwardingAsync(
+                                db,
+                                storedMessage,
+                                mimeMessage,
+                                envelope,
+                                descriptor.Size,
+                                receivedAt,
+                                outgoingMatch,
+                                forwarding,
+                                counters,
+                                cancellationToken);
+                        }
+                    }
+
+                    if (counters.Local == 0 && counters.Queued == 0)
+                        throw new InvalidOperationException("Message has no valid recipients.");
+
+                    await db.SaveChangesAsync(cancellationToken);
+                    await transaction.CommitAsync(cancellationToken);
                     logger.LogInformation(
-                        "Inbound message {MessageId} rejected for {Recipient}: unauthenticated relay is forbidden.",
+                        "Inbound message {MessageId} accepted: localDeliveries={LocalDeliveries}, queuedDeliveries={QueuedDeliveries}, contentKey={ContentKey}.",
                         storedMessage.Id,
-                        recipient.Address);
-                    throw new InvalidOperationException($"Unauthenticated relay to {recipient.Address} is forbidden.");
+                        counters.Local,
+                        counters.Queued,
+                        descriptor.Key);
+                    return new InboundAcceptance(storedMessage.Id, descriptor.Key, counters.Local, counters.Queued);
                 }
-
-                var route = recipient.RelayDomainId is { } relayDomainId
-                    ? await ResolveOutboundRouteAsync(db, relayDomainId, cancellationToken)
-                    : await ResolveOutboundRouteAsync(db, envelope.Sender, cancellationToken);
-                db.DeliveryJobs.Add(new DeliveryJob
+                catch (Exception conflict) when (attempt < maximumAttempts
+                    && !cancellationToken.IsCancellationRequested
+                    && DatabaseFailurePolicy.IsMySqlRetryableConflict(conflict))
                 {
-                    Message = storedMessage,
-                    Sender = envelope.Sender,
-                    Recipient = recipient.Address,
-                    RouteDomainId = route.DomainId
-                });
-                counters.Queued++;
-            }
-
-            if (envelope.AuthenticatedAccountId is { } authenticatedAccountId)
-            {
-                // 已认证发信会尝试排队保存 Sent 副本，用于弥补部分客户端不主动 APPEND 到 Sent 的情况。
-                var outgoingMatch = await QueueSentCopyAsync(
-                    db,
-                    authenticatedAccountId,
-                    storedMessage,
-                    mimeMessage,
-                    envelope,
-                    descriptor.Size,
-                    receivedAt,
-                    cancellationToken);
-                if (outgoingMatch is not null)
-                {
-                    // 发信规则的转发动作基于已认证账号的域，转发副本单独排队/投递，原收件人不受影响。
-                    await ApplyOutgoingForwardingAsync(
-                        db,
-                        storedMessage,
-                        mimeMessage,
-                        envelope,
-                        descriptor.Size,
-                        receivedAt,
-                        outgoingMatch,
-                        forwarding,
-                        counters,
-                        cancellationToken);
+                    var delay = TimeSpan.FromMilliseconds(attempt * Random.Shared.Next(25, 76));
+                    logger.LogWarning(
+                        "Inbound database transaction conflicted; retrying attempt {Attempt} of {MaximumAttempts} after {DelayMilliseconds} ms.",
+                        attempt + 1, maximumAttempts, delay.TotalMilliseconds);
+                    using (PerformanceTelemetry.Stage("database.retry-conflict"))
+                        await Task.Delay(delay, cancellationToken);
                 }
             }
-
-            if (counters.Local == 0 && counters.Queued == 0)
-                throw new InvalidOperationException("Message has no valid recipients.");
-
-            await db.SaveChangesAsync(cancellationToken);
-            await transaction.CommitAsync(cancellationToken);
-            logger.LogInformation(
-                "Inbound message {MessageId} accepted: localDeliveries={LocalDeliveries}, queuedDeliveries={QueuedDeliveries}, contentKey={ContentKey}.",
-                storedMessage.Id,
-                counters.Local,
-                counters.Queued,
-                descriptor.Key);
-            return new InboundAcceptance(storedMessage.Id, descriptor.Key, counters.Local, counters.Queued);
         }
         catch (Exception failure)
         {

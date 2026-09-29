@@ -5,6 +5,15 @@ namespace MailServer.Infrastructure;
 
 public static class DatabaseFailurePolicy
 {
+    public static bool IsMySqlRetryableConflict(Exception exception)
+    {
+        for (Exception? current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is MySqlException { Number: 1205 or 1213 }) return true;
+        }
+        return false;
+    }
+
     public static bool IsConcurrencyConflict(Exception exception)
     {
         for (Exception? current = exception; current is not null; current = current.InnerException)

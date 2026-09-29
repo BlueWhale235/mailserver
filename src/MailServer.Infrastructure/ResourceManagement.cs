@@ -36,7 +36,8 @@ public static class ResourceProfiles
         new ResourceProfile("2gb", "轻量 · 2 GB", 16 * MiB, 2 * MiB, 4, 32, 64),
         new ResourceProfile("4gb", "标准 · 4 GB", 32 * MiB, 4 * MiB, 8, 64, 128),
         new ResourceProfile("8gb", "增强 · 8 GB", 64 * MiB, 8 * MiB, 16, 128, 256),
-        new ResourceProfile("16gb", "大型 · 16 GB 以上", 128 * MiB, 16 * MiB, 32, 256, 512)
+        new ResourceProfile("16gb", "大型 · 16 GB", 128 * MiB, 16 * MiB, 32, 256, 512),
+        new ResourceProfile("32gb", "超大型 · 32 GB", 256 * MiB, 32 * MiB, 64, 512, 1024)
     });
     public static ResourceProfile Get(string id) => All.FirstOrDefault(x => x.Id == id)
         ?? throw new ArgumentException("请选择有效的内存档位。", nameof(id));

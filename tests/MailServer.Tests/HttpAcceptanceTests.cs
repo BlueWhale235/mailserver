@@ -194,7 +194,7 @@ public sealed class HttpAcceptanceTests
         await using var host = await AcceptanceHost.StartAsync();
         const string path = "/api/v1/settings/resources";
         var original = await host.JsonAsync(HttpMethod.Get, path);
-        Assert.Equal(6, original.GetProperty("profiles").GetArrayLength());
+        Assert.Equal(7, original.GetProperty("profiles").GetArrayLength());
         await host.JsonAsync(HttpMethod.Put, path, new { profileId = "invalid" }, 400);
         await host.JsonAsync(HttpMethod.Put, path, new { profileId = "4gb" });
         Assert.Equal("4gb", (await host.JsonAsync(HttpMethod.Get, path)).GetProperty("profileId").GetString());

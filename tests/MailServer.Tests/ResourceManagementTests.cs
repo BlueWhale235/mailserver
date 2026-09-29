@@ -80,6 +80,7 @@ public sealed class ResourceManagementTests
     [InlineData("4gb", 32, 8, 64, 128)]
     [InlineData("8gb", 64, 16, 128, 256)]
     [InlineData("16gb", 128, 32, 256, 512)]
+    [InlineData("32gb", 256, 64, 512, 1024)]
     public void ProfilesApplyWithoutDisconnectingExistingWork(string id, int mib, int workers, int smtp, int imap)
     {
         var config = new ConfigurationBuilder().Build();
