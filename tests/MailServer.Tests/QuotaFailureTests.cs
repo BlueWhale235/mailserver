@@ -211,6 +211,25 @@ public sealed class QuotaFailureTests
     }
 
     [Fact]
+    public async Task ActiveDataLimitDefersWorkWithoutClosingIdleSmtpConnections()
+    {
+        await using var env = await Environment.CreateAsync();
+        var runtime = env.Services.GetRequiredService<ResourceRuntime>();
+        runtime.SmtpMessages.Resize(1);
+        await using var first = await SmtpSession.ConnectAsync(env, false, resources: runtime);
+        await using var second = await SmtpSession.ConnectAsync(env, false, resources: runtime);
+        Assert.StartsWith("250", await first.CommandAsync("MAIL FROM:<sender@origin.test>"));
+        Assert.StartsWith("250", await first.CommandAsync("RCPT TO:<alice@example.test>"));
+        Assert.StartsWith("354", await first.CommandAsync("DATA"));
+        Assert.StartsWith("250", await second.CommandAsync("MAIL FROM:<sender@origin.test>"));
+        Assert.StartsWith("250", await second.CommandAsync("RCPT TO:<bob@example.test>"));
+        Assert.StartsWith("451 4.3.2", await second.CommandAsync("DATA"));
+        Assert.StartsWith("250", await second.CommandAsync("NOOP"));
+        Assert.StartsWith("250 2.0.0", await first.CompleteDataAsync());
+        Assert.StartsWith("250 2.0.0", await second.SendMessageAsync("sender@origin.test", ["bob@example.test"]));
+    }
+
+    [Fact]
     public async Task DatabaseConflictReturnsTemporaryFailureAndKeepsSession()
     {
         await using var env = await Environment.CreateAsync(concurrencyFailure: true);
@@ -464,7 +483,8 @@ public sealed class QuotaFailureTests
         private readonly StreamReader _reader = new(stream, Encoding.UTF8, false, 1024, true);
         private readonly StreamWriter _writer = new(stream, new UTF8Encoding(false), 1024, true) { NewLine = "\r\n", AutoFlush = true };
 
-        public static async Task<SmtpSession> ConnectAsync(Environment env, bool authenticated, long maximumMessageBytes = 1_000_000)
+        public static async Task<SmtpSession> ConnectAsync(Environment env, bool authenticated,
+            long maximumMessageBytes = 1_000_000, ResourceRuntime? resources = null)
         {
             using var listener = new TcpListener(IPAddress.Loopback, 0);
             listener.Start();
@@ -473,7 +493,8 @@ public sealed class QuotaFailureTests
             var peer = await listener.AcceptTcpClientAsync();
             var service = new SmtpServerService(env.Services.GetRequiredService<IServiceScopeFactory>(),
                 Options.Create(new SmtpServerOptions { MaximumMessageBytes = maximumMessageBytes, CommandTimeoutSeconds = 10 }),
-                env.Services.GetRequiredService<DomainCertificateProvider>(), env.SmtpLog);
+                env.Services.GetRequiredService<DomainCertificateProvider>(), env.SmtpLog,
+                resources: resources);
             var endpoint = new SmtpEndpointOptions
             {
                 RequireAuthentication = authenticated,
@@ -518,6 +539,11 @@ public sealed class QuotaFailureTests
             Assert.StartsWith("250", await CommandAsync($"MAIL FROM:<{sender}>"));
             foreach (var recipient in recipients) Assert.StartsWith("250", await CommandAsync($"RCPT TO:<{recipient}>"));
             Assert.StartsWith("354", await CommandAsync("DATA"));
+            return await CompleteDataAsync();
+        }
+
+        public async Task<string> CompleteDataAsync()
+        {
             await _writer.WriteAsync(Message + ".\r\n");
             await _writer.FlushAsync();
             return await ReadReplyAsync();

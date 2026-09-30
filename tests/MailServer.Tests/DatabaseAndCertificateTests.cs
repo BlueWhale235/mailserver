@@ -83,6 +83,8 @@ public sealed class DatabaseAndCertificateTests
             var mailbox = services.GetRequiredService<IMailboxService>();
             var recycle = services.GetRequiredService<IRecycleBinService>();
             await mailbox.CopyAsync(inboxId, "1", true, "Trash", true, CancellationToken.None);
+            await using (var db = await factory.CreateDbContextAsync())
+                Assert.Equal(36, (await db.Accounts.SingleAsync(x => x.Id == accountId)).UsedBytes);
             var moved = await recycle.SearchAsync(null, CleanupResourceType.MailboxMessage, null,
                 null, null, null, null, 1, 20, CancellationToken.None);
             Assert.Single(moved.Items);
@@ -94,14 +96,31 @@ public sealed class DatabaseAndCertificateTests
 
             await mailbox.StoreFlagsAsync(inboxId, "2", true, "+", ["\\Deleted"], CancellationToken.None);
             await mailbox.ExpungeAsync(inboxId, CancellationToken.None);
+            await using (var db = await factory.CreateDbContextAsync())
+            {
+                var account = await db.Accounts.SingleAsync(x => x.Id == accountId);
+                account.QuotaBytes = 24;
+                var domain = await db.Domains.SingleAsync();
+                domain.QuotaBytes = 24;
+                Assert.Equal(24, account.UsedBytes);
+                Assert.Equal(24, domain.UsedBytes);
+                await db.SaveChangesAsync();
+            }
             var expunged = await recycle.SearchAsync(null, CleanupResourceType.MailboxMessage, null,
                 null, null, null, null, 1, 20, CancellationToken.None);
             Assert.Single(expunged.Items);
             await recycle.RestoreAsync(expunged.Items[0].QueueId, "admin", CancellationToken.None);
+            await using (var db = await factory.CreateDbContextAsync())
+            {
+                Assert.Equal(36, (await db.Accounts.SingleAsync(x => x.Id == accountId)).UsedBytes);
+                Assert.Equal(36, (await db.Domains.SingleAsync()).UsedBytes);
+            }
 
             await mailbox.CopyAsync(inboxId, "3", true, "Trash", true, CancellationToken.None);
             await mailbox.StoreFlagsAsync(trashId, "1", false, "+", ["\\Deleted"], CancellationToken.None);
             await mailbox.ExpungeAsync(trashId, CancellationToken.None);
+            await using (var db = await factory.CreateDbContextAsync())
+                Assert.Equal(24, (await db.Accounts.SingleAsync(x => x.Id == accountId)).UsedBytes);
             var trashExpunged = await recycle.SearchAsync(null, CleanupResourceType.MailboxMessage, null,
                 null, null, null, null, 1, 20, CancellationToken.None);
             Assert.Single(trashExpunged.Items);
@@ -136,6 +155,71 @@ public sealed class DatabaseAndCertificateTests
             }
             await Assert.ThrowsAsync<RecycleBinConflictException>(() =>
                 recycle.RestoreAsync(moved.Items[0].QueueId, "admin", CancellationToken.None));
+
+            long purgeUid;
+            await using (var db = await factory.CreateDbContextAsync())
+                purgeUid = await db.MailboxMessages.Where(x => x.MailboxId == inboxId)
+                    .OrderBy(x => x.Uid).Select(x => x.Uid).FirstAsync();
+            await mailbox.StoreFlagsAsync(inboxId, purgeUid.ToString(), true, "+", ["\\Deleted"], CancellationToken.None);
+            await mailbox.ExpungeAsync(inboxId, CancellationToken.None);
+            var pendingPurge = await recycle.SearchAsync(null, CleanupResourceType.MailboxMessage, null,
+                null, null, null, null, 1, 20, CancellationToken.None);
+            Assert.Single(pendingPurge.Items);
+            await using (var db = await factory.CreateDbContextAsync())
+                Assert.Equal(24, (await db.Accounts.SingleAsync(x => x.Id == accountId)).UsedBytes);
+            await recycle.PurgeAsync(pendingPurge.Items[0].QueueId, "admin", CancellationToken.None);
+            await using (var db = await factory.CreateDbContextAsync())
+            {
+                Assert.Equal(24, (await db.Accounts.SingleAsync(x => x.Id == accountId)).UsedBytes);
+                Assert.Equal(24, (await db.Domains.SingleAsync()).UsedBytes);
+            }
+
+            Guid legacyQueueId;
+            Guid legacyMessageId;
+            await using (var db = await factory.CreateDbContextAsync())
+            {
+                var now = DateTimeOffset.UtcNow;
+                var legacy = new MailboxMessage
+                {
+                    MailboxId = inboxId,
+                    Message = new StoredMessage
+                    {
+                        ContentKey = new string('f', 64), EnvelopeFrom = "legacy@example.net", Size = 10
+                    },
+                    Uid = 999,
+                    DeletedAt = now,
+                    PurgeAfter = now.AddDays(30)
+                };
+                var queue = new CleanupQueueItem
+                {
+                    ResourceType = CleanupResourceType.MailboxMessage,
+                    ResourceId = legacy.Id,
+                    AccountId = accountId,
+                    EstimatedBytes = 10,
+                    PurgeAfter = now.AddDays(30)
+                };
+                db.MailboxMessages.Add(legacy);
+                db.CleanupQueue.Add(queue);
+                (await db.Accounts.SingleAsync(x => x.Id == accountId)).UsedBytes += 10;
+                (await db.Domains.SingleAsync()).UsedBytes += 10;
+                await db.SaveChangesAsync();
+                legacyQueueId = queue.Id;
+                legacyMessageId = legacy.Id;
+            }
+            await services.GetRequiredService<IQuotaReconciliationService>().ReconcileAsync(CancellationToken.None);
+            await using (var db = await factory.CreateDbContextAsync())
+            {
+                Assert.Equal(24, (await db.Accounts.SingleAsync(x => x.Id == accountId)).UsedBytes);
+                Assert.True((await db.MailboxMessages.IgnoreQueryFilters()
+                    .SingleAsync(x => x.Id == legacyMessageId)).QuotaReleased);
+            }
+            await recycle.RestoreAsync(legacyQueueId, "admin", CancellationToken.None);
+            await using (var db = await factory.CreateDbContextAsync())
+            {
+                Assert.Equal(34, (await db.Accounts.SingleAsync(x => x.Id == accountId)).UsedBytes);
+                Assert.Equal(34, (await db.Domains.SingleAsync()).UsedBytes);
+                Assert.False((await db.MailboxMessages.SingleAsync(x => x.Id == legacyMessageId)).QuotaReleased);
+            }
         }
         finally
         {

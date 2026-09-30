@@ -662,32 +662,58 @@ public sealed partial class MailboxService(
             {
                 var deletedMessages = await db.MailboxMessages
                     .Where(x => x.MailboxId == mailboxId && batch.Contains(x.Id))
-                    .Include(x => x.Message).Include(x => x.Mailbox)
+                    .Include(x => x.Message)
+                    .Include(x => x.Mailbox).ThenInclude(x => x.Account).ThenInclude(x => x.Domain)
                     .ToListAsync(cancellationToken);
                 var queued = await db.CleanupQueue
                     .Where(x => x.ResourceType == CleanupResourceType.MailboxMessage
                         && x.ResourceId.HasValue && batch.Contains(x.ResourceId.Value)
                         && (x.Status == CleanupQueueStatus.Pending || x.Status == CleanupQueueStatus.Failed))
                     .ToListAsync(cancellationToken);
-                var queuedIds = queued.Where(x => x.ResourceId.HasValue)
-                    .Select(x => x.ResourceId!.Value).ToHashSet();
+                var queuedByMessageId = queued.Where(x => x.ResourceId.HasValue)
+                    .GroupBy(x => x.ResourceId!.Value)
+                    .ToDictionary(x => x.Key, x => x.First().Id);
                 foreach (var item in queued) item.PurgeAfter = purgeAfter;
+                long releasedBytes = 0;
                 foreach (var message in deletedMessages)
                 {
                     message.DeletedAt = now;
                     message.DeletedBy = "imap";
                     message.PurgeAfter = purgeAfter;
-                    if (queuedIds.Contains(message.Id)) continue;
-                    db.CleanupQueue.Add(new CleanupQueueItem
+                    if (!queuedByMessageId.TryGetValue(message.Id, out var queueId))
                     {
-                        ResourceType = CleanupResourceType.MailboxMessage,
-                        ResourceId = message.Id,
-                        ContentKey = message.Message.ContentKey,
-                        AccountId = message.Mailbox.AccountId,
-                        EstimatedBytes = message.Message.Size,
-                        CreatedAt = now,
-                        PurgeAfter = purgeAfter
-                    });
+                        var cleanupItem = new CleanupQueueItem
+                        {
+                            ResourceType = CleanupResourceType.MailboxMessage,
+                            ResourceId = message.Id,
+                            ContentKey = message.Message.ContentKey,
+                            AccountId = message.Mailbox.AccountId,
+                            EstimatedBytes = message.Message.Size,
+                            CreatedAt = now,
+                            PurgeAfter = purgeAfter
+                        };
+                        db.CleanupQueue.Add(cleanupItem);
+                        queueId = cleanupItem.Id;
+                    }
+                    if (!message.QuotaReleased)
+                    {
+                        message.QuotaReleased = true;
+                        releasedBytes += message.Message.Size;
+                        db.QuotaLedger.Add(new QuotaLedgerEntry
+                        {
+                            IdempotencyKey = $"mailbox-message:recycle:{queueId:N}",
+                            AccountId = message.Mailbox.AccountId,
+                            DomainId = message.Mailbox.Account.DomainId,
+                            MailboxMessageId = message.Id,
+                            Operation = QuotaLedgerOperation.Remove,
+                            Bytes = -message.Message.Size
+                        });
+                    }
+                }
+                if (releasedBytes > 0)
+                {
+                    var account = deletedMessages[0].Mailbox.Account;
+                    MailboxWriteAccounting.ApplyQuotaDelta(account, -releasedBytes);
                 }
                 await db.SaveChangesAsync(cancellationToken);
                 db.ChangeTracker.Clear();
@@ -747,14 +773,15 @@ public sealed partial class MailboxService(
             var copyBytes = selected.Sum(x => x.Size);
             if (!move)
             {
-                if (source.Account.UsedBytes + copyBytes > source.Account.QuotaBytes)
+                var quota = MailboxWriteAccounting.CheckQuota(source.Account, copyBytes);
+                if (quota == QuotaAvailability.AccountExceeded)
                     throw new InvalidOperationException("Mailbox quota exceeded.");
-                if (source.Account.Domain.UsedBytes + copyBytes > source.Account.Domain.QuotaBytes)
+                if (quota == QuotaAvailability.DomainExceeded)
                     throw new InvalidOperationException("Domain quota exceeded.");
             }
             foreach (var message in messages.Where(x => selectedIds.Contains(x.Id)))
             {
-                var targetUid = target.UidNext++;
+                var targetUid = MailboxWriteAccounting.TakeUid(target);
                 sourceUids.Add(message.Uid);
                 targetUids.Add(targetUid);
                 var targetMessage = new MailboxMessage
@@ -813,8 +840,7 @@ public sealed partial class MailboxService(
             }
             if (!move)
             {
-                source.Account.UsedBytes += copyBytes;
-                source.Account.Domain.UsedBytes += copyBytes;
+                MailboxWriteAccounting.ApplyQuotaDelta(source.Account, copyBytes);
             }
 
             await db.SaveChangesAsync(cancellationToken);
@@ -879,19 +905,11 @@ public sealed partial class MailboxService(
         return mailboxes.SingleOrDefault(x => MailboxNames.Equals(x.Name, normalizedName));
     }
 
-    internal static async Task EnsureUidNextAtLeastAsync(
+    internal static Task EnsureUidNextAtLeastAsync(
         MailDbContext db,
         Mailbox mailbox,
-        CancellationToken cancellationToken)
-    {
-        var next = (await db.MailboxMessages
-            .Where(x => x.MailboxId == mailbox.Id)
-            .MaxAsync(x => (long?)x.Uid, cancellationToken) ?? 0) + 1;
-        if (mailbox.UidNext < next)
-        {
-            mailbox.UidNext = next;
-        }
-    }
+        CancellationToken cancellationToken) =>
+        MailboxWriteAccounting.EnsureUidNextAsync(db, mailbox, cancellationToken);
 
     private static async Task<bool> HasChildMailboxAsync(
         MailDbContext db,

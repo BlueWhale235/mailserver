@@ -130,7 +130,7 @@ public sealed class SentCopyService(
             {
                 Mailbox = mailbox,
                 Message = stored,
-                Uid = mailbox.UidNext++,
+                Uid = MailboxWriteAccounting.TakeUid(mailbox),
                 ModSeq = ++mailbox.HighestModSeq,
                 Flags = string.Join(' ', flags),
                 InternalDate = internalDate ?? clock.UtcNow
@@ -138,11 +138,9 @@ public sealed class SentCopyService(
             db.MailboxMessages.Add(item);
             var quotaDelta = descriptor.Size - replacedBytes;
             if (quotaDelta > 0
-                && (mailbox.Account.UsedBytes + quotaDelta > mailbox.Account.QuotaBytes
-                    || mailbox.Account.Domain.UsedBytes + quotaDelta > mailbox.Account.Domain.QuotaBytes))
+                && MailboxWriteAccounting.CheckQuota(mailbox.Account, quotaDelta) != QuotaAvailability.Available)
                 throw new InvalidOperationException("Mailbox or domain quota exceeded.");
-            mailbox.Account.UsedBytes = Math.Max(0, mailbox.Account.UsedBytes + quotaDelta);
-            mailbox.Account.Domain.UsedBytes = Math.Max(0, mailbox.Account.Domain.UsedBytes + quotaDelta);
+            MailboxWriteAccounting.ApplyQuotaDelta(mailbox.Account, quotaDelta);
             db.QuotaLedger.Add(new QuotaLedgerEntry
             {
                 IdempotencyKey = $"mailbox-message:add:{item.Id:N}",
@@ -274,11 +272,9 @@ public sealed class SentCopyService(
             await MailboxService.EnsureUidNextAtLeastAsync(db, target, cancellationToken);
             var copy = CreateMailboxMessage(target, job.MessageId, string.Empty, job.Message.ReceivedAt);
             db.MailboxMessages.Add(copy);
-            if (job.Account.UsedBytes + job.Message.Size > job.Account.QuotaBytes
-                || job.Account.Domain.UsedBytes + job.Message.Size > job.Account.Domain.QuotaBytes)
+            if (MailboxWriteAccounting.CheckQuota(job.Account, job.Message.Size) != QuotaAvailability.Available)
                 throw new InvalidOperationException("Mailbox or domain quota exceeded.");
-            job.Account.UsedBytes += job.Message.Size;
-            job.Account.Domain.UsedBytes += job.Message.Size;
+            MailboxWriteAccounting.ApplyQuotaDelta(job.Account, job.Message.Size);
             db.QuotaLedger.Add(new QuotaLedgerEntry
             {
                 IdempotencyKey = $"mailbox-message:add:{copy.Id:N}",
@@ -312,7 +308,7 @@ public sealed class SentCopyService(
     {
         Mailbox = mailbox,
         MessageId = messageId,
-        Uid = mailbox.UidNext++,
+        Uid = MailboxWriteAccounting.TakeUid(mailbox),
         ModSeq = ++mailbox.HighestModSeq,
         Flags = flags,
         InternalDate = internalDate

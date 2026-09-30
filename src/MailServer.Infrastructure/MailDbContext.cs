@@ -491,6 +491,7 @@ public sealed class MailDbContext(DbContextOptions<MailDbContext> options) : DbC
         {
             entity.ToTable("mailbox_messages");
             entity.HasKey(x => x.Id);
+            entity.Property(x => x.QuotaReleased).HasDefaultValue(false);
             entity.HasIndex(x => new { x.MailboxId, x.Uid }).IsUnique();
             entity.HasIndex(x => x.DeletedAt);
             entity.HasIndex(x => x.ScheduledDeleteAt);

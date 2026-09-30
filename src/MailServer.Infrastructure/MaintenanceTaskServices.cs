@@ -32,8 +32,7 @@ public sealed class QuotaLedgerService(IDbContextFactory<MailDbContext> factory)
         var account = await db.Accounts.SingleAsync(x => x.Id == accountId, cancellationToken);
         var domain = await db.Domains.SingleAsync(x => x.Id == domainId, cancellationToken);
         var delta = operation == QuotaLedgerOperation.Remove ? -Math.Abs(bytes) : Math.Abs(bytes);
-        account.UsedBytes = Math.Max(0, account.UsedBytes + delta);
-        domain.UsedBytes = Math.Max(0, domain.UsedBytes + delta);
+        MailboxWriteAccounting.ApplyQuotaDelta(account, domain, delta);
         db.QuotaLedger.Add(new QuotaLedgerEntry
         {
             IdempotencyKey = idempotencyKey,
@@ -56,6 +55,20 @@ public sealed class QuotaReconciliationService(
     {
         await using var db = await factory.CreateDbContextAsync(cancellationToken);
         await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
+        // Older soft-deleted rows were still charged until physical purge. Bring them into
+        // the new accounting model before recomputing counters so a later purge cannot debit twice.
+        var legacyDeleted = db.MailboxMessages.IgnoreQueryFilters()
+            .Where(x => x.DeletedAt != null && !x.QuotaReleased);
+        if (db.Database.ProviderName == "Microsoft.EntityFrameworkCore.InMemory")
+        {
+            foreach (var message in await legacyDeleted.ToListAsync(cancellationToken))
+                message.QuotaReleased = true;
+        }
+        else
+        {
+            await legacyDeleted.ExecuteUpdateAsync(
+                updates => updates.SetProperty(x => x.QuotaReleased, true), cancellationToken);
+        }
         var accounts = await db.Accounts.ToListAsync(cancellationToken);
         var changed = 0;
         foreach (var account in accounts)
@@ -259,8 +272,30 @@ public sealed class CleanupQueueService(
                 foreach (var mailbox in restoredMailboxes)
                 { mailbox.DeletedAt = mailbox.PurgeAfter = null; mailbox.DeletedBy = null; }
                 var restoredMailboxIds = restoredMailboxes.Select(x => x.Id).ToArray();
-                foreach (var mailboxMessage in await db.MailboxMessages.IgnoreQueryFilters().Where(x => restoredMailboxIds.Contains(x.MailboxId)).ToListAsync(cancellationToken))
-                { mailboxMessage.DeletedAt = mailboxMessage.PurgeAfter = null; mailboxMessage.DeletedBy = null; }
+                var restoredAccounts = await db.Accounts.IgnoreQueryFilters()
+                    .Where(x => x.DomainId == id).ToDictionaryAsync(x => x.Id, cancellationToken);
+                var mailboxAccounts = restoredMailboxes.ToDictionary(x => x.Id, x => x.AccountId);
+                foreach (var mailboxMessage in await db.MailboxMessages.IgnoreQueryFilters()
+                    .Where(x => restoredMailboxIds.Contains(x.MailboxId)).Include(x => x.Message).ToListAsync(cancellationToken))
+                {
+                    if (mailboxMessage.QuotaReleased)
+                    {
+                        var bytes = mailboxMessage.Message.Size;
+                        MailboxWriteAccounting.ApplyQuotaDelta(
+                            restoredAccounts[mailboxAccounts[mailboxMessage.MailboxId]], domain, bytes);
+                        mailboxMessage.QuotaReleased = false;
+                        db.QuotaLedger.Add(new QuotaLedgerEntry
+                        {
+                            IdempotencyKey = $"mailbox-message:restore:{queueId:N}:{mailboxMessage.Id:N}",
+                            AccountId = mailboxAccounts[mailboxMessage.MailboxId],
+                            DomainId = domain.Id,
+                            MailboxMessageId = mailboxMessage.Id,
+                            Operation = QuotaLedgerOperation.Add,
+                            Bytes = bytes
+                        });
+                    }
+                    mailboxMessage.DeletedAt = mailboxMessage.PurgeAfter = null; mailboxMessage.DeletedBy = null;
+                }
                 break;
             case CleanupResourceType.Account:
                 var restoredAccount = await db.Accounts.IgnoreQueryFilters().SingleOrDefaultAsync(x => x.Id == id, cancellationToken);
@@ -272,8 +307,28 @@ public sealed class CleanupQueueService(
                 foreach (var accountMailbox in accountMailboxes)
                 { accountMailbox.DeletedAt = accountMailbox.PurgeAfter = null; accountMailbox.DeletedBy = null; }
                 var accountMailboxIds = accountMailboxes.Select(x => x.Id).ToArray();
-                foreach (var accountMailboxMessage in await db.MailboxMessages.IgnoreQueryFilters().Where(x => accountMailboxIds.Contains(x.MailboxId)).ToListAsync(cancellationToken))
-                { accountMailboxMessage.DeletedAt = accountMailboxMessage.PurgeAfter = null; accountMailboxMessage.DeletedBy = null; }
+                var restoredDomain = await db.Domains.IgnoreQueryFilters()
+                    .SingleAsync(x => x.Id == restoredAccount.DomainId, cancellationToken);
+                foreach (var accountMailboxMessage in await db.MailboxMessages.IgnoreQueryFilters()
+                    .Where(x => accountMailboxIds.Contains(x.MailboxId)).Include(x => x.Message).ToListAsync(cancellationToken))
+                {
+                    if (accountMailboxMessage.QuotaReleased)
+                    {
+                        var bytes = accountMailboxMessage.Message.Size;
+                        MailboxWriteAccounting.ApplyQuotaDelta(restoredAccount, restoredDomain, bytes);
+                        accountMailboxMessage.QuotaReleased = false;
+                        db.QuotaLedger.Add(new QuotaLedgerEntry
+                        {
+                            IdempotencyKey = $"mailbox-message:restore:{queueId:N}:{accountMailboxMessage.Id:N}",
+                            AccountId = restoredAccount.Id,
+                            DomainId = restoredDomain.Id,
+                            MailboxMessageId = accountMailboxMessage.Id,
+                            Operation = QuotaLedgerOperation.Add,
+                            Bytes = bytes
+                        });
+                    }
+                    accountMailboxMessage.DeletedAt = accountMailboxMessage.PurgeAfter = null; accountMailboxMessage.DeletedBy = null;
+                }
                 break;
             case CleanupResourceType.Mailbox:
                 var restoredMailbox = await db.Mailboxes.IgnoreQueryFilters().SingleOrDefaultAsync(x => x.Id == id, cancellationToken);
@@ -284,7 +339,8 @@ public sealed class CleanupQueueService(
                 restoredMailbox.DeletedAt = restoredMailbox.PurgeAfter = null; restoredMailbox.DeletedBy = null;
                 break;
             case CleanupResourceType.MailboxMessage:
-                var message = await db.MailboxMessages.IgnoreQueryFilters().SingleOrDefaultAsync(x => x.Id == id, cancellationToken);
+                var message = await db.MailboxMessages.IgnoreQueryFilters().Include(x => x.Message)
+                    .SingleOrDefaultAsync(x => x.Id == id, cancellationToken);
                 if (message is null) throw new RecycleBinConflictException("邮件已恢复或被清理，请刷新回收站。");
                 var sourceMailbox = await db.Mailboxes.IgnoreQueryFilters()
                     .SingleOrDefaultAsync(x => x.Id == message.MailboxId
@@ -303,13 +359,30 @@ public sealed class CleanupQueueService(
                         throw new RecycleBinConflictException("收件箱不存在或正在删除，暂时无法恢复邮件。");
                     await MailboxService.EnsureUidNextAtLeastAsync(db, inbox, cancellationToken);
                     message.MailboxId = inbox.Id;
-                    message.Uid = inbox.UidNext++;
+                    message.Uid = MailboxWriteAccounting.TakeUid(inbox);
                     message.ModSeq = ++inbox.HighestModSeq;
                 }
                 message.Flags = string.Join(' ', message.Flags.Split(' ', StringSplitOptions.RemoveEmptyEntries)
                     .Where(flag => !flag.Equals("\\Deleted", StringComparison.OrdinalIgnoreCase)));
                 message.ScheduledDeleteAt = null;
                 message.DeletedAt = message.PurgeAfter = null; message.DeletedBy = null;
+                if (message.QuotaReleased)
+                {
+                    var bytes = message.Message.Size;
+                    var account = await db.Accounts.IgnoreQueryFilters()
+                        .Include(x => x.Domain).SingleAsync(x => x.Id == sourceMailbox.AccountId, cancellationToken);
+                    MailboxWriteAccounting.ApplyQuotaDelta(account, bytes);
+                    message.QuotaReleased = false;
+                    db.QuotaLedger.Add(new QuotaLedgerEntry
+                    {
+                        IdempotencyKey = $"mailbox-message:restore:{queueId:N}",
+                        AccountId = account.Id,
+                        DomainId = account.DomainId,
+                        MailboxMessageId = message.Id,
+                        Operation = QuotaLedgerOperation.Add,
+                        Bytes = bytes
+                    });
+                }
                 foreach (var duplicate in await db.CleanupQueue.Where(x => x.Id != queueId
                     && x.ResourceType == CleanupResourceType.MailboxMessage && x.ResourceId == id
                     && (x.Status == CleanupQueueStatus.Pending || x.Status == CleanupQueueStatus.Failed))
@@ -377,12 +450,15 @@ public sealed class CleanupQueueService(
                                 .SingleOrDefaultAsync(x => x.Id == id, cancellationToken);
                             if (mm is not null)
                             {
-                                contentKeys.Add(mm.Message.ContentKey); released = mm.Message.Size;
-                                mm.Mailbox.Account.UsedBytes = Math.Max(0, mm.Mailbox.Account.UsedBytes - released);
-                                var domain = await db.Domains.IgnoreQueryFilters().SingleAsync(x => x.Id == mm.Mailbox.Account.DomainId, cancellationToken);
-                                domain.UsedBytes = Math.Max(0, domain.UsedBytes - released);
+                                contentKeys.Add(mm.Message.ContentKey);
+                                if (!mm.QuotaReleased)
+                                {
+                                    released = mm.Message.Size;
+                                    var domain = await db.Domains.IgnoreQueryFilters().SingleAsync(x => x.Id == mm.Mailbox.Account.DomainId, cancellationToken);
+                                    MailboxWriteAccounting.ApplyQuotaDelta(mm.Mailbox.Account, domain, -released);
+                                }
                                 db.MailboxMessages.Remove(mm);
-                                db.QuotaLedger.Add(new QuotaLedgerEntry
+                                if (released > 0) db.QuotaLedger.Add(new QuotaLedgerEntry
                                 {
                                     IdempotencyKey = $"cleanup:{item.Id:N}:{mm.Id:N}",
                                     AccountId = mm.Mailbox.AccountId,
@@ -400,10 +476,9 @@ public sealed class CleanupQueueService(
                             {
                                 var mailboxMessages = await db.MailboxMessages.IgnoreQueryFilters().Where(x => x.MailboxId == id)
                                     .Include(x => x.Message).ToListAsync(cancellationToken);
-                                released = mailboxMessages.Sum(x => x.Message.Size);
+                                released = mailboxMessages.Where(x => !x.QuotaReleased).Sum(x => x.Message.Size);
                                 foreach (var value in mailboxMessages) contentKeys.Add(value.Message.ContentKey);
-                                mailbox.Account.UsedBytes = Math.Max(0, mailbox.Account.UsedBytes - released);
-                                mailbox.Account.Domain.UsedBytes = Math.Max(0, mailbox.Account.Domain.UsedBytes - released);
+                                MailboxWriteAccounting.ApplyQuotaDelta(mailbox.Account, -released);
                                 db.Mailboxes.Remove(mailbox);
                             }
                             break;
@@ -415,7 +490,7 @@ public sealed class CleanupQueueService(
                                 var accountKeys = await db.MailboxMessages.IgnoreQueryFilters()
                                     .Where(x => x.Mailbox.AccountId == id).Select(x => x.Message.ContentKey).ToListAsync(cancellationToken);
                                 foreach (var value in accountKeys) contentKeys.Add(value);
-                                account.Domain.UsedBytes = Math.Max(0, account.Domain.UsedBytes - account.UsedBytes);
+                                MailboxWriteAccounting.ApplyQuotaDelta(account, account.Domain, -account.UsedBytes);
                                 db.Accounts.Remove(account);
                             }
                             break;

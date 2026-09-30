@@ -408,6 +408,7 @@ public sealed class MailboxMessage
     public DateTimeOffset? DeletedAt { get; set; }
     public string? DeletedBy { get; set; }
     public DateTimeOffset? PurgeAfter { get; set; }
+    public bool QuotaReleased { get; set; }
 }
 
 public sealed class QuarantineRecord

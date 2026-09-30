@@ -78,9 +78,9 @@ public sealed class ResourceManagementTests
     [InlineData("1gb", 8, 2, 16, 32)]
     [InlineData("2gb", 16, 4, 32, 64)]
     [InlineData("4gb", 32, 8, 64, 128)]
-    [InlineData("8gb", 64, 16, 128, 256)]
-    [InlineData("16gb", 128, 32, 256, 512)]
-    [InlineData("32gb", 256, 64, 512, 1024)]
+    [InlineData("8gb", 64, 16, 1024, 256)]
+    [InlineData("16gb", 128, 32, 2048, 512)]
+    [InlineData("32gb", 256, 64, 4096, 1024)]
     public void ProfilesApplyWithoutDisconnectingExistingWork(string id, int mib, int workers, int smtp, int imap)
     {
         var config = new ConfigurationBuilder().Build();
@@ -89,7 +89,9 @@ public sealed class ResourceManagementTests
         runtime.Apply(id, cache);
         Assert.Equal(mib * 1024L * 1024, cache.Options.SizeLimitBytes);
         Assert.Equal(workers, runtime.Delivery.Limit);
-        Assert.Equal(smtp, runtime.Smtp.Limit);
+        var memoryBound = (int)Math.Clamp(
+            GC.GetGCMemoryInfo().TotalAvailableMemoryBytes / (512L * 1024), 8, int.MaxValue);
+        Assert.Equal(Math.Min(smtp, memoryBound), runtime.Smtp.Limit);
         Assert.Equal(imap, runtime.Imap.Limit);
         using var first = runtime.Delivery.TryAcquire();
         using var second = runtime.Delivery.TryAcquire();
@@ -117,6 +119,29 @@ public sealed class ResourceManagementTests
             Assert.Equal(3, runtime.Smtp.Limit);
         }
         Assert.Equal(128 * 1024L * 1024, total);
+    }
+
+    [Fact]
+    public void ActiveSmtpMessageLimitDoesNotConsumeConnectionCapacity()
+    {
+        var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["Smtp:MaximumConnections"] = "4096",
+            ["Smtp:MaximumActiveMessages"] = "1"
+        }).Build();
+        using var cache = Cache();
+        var runtime = new ResourceRuntime("smtp", config);
+        runtime.Apply("32gb", cache);
+        Assert.Equal(Math.Min(4096, (int)Math.Clamp(
+            GC.GetGCMemoryInfo().TotalAvailableMemoryBytes / (512L * 1024), 8, int.MaxValue)), runtime.Smtp.Limit);
+        Assert.Equal(1, runtime.SmtpMessages.Limit);
+        using var activeMessage = runtime.SmtpMessages.TryAcquire();
+        Assert.NotNull(activeMessage);
+        Assert.Null(runtime.SmtpMessages.TryAcquire());
+        using var idleConnection = runtime.Smtp.TryAcquire();
+        Assert.NotNull(idleConnection);
+        Assert.Equal(1, runtime.Snapshot().ActiveSmtpMessages);
+        Assert.Equal(1, runtime.Snapshot().SmtpMessageLimit);
     }
 
     [Fact]

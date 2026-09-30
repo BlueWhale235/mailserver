@@ -1121,6 +1121,11 @@ namespace MailServer.Migrations.Sqlite.Migrations
                     b.Property<long?>("PurgeAfter")
                         .HasColumnType("INTEGER");
 
+                    b.Property<bool>("QuotaReleased")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER")
+                        .HasDefaultValue(false);
+
                     b.Property<long?>("ScheduledDeleteAt")
                         .HasColumnType("INTEGER");
 

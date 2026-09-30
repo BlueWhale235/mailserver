@@ -27,6 +27,8 @@ export interface ResourceUsage {
   imapLimit: number
   activeDeliveries: number
   activeSmtp: number
+  smtpMessageLimit?: number
+  activeSmtpMessages?: number
   activeImap: number
   serviceStates?: Record<string, string> | null
 }

@@ -1123,6 +1123,11 @@ namespace MailServer.Migrations.MySql.Migrations
                     b.Property<DateTimeOffset?>("PurgeAfter")
                         .HasColumnType("datetime");
 
+                    b.Property<bool>("QuotaReleased")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("tinyint(1)")
+                        .HasDefaultValue(false);
+
                     b.Property<DateTimeOffset?>("ScheduledDeleteAt")
                         .HasColumnType("datetime");
 

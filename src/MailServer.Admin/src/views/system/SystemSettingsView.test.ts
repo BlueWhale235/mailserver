@@ -140,6 +140,7 @@ describe('system settings safeguards', () => {
           lastSeenAt: new Date().toISOString(), estimatedCacheBytes: 1024, state: 'applied', message: null,
           usage: { profileId: '1gb', cacheBudgetBytes: 8388608, deliveryLimit: 2,
             smtpLimit: 16, imapLimit: 32, activeDeliveries: 0, activeSmtp: 1, activeImap: 2,
+            smtpMessageLimit: 2, activeSmtpMessages: 1,
             serviceStates: { smtp: 'listening', imap: 'listening' } } }],
       } as never
       return previous(path, init)
@@ -150,6 +151,7 @@ describe('system settings safeguards', () => {
     expect(wrapper.text()).toContain('SMTP 服务状态')
     expect(wrapper.text()).toContain('IMAP 服务状态')
     expect(wrapper.text()).toContain('正在监听')
+    expect(wrapper.text()).toContain('活跃邮件处理 / 上限')
     expect(wrapper.text()).not.toContain('规则版本')
     wrapper.unmount()
   })
@@ -163,7 +165,7 @@ describe('system settings safeguards', () => {
     const wrapper = mountView()
     await flushPromises()
     await wrapper.findAll('.settings-nav button').find(x => x.text().includes('资源与性能'))!.trigger('click')
-    expect(wrapper.findAll('[role="radio"]')).toHaveLength(6)
+    expect(wrapper.findAll('[role="radio"]')).toHaveLength(7)
     expect(wrapper.text()).not.toContain('命中统计')
     expect(wrapper.text()).not.toContain('规则版本')
     await wrapper.findAll('[role="radio"]').find(x => x.text().includes('16 GB'))!.trigger('click')
@@ -171,7 +173,7 @@ describe('system settings safeguards', () => {
     const cacheField = wrapper.findAllComponents(TextField).find(x => x.props('label') === '配置缓存总预算（MiB）')!
     cacheField.vm.$emit('update:modelValue', 96)
     await nextTick()
-    expect(wrapper.text()).toContain('自定义（基于大型 · 16 GB 以上）')
+    expect(wrapper.text()).toContain('自定义（基于大型 · 16 GB）')
     await wrapper.findAll('button').find(x => x.text() === '恢复该预设')!.trigger('click')
     expect(wrapper.find('.cache-summary').text()).toContain('128.00 MiB')
     expect(wrapper.text()).toContain('当前分区有未保存修改')
@@ -181,7 +183,7 @@ describe('system settings safeguards', () => {
     await wrapper.findAll('button').find(x => x.text() === '保存当前设置')!.trigger('click')
     await flushPromises()
     expect(api).toHaveBeenCalledWith('/settings/resources', { method: 'PUT', body: JSON.stringify({ profileId: '16gb', values: {
-      cacheBytes: 134217728, entryBytes: 16777216, deliveryConcurrency: 32, smtpConnections: 256,
+      cacheBytes: 134217728, entryBytes: 16777216, deliveryConcurrency: 32, smtpConnections: 2048,
       imapConnections: 512, versionPollSeconds: 3, absoluteRefreshSeconds: 60,
       maximumConcurrentLoads: 2, ruleFallbackBatchSize: 64,
     } }) })
@@ -198,7 +200,7 @@ describe('system settings safeguards', () => {
     const wrapper = mountView()
     await flushPromises()
     await wrapper.findAll('.settings-nav button').find(x => x.text().includes('资源与性能'))!.trigger('click')
-    expect(wrapper.findAll('[role="radio"]')).toHaveLength(6)
+    expect(wrapper.findAll('[role="radio"]')).toHaveLength(7)
     expect(wrapper.text()).toContain('暂时无法获取服务状态')
     expect(wrapper.text()).not.toContain('database details')
     wrapper.unmount()

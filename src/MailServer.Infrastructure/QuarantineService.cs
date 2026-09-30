@@ -172,8 +172,7 @@ public sealed class QuarantineService(
         foreach (var recipient in recipients)
         {
             var account = await ResolveActiveAccountAsync(db, domainId, recipient, cancellationToken);
-            if (account.UsedBytes + record.Message.Size > account.QuotaBytes
-                || account.Domain.UsedBytes + record.Message.Size > account.Domain.QuotaBytes)
+            if (MailboxWriteAccounting.CheckQuota(account, record.Message.Size) != QuotaAvailability.Available)
                 throw new InvalidOperationException($"Quota exceeded for {recipient}.");
 
             var mailbox = await db.Mailboxes.SingleOrDefaultAsync(
@@ -190,13 +189,12 @@ public sealed class QuarantineService(
             {
                 Mailbox = mailbox,
                 Message = record.Message,
-                Uid = mailbox.UidNext++,
+                Uid = MailboxWriteAccounting.TakeUid(mailbox),
                 ModSeq = ++mailbox.HighestModSeq,
                 InternalDate = record.QuarantinedAt
             };
             db.MailboxMessages.Add(item);
-            account.UsedBytes += record.Message.Size;
-            account.Domain.UsedBytes += record.Message.Size;
+            MailboxWriteAccounting.ApplyQuotaDelta(account, record.Message.Size);
             db.QuotaLedger.Add(new QuotaLedgerEntry
             {
                 IdempotencyKey = $"quarantine-release:add:{record.Id:N}:{item.Id:N}",

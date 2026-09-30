@@ -26,6 +26,7 @@ public sealed class SmtpServerOptions
     public string HostName { get; set; } = "mail.localhost";
     public int CommandTimeoutSeconds { get; set; } = 300;
     public int MaximumConnections { get; set; } = 200;
+    public int MaximumActiveMessages { get; set; } = 4;
     public int MaximumRecipients { get; set; } = 100;
     public long MaximumMessageBytes { get; set; } = 52_428_800;
     public List<SmtpEndpointOptions> Endpoints { get; set; } = [];
@@ -88,6 +89,8 @@ public sealed class SmtpServerService(
     private readonly List<TcpListener> _listeners = [];
     private readonly List<Task> _acceptLoops = [];
     private AdjustableConcurrencyLimit _connectionLimit = null!;
+    private readonly AdjustableConcurrencyLimit _messageLimit = resources?.SmtpMessages
+        ?? new AdjustableConcurrencyLimit(options.Value.MaximumActiveMessages);
     private readonly SmtpAuthFailureLimiter _authFailures = new(abuseOptions?.Value ?? new SmtpAbuseOptions());
     private volatile bool _stopping;
 
@@ -593,12 +596,22 @@ public sealed class SmtpServerService(
                             await connection.ReplyAsync("250 2.1.5 Recipient OK", serverCancellationToken);
                             break;
                         case "DATA":
+                        {
                             if (state.Sender is null || state.Recipients.Count == 0)
                             {
                                 logger.LogInformation(
                                     "SMTP DATA from {Remote} was rejected because MAIL FROM or RCPT TO was missing.",
                                     remote);
                                 await connection.ReplyAsync("503 5.5.1 Need MAIL FROM and RCPT TO first", serverCancellationToken);
+                                break;
+                            }
+
+                            using var messagePermit = _messageLimit.TryAcquire();
+                            if (messagePermit is null)
+                            {
+                                logger.LogInformation("SMTP DATA from {Remote} deferred: active message limit reached.", remote);
+                                state.ResetTransaction();
+                                await connection.ReplyAsync("451 4.3.2 Server busy; retry later", serverCancellationToken);
                                 break;
                             }
 
@@ -811,6 +824,7 @@ public sealed class SmtpServerService(
 
                             state.ResetTransaction();
                             break;
+                        }
                         default:
                             logger.LogDebug(
                                 "SMTP command {Command} from {Remote} is not implemented.",

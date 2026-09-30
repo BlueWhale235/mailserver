@@ -230,7 +230,7 @@ public sealed class MailboxFolderManagementService(
                     throw new InvalidOperationException($"INBOX is missing for account {message.Mailbox.AccountId}.");
                 await MailboxService.EnsureUidNextAtLeastAsync(db, inbox, cancellationToken);
                 message.MailboxId = inbox.Id;
-                message.Uid = inbox.UidNext++;
+                message.Uid = MailboxWriteAccounting.TakeUid(inbox);
                 message.ModSeq = ++inbox.HighestModSeq;
                 message.ScheduledDeleteAt = null;
             }

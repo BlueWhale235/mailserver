@@ -35,9 +35,9 @@ public static class ResourceProfiles
         new ResourceProfile("1gb", "小型 · 1 GB", 8 * MiB, MiB, 2, 16, 32),
         new ResourceProfile("2gb", "轻量 · 2 GB", 16 * MiB, 2 * MiB, 4, 32, 64),
         new ResourceProfile("4gb", "标准 · 4 GB", 32 * MiB, 4 * MiB, 8, 64, 128),
-        new ResourceProfile("8gb", "增强 · 8 GB", 64 * MiB, 8 * MiB, 16, 128, 256),
-        new ResourceProfile("16gb", "大型 · 16 GB", 128 * MiB, 16 * MiB, 32, 256, 512),
-        new ResourceProfile("32gb", "超大型 · 32 GB", 256 * MiB, 32 * MiB, 64, 512, 1024)
+        new ResourceProfile("8gb", "增强 · 8 GB", 64 * MiB, 8 * MiB, 16, 1024, 256),
+        new ResourceProfile("16gb", "大型 · 16 GB", 128 * MiB, 16 * MiB, 32, 2048, 512),
+        new ResourceProfile("32gb", "超大型 · 32 GB", 256 * MiB, 32 * MiB, 64, 4096, 1024)
     });
     public static ResourceProfile Get(string id) => All.FirstOrDefault(x => x.Id == id)
         ?? throw new ArgumentException("请选择有效的内存档位。", nameof(id));
@@ -82,7 +82,8 @@ public sealed record ResourceSettingsView(string? ProfileId, IReadOnlyList<Resou
 public sealed record ResourceUsage(string? ProfileId, long CacheBudgetBytes, int DeliveryLimit,
     int SmtpLimit, int ImapLimit, int ActiveDeliveries, int ActiveSmtp, int ActiveImap, bool ApplyFailed,
     string? ConfigurationId = null, string? ProtectionConfigurationId = null, int ProtectedSources = 0,
-    IReadOnlyDictionary<string, string>? ServiceStates = null);
+    IReadOnlyDictionary<string, string>? ServiceStates = null,
+    int SmtpMessageLimit = 0, int ActiveSmtpMessages = 0);
 public sealed record ResourceProcessView(string ProcessId, string InstanceName, string[] Roles,
     DateTimeOffset LastSeenAt, long EstimatedCacheBytes, ResourceUsage? Usage, string State, string? Message);
 public sealed record ResourceStatusView(long TotalCacheBudgetBytes, IReadOnlyList<ResourceProcessView> Processes,
@@ -99,6 +100,7 @@ public sealed class ResourceRuntime(string role, IConfiguration configuration)
     public string Role { get; } = role;
     public bool UsesCache => Role is "smtp" or "imap" or "worker" or "all";
     public AdjustableConcurrencyLimit Smtp { get; } = new(configuration.GetValue("Smtp:MaximumConnections", 200));
+    public AdjustableConcurrencyLimit SmtpMessages { get; } = new(configuration.GetValue("Smtp:MaximumActiveMessages", 4));
     public AdjustableConcurrencyLimit Imap { get; } = new(configuration.GetValue("Imap:MaximumConnections", 200));
     public AdjustableConcurrencyLimit Delivery { get; } = new(8);
     public AdjustableConcurrencyLimit LargeMime { get; } = new(1);
@@ -106,7 +108,8 @@ public sealed class ResourceRuntime(string role, IConfiguration configuration)
     {
         lock (_sync) return new(_profileId, _cacheBudget, Delivery.Limit, Smtp.Limit, Imap.Limit,
             Delivery.Active, Smtp.Active, Imap.Active, _applyFailed, _configurationId,
-            ServiceStates: new Dictionary<string, string>(_serviceStates));
+            ServiceStates: new Dictionary<string, string>(_serviceStates),
+            SmtpMessageLimit: SmtpMessages.Limit, ActiveSmtpMessages: SmtpMessages.Active);
     }
     public void SetServiceState(string role, string state)
     {
@@ -127,7 +130,14 @@ public sealed class ResourceRuntime(string role, IConfiguration configuration)
                     "imap" or "worker" => values.CacheBytes / 4, _ => 0 };
                 cache.Reconfigure(budget, Math.Min(values.EntryBytes, budget), values.VersionPollSeconds,
                     values.AbsoluteRefreshSeconds, values.MaximumConcurrentLoads, values.RuleFallbackBatchSize);
-                Smtp.Resize(Math.Min(values.SmtpConnections, configuration.GetValue<int?>("Smtp:MaximumConnections") ?? int.MaxValue));
+                var availableMemory = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
+                var connectionMemoryBound = (int)Math.Clamp(availableMemory / (512L * 1024), 8, int.MaxValue);
+                Smtp.Resize(Math.Min(Math.Min(values.SmtpConnections, connectionMemoryBound),
+                    configuration.GetValue<int?>("Smtp:MaximumConnections") ?? int.MaxValue));
+                var memoryBound = (int)Math.Clamp(
+                    availableMemory / (256L * 1024 * 1024), 1, int.MaxValue);
+                SmtpMessages.Resize(Math.Min(Math.Min(values.DeliveryConcurrency, memoryBound),
+                    configuration.GetValue("Smtp:MaximumActiveMessages", 16)));
                 Imap.Resize(Math.Min(values.ImapConnections, configuration.GetValue<int?>("Imap:MaximumConnections") ?? int.MaxValue));
                 Delivery.Resize(values.DeliveryConcurrency);
                 LargeMime.Resize(settings.ProfileId == "512mb" ? 1 : Math.Clamp(values.ImapConnections / 16, 1, 8));

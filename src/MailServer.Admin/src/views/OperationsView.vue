@@ -14,7 +14,7 @@ interface Detail { message: MailRow; originalRecipients: string[]; mailboxCopies
 interface Content { fromHeader: string; subject: string; headers: string; text: string; truncated: boolean; attachments: string[] }
 interface Delivery { id: string; recipient: string; status: string; attempts: number; lastError?: string }
 interface Attempt { attemptNumber: number; succeeded: boolean; remoteHost?: string; smtpStatusCode?: string; response?: string }
-interface Process { processId: string; instanceName: string; roles: string[]; state: string; message?: string; lastSeenAt: string; estimatedCacheBytes: number; usage?: { activeDeliveries: number; activeSmtp: number; activeImap: number; deliveryLimit: number; smtpLimit: number; imapLimit: number; serviceStates?: Record<string, string> } }
+interface Process { processId: string; instanceName: string; roles: string[]; state: string; message?: string; lastSeenAt: string; estimatedCacheBytes: number; usage?: { activeDeliveries: number; activeSmtp: number; activeImap: number; activeSmtpMessages?: number; deliveryLimit: number; smtpLimit: number; smtpMessageLimit?: number; imapLimit: number; serviceStates?: Record<string, string> } }
 interface Task { id: string; type: string; name: string; status: string; lastRunAt?: string }
 interface Execution { scheduledTaskId: string; status: string; startedAt: string; processedCount: number; error?: string }
 
@@ -187,7 +187,7 @@ onMounted(() => {
     <v-card v-for="process in status" :key="process.processId" class="mb-3">
       <v-card-title>{{ process.instanceName }} · {{ process.roles.join(' / ').toUpperCase() }} · {{ stateNames[process.state] || process.state }}</v-card-title>
       <v-card-text>最后上报：{{ new Date(process.lastSeenAt).toLocaleString() }} · 缓存估算：{{ process.estimatedCacheBytes }} 字节
-        <div v-if="process.usage">活动投递 {{ process.usage.activeDeliveries }} / {{ process.usage.deliveryLimit }} · SMTP 连接 {{ process.usage.activeSmtp }} / {{ process.usage.smtpLimit }} · IMAP 连接 {{ process.usage.activeImap }} / {{ process.usage.imapLimit }}</div>
+        <div v-if="process.usage">活动投递 {{ process.usage.activeDeliveries }} / {{ process.usage.deliveryLimit }} · SMTP 连接 {{ process.usage.activeSmtp }} / {{ process.usage.smtpLimit }}<template v-if="process.usage.smtpMessageLimit"> · 活跃邮件处理 {{ process.usage.activeSmtpMessages }} / {{ process.usage.smtpMessageLimit }}</template> · IMAP 连接 {{ process.usage.activeImap }} / {{ process.usage.imapLimit }}</div>
         <div v-for="[role, state] in Object.entries(process.usage?.serviceStates || {})" :key="role">{{ role.toUpperCase() }}：{{ state }}</div>
         <div v-if="process.message">{{ process.message }}</div>
       </v-card-text>

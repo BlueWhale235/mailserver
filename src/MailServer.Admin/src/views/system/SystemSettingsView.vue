@@ -669,6 +669,7 @@ onBeforeUnmount(() => {
                 <div><dt>配置缓存估算用量</dt><dd>{{ formatBytes(process.estimatedCacheBytes) }} / {{ formatBytes(process.usage.cacheBudgetBytes) }}</dd></div>
                 <div v-if="process.roles.includes('worker')"><dt>正在投递 / 并发上限</dt><dd>{{ process.usage.activeDeliveries }} / {{ process.usage.deliveryLimit }}</dd></div>
                 <div v-if="process.roles.includes('smtp')"><dt>SMTP 连接 / 上限</dt><dd>{{ process.usage.activeSmtp }} / {{ process.usage.smtpLimit }}</dd></div>
+                <div v-if="process.roles.includes('smtp') && process.usage.smtpMessageLimit"><dt>活跃邮件处理 / 上限</dt><dd>{{ process.usage.activeSmtpMessages }} / {{ process.usage.smtpMessageLimit }}</dd></div>
                 <div v-if="process.roles.includes('imap')"><dt>IMAP 连接 / 上限</dt><dd>{{ process.usage.activeImap }} / {{ process.usage.imapLimit }}</dd></div>
                 <div v-for="role in process.roles" :key="role"><dt>{{ role.toUpperCase() }} 服务状态</dt><dd>{{ serviceStateLabel(process.usage.serviceStates?.[role]) }}</dd></div>
                 <div><dt>最后上报</dt><dd>{{ new Date(process.lastSeenAt).toLocaleString() }}</dd></div>

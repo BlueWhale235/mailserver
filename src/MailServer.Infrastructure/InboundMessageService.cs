@@ -106,8 +106,7 @@ public sealed class InboundMessageService(
                     using var ruleEvaluation = MailRuleService.BeginEvaluationScope();
                     var receivedAt = clock.UtcNow;
                     await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
-                    // 路由、配额、UID 和持久化仍在同一个可串行化事务内完成。
-                    await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
+                    var configurationVersions = await ReadDeliveryVersionsAsync(db, cancellationToken);
                     var storedMessage = new StoredMessage
                     {
                         ContentKey = descriptor.Key,
@@ -145,6 +144,44 @@ public sealed class InboundMessageService(
                     var counters = new DeliveryCounters();
                     // 收件人先展开成账号或外部地址，再按账号/地址分组，避免同一封信经多个别名重复投递。
                     var expandedRecipients = await ExpandRecipientsAsync(db, envelope.Recipients, cancellationToken);
+                    foreach (var group in expandedRecipients.Where(x => x.Account is not null)
+                        .GroupBy(x => x.Account!.Id))
+                    {
+                        var account = group.First().Account!;
+                        var facts = MailRuleService.BuildFacts(mimeMessage, envelope.Sender,
+                            group.Select(x => x.OriginalAddress).Distinct(StringComparer.OrdinalIgnoreCase).ToArray(),
+                            descriptor.Size, receivedAt);
+                        await rules.MatchAsync(account.DomainId, MailRuleDirection.Incoming, facts, cancellationToken);
+                    }
+                    if (envelope.AuthenticatedAccountId is { } senderAccountId)
+                    {
+                        var senderAccount = await db.Accounts.AsNoTracking()
+                            .Where(x => x.Id == senderAccountId && x.IsEnabled && x.Domain.IsActive)
+                            .Select(x => new { x.DomainId }).SingleOrDefaultAsync(cancellationToken);
+                        if (senderAccount is not null)
+                        {
+                            var facts = MailRuleService.BuildFacts(mimeMessage, envelope.Sender,
+                                envelope.Recipients, descriptor.Size, receivedAt);
+                            await rules.MatchAsync(senderAccount.DomainId, MailRuleDirection.Outgoing, facts, cancellationToken);
+                        }
+                    }
+
+                    // Cold rule loading and recipient expansion stay outside the write transaction.
+                    // Recheck their versions under Serializable isolation before using the results.
+                    await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
+                    if (configurationVersions != await ReadDeliveryVersionsAsync(db, cancellationToken))
+                        throw new DeliveryConfigurationChangedException();
+                    var accounts = expandedRecipients.Where(x => x.Account is not null)
+                        .Select(x => x.Account!).DistinctBy(x => x.Id).ToArray();
+                    foreach (var domain in accounts.Select(x => x.Domain).DistinctBy(x => x.Id).OrderBy(x => x.Id))
+                        await db.Entry(domain).ReloadAsync(cancellationToken);
+                    foreach (var account in accounts.OrderBy(x => x.Id))
+                    {
+                        await db.Entry(account).ReloadAsync(cancellationToken);
+                        if (!account.IsEnabled || !account.Domain.IsActive || account.DeletedAt is not null
+                            || account.Domain.DeletedAt is not null)
+                            throw new DeliveryConfigurationChangedException();
+                    }
                     foreach (var group in expandedRecipients.GroupBy(
                                  x => x.Account is null ? $"external:{x.Address}" : $"account:{x.Account.Id}",
                                  StringComparer.OrdinalIgnoreCase))
@@ -235,7 +272,8 @@ public sealed class InboundMessageService(
                 }
                 catch (Exception conflict) when (attempt < maximumAttempts
                     && !cancellationToken.IsCancellationRequested
-                    && DatabaseFailurePolicy.IsMySqlRetryableConflict(conflict))
+                    && (conflict is DeliveryConfigurationChangedException
+                        || DatabaseFailurePolicy.IsMySqlRetryableConflict(conflict)))
                 {
                     var delay = TimeSpan.FromMilliseconds(attempt * Random.Shared.Next(50, 101));
                     logger.LogInformation(
@@ -262,6 +300,18 @@ public sealed class InboundMessageService(
             throw;
         }
     }
+
+    private static async Task<(long Routing, long Rules)> ReadDeliveryVersionsAsync(
+        MailDbContext db, CancellationToken cancellationToken)
+    {
+        var versions = await db.ConfigurationVersions.AsNoTracking()
+            .Where(x => x.Scope == ConfigurationScopes.Routing || x.Scope == ConfigurationScopes.Rules)
+            .ToDictionaryAsync(x => x.Scope, x => x.Version, cancellationToken);
+        return (versions.GetValueOrDefault(ConfigurationScopes.Routing),
+            versions.GetValueOrDefault(ConfigurationScopes.Rules));
+    }
+
+    private sealed class DeliveryConfigurationChangedException : Exception;
 
     private async Task<MimeMessage> LoadMimeMessageWithFallbackAsync(
         string contentKey,
@@ -301,9 +351,10 @@ public sealed class InboundMessageService(
         CancellationToken cancellationToken)
     {
         using var performance = PerformanceTelemetry.Stage("mailbox.deliver-local");
-        if (account.UsedBytes + descriptor.Size > account.QuotaBytes)
+        var quota = MailboxWriteAccounting.CheckQuota(account, descriptor.Size);
+        if (quota == QuotaAvailability.AccountExceeded)
             throw new MailboxQuotaExceededException($"{account.LocalPart}@{account.Domain.Name}");
-        if (account.Domain.UsedBytes + descriptor.Size > account.Domain.QuotaBytes)
+        if (quota == QuotaAvailability.DomainExceeded)
             throw new DomainQuotaExceededException(account.Domain.Name, $"{account.LocalPart}@{account.Domain.Name}");
 
         var facts = MailRuleService.BuildFacts(
@@ -341,13 +392,12 @@ public sealed class InboundMessageService(
         {
             Mailbox = mailbox,
             Message = storedMessage,
-            Uid = mailbox.UidNext++,
+            Uid = MailboxWriteAccounting.TakeUid(mailbox),
             ModSeq = ++mailbox.HighestModSeq,
             InternalDate = receivedAt
         };
         db.MailboxMessages.Add(item);
-        account.UsedBytes += descriptor.Size;
-        account.Domain.UsedBytes += descriptor.Size;
+        MailboxWriteAccounting.ApplyQuotaDelta(account, descriptor.Size);
         db.QuotaLedger.Add(new QuotaLedgerEntry
         {
             IdempotencyKey = $"mailbox-message:add:{item.Id:N}",
