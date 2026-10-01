@@ -213,7 +213,8 @@ public sealed record MailboxItem(
     long ModSeq,
     DateTimeOffset InternalDate,
     long Size,
-    string ContentKey);
+    string ContentKey,
+    Guid MessageId = default);
 
 /// <summary>
 /// 邮箱 APPEND 结果，用于返回新 UID 和邮箱 UIDNEXT。

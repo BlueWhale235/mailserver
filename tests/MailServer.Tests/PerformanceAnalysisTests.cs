@@ -14,6 +14,20 @@ namespace MailServer.Tests;
 public sealed class PerformanceAnalysisTests(ITestOutputHelper output)
 {
     [Fact]
+    public void PendingStoredRefreshCannotOverwriteNewerLocalDiagnosticSettings()
+    {
+        using var collector = new PerformanceCollector();
+        var observed = collector.Settings;
+        var local = observed with { DiagnosticUntil = DateTimeOffset.UtcNow.AddMinutes(15) };
+        collector.Settings = local;
+        collector.ApplyStoredSettings(observed, observed with { SampleRate = .1 });
+        Assert.Same(local, collector.Settings);
+        var refreshed = local with { Enabled = false };
+        collector.ApplyStoredSettings(local, refreshed);
+        Assert.Same(refreshed, collector.Settings);
+    }
+
+    [Fact]
     public async Task NestedWaitIsNotProcessingAndChildrenAreNotDoubleCounted()
     {
         using var collector = new PerformanceCollector { Settings = new() { SampleRate = 1 } };

@@ -14,7 +14,10 @@ public sealed class SentCopyService(
     IMessageContentStore contentStore,
     IOptions<MailRulesOptions> options,
     IClock clock,
-    ILogger<SentCopyService> logger)
+    ILogger<SentCopyService> logger,
+    MailboxChangeSignal? mailboxChanges = null,
+    SearchBackfillWakeSignal? searchWake = null,
+    ResourceRuntime? resources = null)
 {
     private readonly TimeSpan _clientGrace = TimeSpan.FromSeconds(Math.Clamp(options.Value.SentCopyGraceSeconds, 5, 600));
     private readonly TimeSpan _deduplicationWindow = TimeSpan.FromMinutes(Math.Clamp(options.Value.SentCopyDeduplicationMinutes, 1, 1440));
@@ -59,6 +62,7 @@ public sealed class SentCopyService(
         DateTimeOffset? internalDate,
         CancellationToken cancellationToken)
     {
+        using var heavyPermit = resources is not null ? await resources.LargeMime.AcquireAsync(cancellationToken) : null;
         var descriptor = await contentStore.SaveAsync(content, cancellationToken);
         MimeMessage? mimeMessage = null;
         try
@@ -74,7 +78,7 @@ public sealed class SentCopyService(
         try
         {
             await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
-            await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
+            await using var transaction = await MailboxWriteCoordinator.BeginForAccountAsync(db, accountId, cancellationToken);
             var normalizedMailboxName = MailboxNames.Normalize(mailboxName);
             var mailbox = await db.Mailboxes.Include(x => x.Account).ThenInclude(x => x.Domain).SingleAsync(
                 x => x.AccountId == accountId && x.Name == normalizedMailboxName,
@@ -170,6 +174,8 @@ public sealed class SentCopyService(
 
             await db.SaveChangesAsync(cancellationToken);
             await transaction.CommitAsync(cancellationToken);
+            searchWake?.Pulse();
+            mailboxChanges?.Pulse(mailbox.Id);
             return new AppendResult(
                 new MailboxItem(item.Id, 0, item.Uid, item.Flags, item.ModSeq, item.InternalDate, stored.Size, stored.ContentKey),
                 uidValidity,
@@ -221,7 +227,10 @@ public sealed class SentCopyService(
         if (claimed == 0) return false;
 
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
-        await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
+        var writeAccountId = await db.SentCopyJobs.AsNoTracking().Where(x => x.Id == jobId)
+            .Select(x => (Guid?)x.AccountId).SingleOrDefaultAsync(cancellationToken);
+        if (writeAccountId is null) return false;
+        await using var transaction = await MailboxWriteCoordinator.BeginForAccountAsync(db, writeAccountId.Value, cancellationToken);
         var job = await db.SentCopyJobs.Include(x => x.Message).Include(x => x.Account).ThenInclude(x => x.Domain)
             .SingleOrDefaultAsync(x => x.Id == jobId, cancellationToken);
         if (job is null) return false;
@@ -291,6 +300,9 @@ public sealed class SentCopyService(
 
         await db.SaveChangesAsync(cancellationToken);
         await transaction.CommitAsync(cancellationToken);
+            searchWake?.Pulse();
+        mailboxChanges?.Pulse(target.Id);
+        if (clientCopy is not null && clientCopy.MailboxId != target.Id) mailboxChanges?.Pulse(clientCopy.MailboxId);
         logger.LogInformation(
             "Sent-copy job {JobId} completed for account {AccountId}: targetMailbox={TargetMailbox}, clientProvided={ClientProvided}.",
             job.Id,

@@ -225,7 +225,8 @@ public sealed class ConnectionProtection(IConfiguration configuration, ILogger<C
 }
 
 public sealed class ConnectionProtectionSettingsService(IDbContextFactory<MailDbContext> factory,
-    ConfigurationSnapshotCache cache, IConfiguration configuration)
+    ConfigurationSnapshotCache cache, IConfiguration configuration,
+    ResourceRuntime? runtime = null, ConnectionProtection? protection = null)
 {
     public const string Key = "security:connection-protection";
     public async Task<ConnectionProtectionSettings> ReadAsync(CancellationToken token)
@@ -261,22 +262,15 @@ public sealed class ConnectionProtectionSettingsService(IDbContextFactory<MailDb
     public async Task<ConnectionProtectionStatus> StatusAsync(CancellationToken token)
     {
         var desired = await ReadAsync(token);
-        var configurationId = JsonSerializer.Serialize(desired);
-        await using var db = await factory.CreateDbContextAsync(token);
-        var rows = await db.ConfigurationProcessStatuses.AsNoTracking().ToListAsync(token);
-        var cutoff = DateTimeOffset.UtcNow.AddSeconds(-90);
-        var processes = rows.Where(x => x.Roles.Split(',').Any(role => role is "smtp" or "imap"))
-            .Select(x =>
-            {
-                ResourceUsage? usage = null;
-                try { if (x.ResourceStatusJson is not null) usage = JsonSerializer.Deserialize<ResourceUsage>(x.ResourceStatusJson); }
-                catch (JsonException) { }
-                var state = x.LastSeenAt < cutoff ? "offline" : usage?.ApplyFailed == true ? "error"
-                    : usage?.ProtectionConfigurationId == configurationId ? "applied" : "applying";
-                return new ConnectionProtectionProcessStatus(x.InstanceName, x.Roles, x.LastSeenAt,
-                    state, usage?.ProtectedSources ?? 0);
-            }).ToArray();
-        return new ConnectionProtectionStatus(processes);
+        if (runtime is null || protection is null || runtime.Role is not ("smtp" or "imap" or "all"))
+            return new ConnectionProtectionStatus([]);
+        var state = runtime.Snapshot().ApplyFailed ? "error"
+            : protection.Settings == desired ? "applied" : "applying";
+        var roles = runtime.Role == "all" ? "smtp,imap" : runtime.Role;
+        return new ConnectionProtectionStatus([
+            new ConnectionProtectionProcessStatus(Environment.MachineName, roles, DateTimeOffset.UtcNow,
+                state, protection.TrackedSources)
+        ]);
     }
 }
 

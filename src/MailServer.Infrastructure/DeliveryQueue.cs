@@ -16,7 +16,8 @@ public sealed class DeliveryQueue(
     IDbContextFactory<MailDbContext> dbFactory,
     SystemSettingsService settings,
     IOptions<DatabaseOptions> databaseOptions,
-    ILogger<DeliveryQueue> logger) : IDeliveryQueue
+    ILogger<DeliveryQueue> logger,
+    DeliveryWakeSignal? deliveryWake = null) : IDeliveryQueue
 {
     private readonly DatabaseProvider _provider = databaseOptions.Value.Provider;
 
@@ -230,6 +231,7 @@ public sealed class DeliveryQueue(
             job.LeaseUntil = null;
             job.UpdatedAt = now;
             await db.SaveChangesAsync(cancellationToken);
+            deliveryWake?.Pulse();
             return;
         }
         var changed = await db.DeliveryJobs
@@ -249,6 +251,7 @@ public sealed class DeliveryQueue(
             throw new DeliveryStateConflictException("Only failed or deferred jobs without a worker lease can be retried.");
         }
         logger.LogInformation("Delivery job {JobId} was reset for immediate retry.", jobId);
+        deliveryWake?.Pulse();
     }
 
     public async Task DeleteAsync(Guid jobId, CancellationToken cancellationToken)

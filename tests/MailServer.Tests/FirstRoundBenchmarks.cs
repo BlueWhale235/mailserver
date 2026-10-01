@@ -22,6 +22,10 @@ public sealed class FirstRoundBenchmarks(ITestOutputHelper output)
     [InlineData(10, 1)]
     [InlineData(1, 8)]
     [InlineData(10, 8)]
+    [InlineData(1, 2)]
+    [InlineData(1, 3)]
+    [InlineData(10, 2)]
+    [InlineData(10, 3)]
     public async Task SmtpDataThroughput(int mebibytes, int connections)
     {
         var line = Encoding.ASCII.GetBytes(new string('a', 76) + "\r\n");

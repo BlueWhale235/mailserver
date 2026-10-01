@@ -21,7 +21,11 @@ public sealed class InboundMessageService(
     IOptions<ForwardingOptions> forwardingOptions,
     IClock clock,
     ILogger<InboundMessageService> logger,
-    ConfigurationSnapshotCache? configurationCache = null) : IInboundMessageService
+    ConfigurationSnapshotCache? configurationCache = null,
+    DeliveryWakeSignal? deliveryWake = null,
+    MailboxChangeSignal? mailboxChanges = null,
+    ResourceRuntime? resources = null,
+    SearchBackfillWakeSignal? searchWake = null) : IInboundMessageService
 {
     private readonly ForwardingOptions _forwardingOptions = forwardingOptions.Value;
     private sealed record RecipientRoute(bool IsLocal);
@@ -93,11 +97,15 @@ public sealed class InboundMessageService(
             envelope.Recipients.Count,
             envelope.AuthenticatedUser ?? string.Empty,
             envelope.HeloName);
+        var acceptanceStarted = System.Diagnostics.Stopwatch.GetTimestamp();
+        using var heavyPermit = resources is not null ? await resources.HeavyBudget.AcquireAsync(HeavyOperationRole.Inbound, cancellationToken) : null;
         var descriptor = await contentStore.SaveAsync(content, cancellationToken);
         try
         {
-            var mimeMessage = MailRuleService.GetParsedMessage(content)
-                ?? await LoadMimeMessageWithFallbackAsync(descriptor.Key, cancellationToken);
+            var parsedMessage = MailRuleService.GetParsedMessage(content);
+            using var ownedMessage = parsedMessage is null
+                ? await LoadMimeMessageWithFallbackAsync(descriptor.Key, cancellationToken) : null;
+            var mimeMessage = parsedMessage ?? ownedMessage!;
             const int maximumAttempts = 8;
             for (var attempt = 1; ; attempt++)
             {
@@ -168,13 +176,17 @@ public sealed class InboundMessageService(
 
                     // Cold rule loading and recipient expansion stay outside the write transaction.
                     // Recheck their versions under Serializable isolation before using the results.
-                    await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
+                    var writeDomains = await CollectWriteDomainsAsync(db, expandedRecipients, mimeMessage,
+                        envelope, descriptor.Size, receivedAt, forwarding.Depth, cancellationToken);
+                    forwarding.LockedDomains.UnionWith(writeDomains);
+                    await using var transaction = await MailboxWriteCoordinator.BeginAsync(db, writeDomains, cancellationToken);
                     if (configurationVersions != await ReadDeliveryVersionsAsync(db, cancellationToken))
                         throw new DeliveryConfigurationChangedException();
-                    var accounts = expandedRecipients.Where(x => x.Account is not null)
-                        .Select(x => x.Account!).DistinctBy(x => x.Id).ToArray();
-                    foreach (var domain in accounts.Select(x => x.Domain).DistinctBy(x => x.Id).OrderBy(x => x.Id))
-                        await db.Entry(domain).ReloadAsync(cancellationToken);
+                    var accounts = db.ChangeTracker.Entries<MailAccount>().Select(x => x.Entity)
+                        .Where(x => writeDomains.Contains(x.DomainId)).DistinctBy(x => x.Id).ToArray();
+                    if (db.Database.ProviderName?.Contains("MySql", StringComparison.OrdinalIgnoreCase) != true)
+                        foreach (var domain in accounts.Select(x => x.Domain).DistinctBy(x => x.Id).OrderBy(x => x.Id))
+                            await db.Entry(domain).ReloadAsync(cancellationToken);
                     foreach (var account in accounts.OrderBy(x => x.Id))
                     {
                         await db.Entry(account).ReloadAsync(cancellationToken);
@@ -260,14 +272,22 @@ public sealed class InboundMessageService(
                     if (counters.Local == 0 && counters.Queued == 0)
                         throw new InvalidOperationException("Message has no valid recipients.");
 
+                    var changedMailboxes = db.ChangeTracker.Entries<MailboxMessage>()
+                        .Where(entry => entry.State == EntityState.Added)
+                        .Select(entry => entry.Entity.Mailbox?.Id ?? entry.Entity.MailboxId)
+                        .Distinct().ToArray();
                     await db.SaveChangesAsync(cancellationToken);
                     await transaction.CommitAsync(cancellationToken);
+                    searchWake?.Pulse();
+                    if (counters.Queued > 0) deliveryWake?.Pulse();
+                    foreach (var mailboxId in changedMailboxes) mailboxChanges?.Pulse(mailboxId);
                     logger.LogInformation(
                         "Inbound message {MessageId} accepted: localDeliveries={LocalDeliveries}, queuedDeliveries={QueuedDeliveries}, contentKey={ContentKey}.",
                         storedMessage.Id,
                         counters.Local,
                         counters.Queued,
                         descriptor.Key);
+                    resources?.Telemetry.RecordCompletion(true, System.Diagnostics.Stopwatch.GetElapsedTime(acceptanceStarted));
                     return new InboundAcceptance(storedMessage.Id, descriptor.Key, counters.Local, counters.Queued);
                 }
                 catch (Exception conflict) when (attempt < maximumAttempts
@@ -311,6 +331,50 @@ public sealed class InboundMessageService(
             versions.GetValueOrDefault(ConfigurationScopes.Rules));
     }
 
+    private async Task<HashSet<Guid>> CollectWriteDomainsAsync(
+        MailDbContext db, IReadOnlyList<ExpandedRecipient> recipients, MimeMessage message,
+        InboundEnvelope envelope, long size, DateTimeOffset at, int depth, CancellationToken token)
+    {
+        var domains = new HashSet<Guid>();
+        var visited = new HashSet<(Guid Account, string Originals)>();
+        var queue = new Queue<(MailAccount Account, string[] Originals, int Depth)>();
+        foreach (var group in recipients.Where(x => x.Account is not null).GroupBy(x => x.Account!.Id))
+            queue.Enqueue((group.First().Account!, group.Select(x => x.OriginalAddress).ToArray(), depth));
+        async Task AddTargetsAsync(MailRuleMatch? match, int targetDepth)
+        {
+            if (match is null || targetDepth > Math.Clamp(_forwardingOptions.MaxHops, 1, 20)) return;
+            foreach (var raw in match.Actions.Where(x => x.Kind == MailRuleActionKind.ForwardTo)
+                .SelectMany(x => x.Values).Take(Math.Clamp(_forwardingOptions.MaxTargetsPerRule, 1, 100)))
+            {
+                try
+                {
+                    var address = AddressParser.Normalize(raw);
+                    var account = await ResolveLocalAccountAsync(db, address, token);
+                    if (account is not null) queue.Enqueue((account, [address], targetDepth));
+                }
+                catch (FormatException) { /* Delivery retains the original per-target failure handling. */ }
+            }
+        }
+        if (envelope.AuthenticatedAccountId is { } senderId)
+        {
+            var sender = await db.Accounts.Include(x => x.Domain).SingleOrDefaultAsync(x => x.Id == senderId, token);
+            if (sender is not null)
+            {
+                domains.Add(sender.DomainId);
+                var facts = MailRuleService.BuildFacts(message, envelope.Sender, envelope.Recipients, size, at);
+                await AddTargetsAsync(await rules.MatchAsync(sender.DomainId, MailRuleDirection.Outgoing, facts, token), depth + 1);
+            }
+        }
+        while (queue.TryDequeue(out var item))
+        {
+            domains.Add(item.Account.DomainId);
+            if (!visited.Add((item.Account.Id, string.Join("\n", item.Originals.Order(StringComparer.Ordinal))))) continue;
+            var facts = MailRuleService.BuildFacts(message, envelope.Sender, item.Originals, size, at);
+            await AddTargetsAsync(await rules.MatchAsync(item.Account.DomainId, MailRuleDirection.Incoming, facts, token), item.Depth + 1);
+        }
+        return domains;
+    }
+
     private sealed class DeliveryConfigurationChangedException : Exception;
 
     private async Task<MimeMessage> LoadMimeMessageWithFallbackAsync(
@@ -351,6 +415,8 @@ public sealed class InboundMessageService(
         CancellationToken cancellationToken)
     {
         using var performance = PerformanceTelemetry.Stage("mailbox.deliver-local");
+        if (!forwarding.LockedDomains.Contains(account.DomainId))
+            throw new DeliveryConfigurationChangedException();
         var quota = MailboxWriteAccounting.CheckQuota(account, descriptor.Size);
         if (quota == QuotaAvailability.AccountExceeded)
             throw new MailboxQuotaExceededException($"{account.LocalPart}@{account.Domain.Name}");
@@ -659,7 +725,10 @@ public sealed class InboundMessageService(
         int Depth,
         HashSet<Guid> ExecutedRules,
         HashSet<Guid> DeliveredAccounts,
-        HashSet<string> ForwardedTargets);
+        HashSet<string> ForwardedTargets)
+    {
+        public HashSet<Guid> LockedDomains { get; } = [];
+    }
 
     private sealed class DeliveryCounters
     {

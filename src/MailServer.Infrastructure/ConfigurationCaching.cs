@@ -56,7 +56,9 @@ public sealed record ConfigurationCacheStatusView(
 public sealed class ConfigurationVersionService(
     IDbContextFactory<MailDbContext> dbFactory,
     IOptions<ConfigurationCacheOptions> options,
-    ILogger<ConfigurationVersionService> logger)
+    ILogger<ConfigurationVersionService> logger,
+    ConfigurationSnapshotCache cache,
+    ResourceRuntime runtime)
 {
     public async Task<ConfigurationVersionsSnapshot> ReadAsync(CancellationToken cancellationToken)
     {
@@ -115,29 +117,19 @@ public sealed class ConfigurationVersionService(
             versionRows.GetValueOrDefault(ConfigurationScopes.Firewall),
             versionRows.GetValueOrDefault(ConfigurationScopes.Settings),
             versionRows.GetValueOrDefault(ConfigurationScopes.Routing));
-        var statuses = await db.ConfigurationProcessStatuses.AsNoTracking()
-            .OrderBy(x => x.InstanceName).ThenBy(x => x.ProcessId)
-            .ToListAsync(cancellationToken);
-        logger.LogDebug("Read configuration cache status for {ProcessCount} process(es).", statuses.Count);
-        var staleCutoff = DateTimeOffset.UtcNow.AddSeconds(-Math.Max(5, options.Value.ProcessStaleSeconds));
-        return new ConfigurationCacheStatusView(saved, options.Value.SizeLimitBytes, options.Value.ProcessStaleSeconds, statuses.Select(x => new ConfigurationProcessStatusView(
-            x.ProcessId,
-            x.InstanceName,
-            x.Roles.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
-            x.StartedAt,
-            x.LastSeenAt,
-            new ConfigurationVersionsSnapshot(x.RulesVersion, x.FirewallVersion, x.SettingsVersion, x.RoutingVersion),
-            x.EstimatedCacheBytes,
-            x.EntryCount,
-            x.Hits,
-            x.Misses,
-            x.ReloadFailures,
-            x.LastError,
-            x.LastSeenAt < staleCutoff ? "stale"
-                : x.Roles == "api" ? "not-applicable"
-                : x.RulesVersion == saved.Rules && x.FirewallVersion == saved.Firewall
-                    && x.SettingsVersion == saved.Settings && x.RoutingVersion == saved.Routing
-                    ? "current" : "lagging")).ToArray());
+        var now = DateTimeOffset.UtcNow;
+        var roles = runtime.Role == "all" ? new[] { "api", "smtp", "imap", "worker" } : new[] { runtime.Role };
+        var applied = cache.Versions;
+        var state = runtime.UsesCache
+            ? applied == saved ? "current" : "lagging"
+            : "not-applicable";
+        logger.LogDebug("Read in-process configuration cache status for role {Role}.", runtime.Role);
+        return new ConfigurationCacheStatusView(saved, options.Value.SizeLimitBytes, options.Value.ProcessStaleSeconds, [
+            new ConfigurationProcessStatusView(
+                $"{Environment.MachineName}:{Environment.ProcessId}", Environment.MachineName, roles,
+                now, now, applied, cache.EstimatedBytes, cache.EntryCount, cache.Hits, cache.Misses,
+                cache.ReloadFailures, cache.LastError, state)
+        ]);
     }
 }
 
@@ -405,21 +397,16 @@ public sealed class ConfigurationSnapshotCache : IDisposable
 }
 
 public sealed class ConfigurationCacheMonitor(
-    IDbContextFactory<MailDbContext> dbFactory,
     ConfigurationVersionService versions,
     ConfigurationSnapshotCache cache,
-    IOptions<ConfigurationCacheOptions> options,
     ILogger<ConfigurationCacheMonitor> logger,
     ResourceSettingsService resources,
     ResourceRuntime runtime,
     ConnectionProtectionSettingsService protectionSettings,
     ConnectionProtection protection) : BackgroundService
 {
-    private readonly string _processId = $"{Environment.MachineName}:{Environment.ProcessId}:{Guid.NewGuid():N}";
-    private readonly DateTimeOffset _startedAt = DateTimeOffset.UtcNow;
     private long _settingsVersion = -1;
     private DateTimeOffset _lastResourceRead = DateTimeOffset.MinValue;
-    private bool _heartbeatRequested;
 
     public override async Task StartAsync(CancellationToken cancellationToken)
     {
@@ -441,7 +428,6 @@ public sealed class ConfigurationCacheMonitor(
             var connectionSettings = await protectionSettings.ReadAsync(token);
             runtime.Apply(resourceSettings, cache);
             protection.Apply(connectionSettings);
-            _heartbeatRequested = true;
             _settingsVersion = current.Settings;
             _lastResourceRead = DateTimeOffset.UtcNow;
         }
@@ -450,70 +436,19 @@ public sealed class ConfigurationCacheMonitor(
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        var nextHeartbeat = DateTimeOffset.MinValue;
         while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
                 await RefreshAsync(stoppingToken);
-                if (_heartbeatRequested || DateTimeOffset.UtcNow >= nextHeartbeat)
-                {
-                    await WriteHeartbeatAsync(stoppingToken);
-                    _heartbeatRequested = false;
-                    nextHeartbeat = DateTimeOffset.UtcNow.AddSeconds(Math.Max(5, options.Value.StatusHeartbeatSeconds));
-                }
             }
             catch (Exception exception) when (exception is not OperationCanceledException)
             {
                 runtime.MarkFailed();
                 _settingsVersion = -1;
                 logger.LogError(exception, "Configuration version polling failed; existing snapshots remain active.");
-                try { await WriteHeartbeatAsync(stoppingToken); }
-                catch (Exception heartbeatError) when (heartbeatError is not OperationCanceledException)
-                { logger.LogDebug(heartbeatError, "Unable to report resource state."); }
             }
             await Task.Delay(TimeSpan.FromSeconds(Math.Max(1, cache.Options.VersionPollSeconds)), stoppingToken);
         }
-    }
-
-    private async Task WriteHeartbeatAsync(CancellationToken cancellationToken)
-    {
-        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
-        var now = DateTimeOffset.UtcNow;
-        var status = await db.ConfigurationProcessStatuses.SingleOrDefaultAsync(x => x.ProcessId == _processId, cancellationToken);
-        if (status is null)
-        {
-            status = new ConfigurationProcessStatus { ProcessId = _processId, InstanceName = Environment.MachineName, Roles = ResolveRoles(), StartedAt = _startedAt };
-            db.ConfigurationProcessStatuses.Add(status);
-        }
-        var current = cache.Versions;
-        status.LastSeenAt = now;
-        status.RulesVersion = current.Rules;
-        status.FirewallVersion = current.Firewall;
-        status.SettingsVersion = current.Settings;
-        status.RoutingVersion = current.Routing;
-        status.EstimatedCacheBytes = cache.EstimatedBytes;
-        status.EntryCount = cache.EntryCount;
-        status.Hits = cache.Hits;
-        status.Misses = cache.Misses;
-        status.ReloadFailures = cache.ReloadFailures;
-        status.LastError = cache.LastError;
-        status.ResourceStatusJson = System.Text.Json.JsonSerializer.Serialize(runtime.Snapshot() with
-        {
-            ProtectionConfigurationId = System.Text.Json.JsonSerializer.Serialize(protection.Settings),
-            ProtectedSources = protection.TrackedSources
-        });
-        var cutoff = now.AddHours(-Math.Max(1, options.Value.ProcessRetentionHours));
-        await db.ConfigurationProcessStatuses.Where(x => x.LastSeenAt < cutoff).ExecuteDeleteAsync(cancellationToken);
-        await db.SaveChangesAsync(cancellationToken);
-        logger.LogInformation(
-            "Runtime resource sample: role={Role} rssBytes={RssBytes} managedBytes={ManagedBytes} heapBytes={HeapBytes} gc0={Gc0} gc1={Gc1} gc2={Gc2} cacheBytes={CacheBytes}",
-            runtime.Role, Environment.WorkingSet, GC.GetTotalMemory(false), GC.GetGCMemoryInfo().HeapSizeBytes,
-            GC.CollectionCount(0), GC.CollectionCount(1), GC.CollectionCount(2), cache.EstimatedBytes);
-    }
-
-    private string ResolveRoles()
-    {
-        return runtime.Role == "all" ? "api,smtp,imap,worker" : runtime.Role;
     }
 }

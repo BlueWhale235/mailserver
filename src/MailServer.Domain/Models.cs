@@ -393,6 +393,20 @@ public sealed class StoredMessageRecipient
     public required string Address { get; set; }
 }
 
+/// <summary>Preparsed IMAP search text; incomplete rows still require source-message verification.</summary>
+public sealed class MessageSearchRecord
+{
+    public Guid MessageId { get; set; }
+    public StoredMessage Message { get; set; } = null!;
+    public int ParserVersion { get; set; }
+    public string Status { get; set; } = "Ready";
+    public string Subject { get; set; } = string.Empty;
+    public string HeadersJson { get; set; } = "{}";
+    public string Body { get; set; } = string.Empty;
+    public bool Complete { get; set; }
+    public DateTimeOffset? RetryAfter { get; set; }
+}
+
 public sealed class MailboxMessage
 {
     public Guid Id { get; set; } = Guid.NewGuid();

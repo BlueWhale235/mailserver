@@ -92,6 +92,7 @@ public sealed class MailDbContext(DbContextOptions<MailDbContext> options) : DbC
     public DbSet<MailboxFolderDeletionJob> MailboxFolderDeletionJobs => Set<MailboxFolderDeletionJob>();
     public DbSet<StoredMessage> Messages => Set<StoredMessage>();
     public DbSet<StoredMessageRecipient> MessageRecipients => Set<StoredMessageRecipient>();
+    public DbSet<MessageSearchRecord> MessageSearchRecords => Set<MessageSearchRecord>();
     public DbSet<MailboxMessage> MailboxMessages => Set<MailboxMessage>();
     public DbSet<DeliveryJob> DeliveryJobs => Set<DeliveryJob>();
     public DbSet<DeliveryAttempt> DeliveryAttempts => Set<DeliveryAttempt>();
@@ -418,6 +419,15 @@ public sealed class MailDbContext(DbContextOptions<MailDbContext> options) : DbC
             entity.HasIndex(x => x.Address);
             entity.HasIndex(x => x.MessageId);
             entity.HasOne(x => x.Message).WithMany().HasForeignKey(x => x.MessageId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<MessageSearchRecord>(entity =>
+        {
+            entity.ToTable("message_search_records");
+            entity.HasKey(x => x.MessageId);
+            entity.Property(x => x.Status).HasMaxLength(24);
+            entity.HasOne(x => x.Message).WithOne().HasForeignKey<MessageSearchRecord>(x => x.MessageId)
+                .OnDelete(DeleteBehavior.Cascade);
         });
 
         modelBuilder.Entity<QuarantineRecord>(entity =>

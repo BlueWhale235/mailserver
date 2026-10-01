@@ -799,7 +799,7 @@ public sealed class AdminApplicationService(
             ?? throw new KeyNotFoundException("Domain not found.");
 
         var suffix = "@" + domain.Name;
-        var auditResources = await GetDomainAuditResourcesAsync(db, id, cancellationToken);
+        var auditResources = GetDomainAuditResources(db, id);
         var lastAuditAt = await db.AuditRecords.AsNoTracking()
             .Where(x => auditResources.Contains(x.Resource))
             .OrderByDescending(x => x.CreatedAt)
@@ -1569,10 +1569,9 @@ public sealed class AdminApplicationService(
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         if (!await db.Domains.AnyAsync(x => x.Id == domainId, cancellationToken))
             throw new KeyNotFoundException("Domain not found.");
-        var resources = await GetDomainAuditResourcesAsync(db, domainId, cancellationToken);
-        resources.Add("settings:mailboxes");
+        var resources = GetDomainAuditResources(db, domainId);
         return await db.AuditRecords.AsNoTracking()
-            .Where(x => resources.Contains(x.Resource))
+            .Where(x => x.Resource == "settings:mailboxes" || resources.Contains(x.Resource))
             .OrderByDescending(x => x.CreatedAt)
             .Take(100)
             .Select(x => new DomainAuditView(
@@ -1821,13 +1820,22 @@ public sealed class AdminApplicationService(
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         var since = DateTimeOffset.UtcNow.AddHours(-24);
+        var counts = await db.DeliveryJobs.GroupBy(_ => 1).Select(group => new
+        {
+            Pending = group.Count(x => x.Status == DeliveryStatus.Pending),
+            Processing = group.Count(x => x.Status == DeliveryStatus.Processing),
+            Deferred = group.Count(x => x.Status == DeliveryStatus.Deferred),
+            Failed = group.Count(x => x.Status == DeliveryStatus.Failed),
+            DeliveredToday = group.Count(x => x.Status == DeliveryStatus.Delivered && x.UpdatedAt >= since),
+            FailedToday = group.Count(x => x.Status == DeliveryStatus.Failed && x.UpdatedAt >= since)
+        }).SingleOrDefaultAsync(cancellationToken);
         return new DeliveryQueueSummary(
-            await db.DeliveryJobs.CountAsync(x => x.Status == DeliveryStatus.Pending, cancellationToken),
-            await db.DeliveryJobs.CountAsync(x => x.Status == DeliveryStatus.Processing, cancellationToken),
-            await db.DeliveryJobs.CountAsync(x => x.Status == DeliveryStatus.Deferred, cancellationToken),
-            await db.DeliveryJobs.CountAsync(x => x.Status == DeliveryStatus.Failed, cancellationToken),
-            await db.DeliveryJobs.CountAsync(x => x.Status == DeliveryStatus.Delivered && x.UpdatedAt >= since, cancellationToken),
-            await db.DeliveryJobs.CountAsync(x => x.Status == DeliveryStatus.Failed && x.UpdatedAt >= since, cancellationToken),
+            counts?.Pending ?? 0,
+            counts?.Processing ?? 0,
+            counts?.Deferred ?? 0,
+            counts?.Failed ?? 0,
+            counts?.DeliveredToday ?? 0,
+            counts?.FailedToday ?? 0,
             await db.DeliveryAttempts.Where(x => x.CreatedAt >= since)
                 .AverageAsync(x => (double?)x.DurationMilliseconds, cancellationToken) ?? 0);
     }
@@ -2773,28 +2781,21 @@ public sealed class AdminApplicationService(
             canSend);
     }
 
-    private static async Task<HashSet<string>> GetDomainAuditResourcesAsync(
-        MailDbContext db,
-        Guid domainId,
-        CancellationToken cancellationToken)
+    internal static IQueryable<string> GetDomainAuditResources(MailDbContext db, Guid domainId)
     {
-        var resources = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { $"domain:{domainId}" };
-        var accountResources = await db.Accounts.AsNoTracking()
+        var domainResources = db.Domains.AsNoTracking()
+            .Where(x => x.Id == domainId)
+            .Select(x => "domain:" + x.Id);
+        var accountResources = db.Accounts.AsNoTracking()
             .Where(x => x.DomainId == domainId)
-            .Select(x => "account:" + x.Id)
-            .ToListAsync(cancellationToken);
-        var aliasResources = await db.Aliases.AsNoTracking()
+            .Select(x => "account:" + x.Id);
+        var aliasResources = db.Aliases.AsNoTracking()
             .Where(x => x.DomainId == domainId)
-            .Select(x => "alias:" + x.Id)
-            .ToListAsync(cancellationToken);
-        resources.UnionWith(accountResources);
-        resources.UnionWith(aliasResources);
-        var ruleResources = await db.MailRules.AsNoTracking()
+            .Select(x => "alias:" + x.Id);
+        var ruleResources = db.MailRules.AsNoTracking()
             .Where(x => x.DomainId == domainId)
-            .Select(x => "mail-rule:" + x.Id)
-            .ToListAsync(cancellationToken);
-        resources.UnionWith(ruleResources);
-        return resources;
+            .Select(x => "mail-rule:" + x.Id);
+        return domainResources.Concat(accountResources).Concat(aliasResources).Concat(ruleResources);
     }
 
     private static string NormalizeDomain(string name)

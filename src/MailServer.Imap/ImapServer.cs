@@ -26,6 +26,7 @@ public sealed class ImapServerOptions
     public int MaximumConnections { get; set; } = 200;
     public long MaximumAppendBytes { get; set; } = 52_428_800;
     public int IdlePollSeconds { get; set; } = 15;
+    public bool NoDelay { get; set; } = true;
     public string[] AuthenticationMechanisms { get; set; } = ["LOGIN", "PLAIN", "XOAUTH2", "OAUTHBEARER"];
     public List<ImapEndpointOptions> Endpoints { get; set; } = [];
 }
@@ -64,7 +65,8 @@ public sealed partial class ImapServerService(
     ILogger<ImapServerService> logger,
     IpFirewallService? firewall = null,
     ResourceRuntime? resources = null,
-    ConnectionProtection? protection = null) : BackgroundService
+    ConnectionProtection? protection = null,
+    MailboxChangeSignal? mailboxChanges = null) : BackgroundService
 {
     private sealed class CredentialRejectedException(string message) : InvalidOperationException(message);
     private const int MaximumBodyStructureDepth = 64;
@@ -75,6 +77,7 @@ public sealed partial class ImapServerService(
     private readonly List<Task> _acceptLoops = [];
     private AdjustableConcurrencyLimit _connectionLimit = null!;
     private readonly AdjustableConcurrencyLimit _largeMimeLimit = resources?.LargeMime ?? new AdjustableConcurrencyLimit(1);
+    private readonly IdleMailboxCoordinator _idleCoordinator = new(scopeFactory, mailboxChanges, logger);
     private volatile bool _stopping;
 
     protected override Task ExecuteAsync(CancellationToken stoppingToken)
@@ -102,6 +105,7 @@ public sealed partial class ImapServerService(
     public override async Task StopAsync(CancellationToken cancellationToken)
     {
         _stopping = true;
+        _idleCoordinator.Dispose();
         resources?.SetServiceState("imap", "stopped");
         foreach (var listener in _listeners) listener.Stop();
         await base.StopAsync(cancellationToken);
@@ -118,6 +122,7 @@ public sealed partial class ImapServerService(
             try
             {
                 client = await listener.AcceptTcpClientAsync(cancellationToken);
+                client.NoDelay = _options.NoDelay;
             }
             catch (OperationCanceledException)
             {
@@ -939,14 +944,16 @@ public sealed partial class ImapServerService(
         ImapConnection connection,
         ImapSessionState state,
         string remote,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        MailboxSummary? snapshot = null,
+        bool useSnapshot = false)
     {
         if (state.AccountId is null || state.MailboxName is null)
         {
             return;
         }
 
-        var mailbox = await WithMailboxServiceAsync(service =>
+        var mailbox = useSnapshot ? snapshot : await WithMailboxServiceAsync(service =>
             service.SelectAsync(state.AccountId.Value, state.MailboxName, cancellationToken));
         if (mailbox is null)
         {
@@ -999,23 +1006,38 @@ public sealed partial class ImapServerService(
         CancellationToken cancellationToken)
     {
         await connection.WriteLineAsync("+ idling", cancellationToken);
-        await RefreshSelectedMailboxAsync(connection, state, remote, cancellationToken);
-        var doneTask = connection.ReadLineAsync(cancellationToken);
+        if (state.MailboxName is null)
+        {
+            if (!string.Equals(await connection.ReadLineAsync(cancellationToken), "DONE", StringComparison.OrdinalIgnoreCase))
+                throw new FormatException("Expected DONE.");
+            await OkAsync(connection, tag, "IDLE terminated", cancellationToken);
+            return;
+        }
         var poll = TimeSpan.FromSeconds(Math.Max(1, _options.IdlePollSeconds));
+        using var subscription = _idleCoordinator.Subscribe(state.AccountId!.Value, state.MailboxName!, poll);
+        using var updatesCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var initial = await subscription.WaitAsync(0, cancellationToken)
+            .WaitAsync(TimeSpan.FromSeconds(Math.Max(1, _options.CommandTimeoutSeconds)), cancellationToken);
+        await RefreshSelectedMailboxAsync(connection, state, remote, cancellationToken, initial.Summary, true);
+        long seenVersion = initial.Version;
+        var doneTask = connection.ReadLineAsync(cancellationToken);
         while (!cancellationToken.IsCancellationRequested)
         {
-            var delayTask = Task.Delay(poll, cancellationToken);
-            var completed = await Task.WhenAny(doneTask, delayTask);
+            var updateTask = subscription.WaitAsync(seenVersion, updatesCancellation.Token);
+            var completed = await Task.WhenAny(doneTask, updateTask);
             if (completed == doneTask)
             {
                 var done = await doneTask;
                 if (!string.Equals(done, "DONE", StringComparison.OrdinalIgnoreCase))
                     throw new FormatException("Expected DONE.");
                 await OkAsync(connection, tag, "IDLE terminated", cancellationToken);
+                updatesCancellation.Cancel();
                 return;
             }
 
-            await RefreshSelectedMailboxAsync(connection, state, remote, cancellationToken);
+            var update = await updateTask;
+            seenVersion = update.Version;
+            await RefreshSelectedMailboxAsync(connection, state, remote, cancellationToken, update.Summary, true);
         }
     }
 
@@ -1294,7 +1316,7 @@ public sealed partial class ImapServerService(
         {
             var requiresMime = request.Envelope || request.Body || request.BodyStructure
                 || request.BodySections.Any(x => x.Section.StartsWith("HEADER.FIELDS", StringComparison.OrdinalIgnoreCase));
-            using var mimePermit = requiresMime && item.Size >= 1024 * 1024
+            using var mimePermit = requiresMime
                 ? await AcquireLargeMimeAsync(cancellationToken) : null;
             var parts = new List<ImapFetchResponsePart>();
             if (useUid || request.Uid) parts.Add(ImapFetchResponsePart.Atom($"UID {item.Uid}"));
@@ -1426,16 +1448,8 @@ public sealed partial class ImapServerService(
         }
     }
 
-    private async Task<IDisposable> AcquireLargeMimeAsync(CancellationToken cancellationToken)
-    {
-        while (true)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            var permit = _largeMimeLimit.TryAcquire();
-            if (permit is not null) return permit;
-            await Task.Delay(50, cancellationToken);
-        }
-    }
+    private Task<IDisposable> AcquireLargeMimeAsync(CancellationToken cancellationToken) =>
+        _largeMimeLimit.AcquireAsync(cancellationToken);
 
     private static async Task WriteFetchResponseAsync(
         ImapConnection connection,
@@ -1607,14 +1621,14 @@ public sealed partial class ImapServerService(
             return basic + $" {BuildParameterList(multipart.ContentType.Parameters)} {BuildDisposition(multipart.ContentDisposition)} NIL NIL)";
         }
 
-        var bytes = WriteEntityBytes(entity);
+        var measurement = MeasureEntity(entity);
         var mediaType = entity.ContentType.MediaType.ToUpperInvariant();
         var mediaSubtype = entity.ContentType.MediaSubtype.ToUpperInvariant();
         var parameters = BuildParameterList(entity.ContentType.Parameters);
         var contentId = string.IsNullOrWhiteSpace(entity.ContentId) ? entity.Headers["Content-ID"] : entity.ContentId;
         var description = entity.Headers["Content-Description"];
         var encoding = BuildTransferEncoding(entity);
-        var size = bytes.Length;
+        var size = measurement.TotalBytes;
         var extension = extended ? $" NIL {BuildDisposition(entity.ContentDisposition)} NIL NIL" : string.Empty;
 
         if (entity is MessagePart messagePart)
@@ -1622,23 +1636,58 @@ public sealed partial class ImapServerService(
             var nested = messagePart.Message;
             var envelope = nested is null ? "NIL" : BuildEnvelope(nested);
             var nestedBody = nested?.Body is null ? "NIL" : BuildBodyStructure(nested.Body, extended, depth + 1, ref count);
-            return $"(\"MESSAGE\" \"RFC822\" {parameters} {NString(contentId)} {NString(description)} {NString(encoding)} {size} {envelope} {nestedBody} {CountLines(bytes)}{extension})";
+            return $"(\"MESSAGE\" \"RFC822\" {parameters} {NString(contentId)} {NString(description)} {NString(encoding)} {size} {envelope} {nestedBody} {measurement.TotalLines}{extension})";
         }
 
         if (entity is TextPart textPart)
         {
-            var bodyBytes = ExtractTextBytes(WriteEntityBytes(textPart));
-            return $"(\"TEXT\" {NString(mediaSubtype)} {parameters} {NString(contentId)} {NString(description)} {NString(encoding)} {bodyBytes.Length} {CountLines(bodyBytes)}{extension})";
+            var bodySize = measurement.BodyBytes;
+            return $"(\"TEXT\" {NString(mediaSubtype)} {parameters} {NString(contentId)} {NString(description)} {NString(encoding)} {bodySize} {measurement.BodyLines}{extension})";
         }
 
         return $"({NString(mediaType)} {NString(mediaSubtype)} {parameters} {NString(contentId)} {NString(description)} {NString(encoding)} {size}{extension})";
     }
 
-    private static byte[] WriteEntityBytes(MimeEntity entity)
+    private static EntityMeasurement MeasureEntity(MimeEntity entity)
     {
-        using var memory = new MemoryStream();
-        entity.WriteTo(memory);
-        return memory.ToArray();
+        using var counter = new EntityMeasurement();
+        entity.WriteTo(counter);
+        return counter;
+    }
+
+    private sealed class EntityMeasurement : Stream
+    {
+        private byte _previous, _beforePrevious, _thirdPrevious, _last;
+        private long _newlines, _crlfStart = -1, _lfStart = -1, _crlfLines, _lfLines;
+        public long TotalBytes { get; private set; }
+        public long TotalLines => TotalBytes == 0 ? 0 : _newlines + (_last == '\n' ? 0 : 1);
+        private long BodyStart => _crlfStart >= 0 ? _crlfStart : _lfStart;
+        public long BodyBytes => BodyStart < 0 ? 0 : TotalBytes - BodyStart;
+        public long BodyLines => BodyBytes == 0 ? 0 : _newlines - (_crlfStart >= 0 ? _crlfLines : _lfLines)
+            + (_last == '\n' ? 0 : 1);
+        public override void Write(byte[] buffer, int offset, int count) => Write(buffer.AsSpan(offset, count));
+        public override void Write(ReadOnlySpan<byte> buffer)
+        {
+            foreach (var value in buffer)
+            {
+                TotalBytes++;
+                if (value == '\n') _newlines++;
+                if (_crlfStart < 0 && _thirdPrevious == '\r' && _beforePrevious == '\n' && _previous == '\r' && value == '\n')
+                { _crlfStart = TotalBytes; _crlfLines = _newlines; }
+                if (_lfStart < 0 && _previous == '\n' && value == '\n')
+                { _lfStart = TotalBytes; _lfLines = _newlines; }
+                _thirdPrevious = _beforePrevious; _beforePrevious = _previous; _previous = value; _last = value;
+            }
+        }
+        public override bool CanRead => false;
+        public override bool CanSeek => false;
+        public override bool CanWrite => true;
+        public override long Length => TotalBytes;
+        public override long Position { get => TotalBytes; set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
     }
 
     private static string BuildParameterList(ParameterList? parameters)

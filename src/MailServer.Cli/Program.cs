@@ -587,9 +587,7 @@ internal static class MailServerCli
                 AbsoluteRefreshSeconds = 60,
                 MaximumConcurrentLoads = 2,
                 RuleFallbackBatchSize = 64,
-                StatusHeartbeatSeconds = 30,
-                ProcessStaleSeconds = 90,
-                ProcessRetentionHours = 24
+                ProcessStaleSeconds = 90
             },
             ["Forwarding"] = new
             {

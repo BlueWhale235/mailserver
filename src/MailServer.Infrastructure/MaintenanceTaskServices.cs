@@ -27,7 +27,8 @@ public sealed class QuotaLedgerService(IDbContextFactory<MailDbContext> factory)
         QuotaLedgerOperation operation, string idempotencyKey, CancellationToken cancellationToken)
     {
         await using var db = await factory.CreateDbContextAsync(cancellationToken);
-        await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
+        var writeDomains = await db.Domains.IgnoreQueryFilters().AsNoTracking().Select(x => x.Id).ToListAsync(cancellationToken);
+        await using var transaction = await MailboxWriteCoordinator.BeginAsync(db, writeDomains, cancellationToken);
         if (await db.QuotaLedger.AnyAsync(x => x.IdempotencyKey == idempotencyKey, cancellationToken)) return;
         var account = await db.Accounts.SingleAsync(x => x.Id == accountId, cancellationToken);
         var domain = await db.Domains.SingleAsync(x => x.Id == domainId, cancellationToken);
@@ -54,7 +55,8 @@ public sealed class QuotaReconciliationService(
     public async Task<ScheduledTaskRunResult> ReconcileAsync(CancellationToken cancellationToken)
     {
         await using var db = await factory.CreateDbContextAsync(cancellationToken);
-        await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
+        var writeDomains = await db.Domains.IgnoreQueryFilters().AsNoTracking().Select(x => x.Id).ToListAsync(cancellationToken);
+        await using var transaction = await MailboxWriteCoordinator.BeginAsync(db, writeDomains, cancellationToken);
         // Older soft-deleted rows were still charged until physical purge. Bring them into
         // the new accounting model before recomputing counters so a later purge cannot debit twice.
         var legacyDeleted = db.MailboxMessages.IgnoreQueryFilters()
@@ -250,7 +252,8 @@ public sealed class CleanupQueueService(
     public async Task RestoreAsync(Guid queueId, string actor, CancellationToken cancellationToken)
     {
         await using var db = await factory.CreateDbContextAsync(cancellationToken);
-        await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
+        var writeDomains = await db.Domains.IgnoreQueryFilters().AsNoTracking().Select(x => x.Id).ToListAsync(cancellationToken);
+        await using var transaction = await MailboxWriteCoordinator.BeginAsync(db, writeDomains, cancellationToken);
         var item = await db.CleanupQueue.SingleOrDefaultAsync(x => x.Id == queueId, cancellationToken)
             ?? throw new KeyNotFoundException("Recycle-bin item not found.");
         if (item.Status is not (CleanupQueueStatus.Pending or CleanupQueueStatus.Failed))
@@ -426,7 +429,8 @@ public sealed class CleanupQueueService(
         long released = 0;
         await using (var db = await factory.CreateDbContextAsync(cancellationToken))
         {
-            await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
+            var writeDomains = await db.Domains.IgnoreQueryFilters().AsNoTracking().Select(x => x.Id).ToListAsync(cancellationToken);
+        await using var transaction = await MailboxWriteCoordinator.BeginAsync(db, writeDomains, cancellationToken);
             var item = await db.CleanupQueue.SingleOrDefaultAsync(x => x.Id == queueId, cancellationToken)
                 ?? throw new KeyNotFoundException("Recycle-bin item not found.");
             if (item.Status is CleanupQueueStatus.Completed or CleanupQueueStatus.Restored or CleanupQueueStatus.Processing)
@@ -730,7 +734,8 @@ public sealed class TaskExecutionService(
     public async Task<Guid> RunNowAsync(Guid taskId, CancellationToken cancellationToken, string? actor)
     {
         await using var db = await factory.CreateDbContextAsync(cancellationToken);
-        await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
+        var writeDomains = await db.Domains.IgnoreQueryFilters().AsNoTracking().Select(x => x.Id).ToListAsync(cancellationToken);
+        await using var transaction = await MailboxWriteCoordinator.BeginAsync(db, writeDomains, cancellationToken);
         var task = await db.ScheduledTasks.SingleOrDefaultAsync(x => x.Id == taskId, cancellationToken)
             ?? throw new KeyNotFoundException("Scheduled task not found.");
         var lease = await db.TaskLeases.SingleOrDefaultAsync(x => x.ScheduledTaskId == taskId, cancellationToken);

@@ -67,7 +67,7 @@ public static class PerformanceEndpoints
                 .Take(101).ToListAsync(token);
             var sourceAvailable = row.SourceTraceId != null && related.Any(x => x.TraceId == row.SourceTraceId);
             var fingerprints = stages.Where(x => x.SqlFingerprint != null).Select(x => x.SqlFingerprint!).Distinct().ToArray();
-            var sql = await db.PerformanceSql.AsNoTracking().Where(x => fingerprints.Contains(x.Fingerprint)).ToListAsync(token);
+            var sql = await db.PerformanceSql.AsNoTracking().WhereStringIn(x => x.Fingerprint, fingerprints).ToListAsync(token);
             double covered = 0, lastEnd = 0;
             foreach (var stage in stages.OrderBy(x => x.OffsetMilliseconds))
             {
@@ -106,7 +106,7 @@ public static class PerformanceEndpoints
                     P99 = PerformanceCollector.Percentile(histogram, .99) };
             }).OrderByDescending(x => x.TotalMilliseconds).Take(100).ToArray();
             var fingerprints = rankings.Select(x => x.Name).ToArray();
-            var sql = kind == "sql" ? await db.PerformanceSql.AsNoTracking().Where(x => fingerprints.Contains(x.Fingerprint))
+            var sql = kind == "sql" ? await db.PerformanceSql.AsNoTracking().WhereStringIn(x => x.Fingerprint, fingerprints)
                 .ToListAsync(token) : [];
             var processes = await db.PerformanceProcesses.AsNoTracking().Where(x => x.LastSeenAt >= end.AddHours(-1)).ToListAsync(token);
             return Results.Ok(new { rankings, sql, processes, truncated = rows.Count > 20_000, approximatePercentiles = true });

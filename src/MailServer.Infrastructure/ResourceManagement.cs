@@ -49,10 +49,19 @@ public sealed class AdjustableConcurrencyLimit(int limit)
     private readonly object _sync = new();
     private int _limit = Math.Max(1, limit);
     private int _active;
+    private int _waiting;
+    private TaskCompletionSource _capacityChanged = NewSource();
+    private static TaskCompletionSource NewSource() => new(TaskCreationOptions.RunContinuationsAsynchronously);
     public int Limit { get { lock (_sync) return _limit; } }
     public int Active { get { lock (_sync) return _active; } }
+    public int Waiting { get { lock (_sync) return _waiting; } }
     public int Available { get { lock (_sync) return Math.Max(0, _limit - _active); } }
-    public void Resize(int value) { lock (_sync) _limit = Math.Max(1, value); }
+    public void Resize(int value)
+    {
+        TaskCompletionSource previous;
+        lock (_sync) { _limit = Math.Max(1, value); previous = _capacityChanged; _capacityChanged = NewSource(); }
+        previous.TrySetResult();
+    }
     public IDisposable? TryAcquire()
     {
         lock (_sync)
@@ -62,13 +71,51 @@ public sealed class AdjustableConcurrencyLimit(int limit)
             return new Permit(this);
         }
     }
+    public async Task<IDisposable> AcquireAsync(CancellationToken token)
+    {
+        var immediate = TryAcquire();
+        if (immediate is not null) return immediate;
+        lock (_sync)
+        {
+            if (_waiting >= Math.Min(64, Math.Max(16, _limit * 8))) throw new IOException("Heavy operation queue is full.");
+            _waiting++;
+        }
+        try
+        {
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
+            timeout.CancelAfter(TimeSpan.FromSeconds(30));
+            try
+            {
+                while (true)
+                {
+                    timeout.Token.ThrowIfCancellationRequested();
+                    Task changed;
+                    lock (_sync)
+                    {
+                        if (_active < _limit) { _active++; return new Permit(this); }
+                        changed = _capacityChanged.Task;
+                    }
+                    await changed.WaitAsync(timeout.Token);
+                }
+            }
+            catch (OperationCanceledException) when (!token.IsCancellationRequested)
+            { throw new IOException("Heavy operation capacity wait timed out."); }
+        }
+        finally { lock (_sync) _waiting--; }
+    }
+
     private sealed class Permit(AdjustableConcurrencyLimit owner) : IDisposable
     {
         private int _released;
         public void Dispose()
         {
             if (Interlocked.Exchange(ref _released, 1) != 0) return;
-            lock (owner._sync) owner._active--;
+            TaskCompletionSource previous;
+            lock (owner._sync)
+            {
+                owner._active--; previous = owner._capacityChanged; owner._capacityChanged = NewSource();
+            }
+            previous.TrySetResult();
         }
     }
 }
@@ -97,6 +144,15 @@ public sealed class ResourceRuntime(string role, IConfiguration configuration)
     private long _cacheBudget;
     private bool _applyFailed;
     private readonly Dictionary<string, string> _serviceStates = new(StringComparer.OrdinalIgnoreCase);
+    public AdaptiveResourceOptions AdaptiveOptions { get; } = AdaptiveResourceOptions.Read(configuration);
+    public AdaptiveResourceTelemetry Telemetry { get; } = new();
+    private bool _experimentInitialized;
+    private FairHeavyOperationBudget? _heavyBudget;
+    public FairHeavyOperationBudget HeavyBudget => LazyInitializer.EnsureInitialized(ref _heavyBudget, () => new FairHeavyOperationBudget(this));
+    public void ResizeExperiment(int inbound, int outbound, int heavy)
+    {
+        SmtpMessages.Resize(inbound); Delivery.Resize(outbound); LargeMime.Resize(heavy);
+    }
     public string Role { get; } = role;
     public bool UsesCache => Role is "smtp" or "imap" or "worker" or "all";
     public AdjustableConcurrencyLimit Smtp { get; } = new(configuration.GetValue("Smtp:MaximumConnections", 200));
@@ -126,6 +182,21 @@ public sealed class ResourceRuntime(string role, IConfiguration configuration)
             if (settings.Values is { } values)
             {
                 values.Validate();
+                if (AdaptiveOptions.Enabled)
+                {
+                    HeavyBudget.Configure(true);
+                    cache.Reconfigure(32L * 1024 * 1024, Math.Min(values.EntryBytes, 32L * 1024 * 1024),
+                        values.VersionPollSeconds, values.AbsoluteRefreshSeconds, values.MaximumConcurrentLoads, values.RuleFallbackBatchSize);
+                    Smtp.Resize(128);
+                    if (!_experimentInitialized)
+                    {
+                        ResizeExperiment(AdaptiveOptions.InitialInbound, AdaptiveOptions.InitialOutbound, AdaptiveOptions.InitialHeavy);
+                        _experimentInitialized = true;
+                    }
+                    _cacheBudget = UsesCache && cache.Options.Enabled ? cache.Options.SizeLimitBytes : 0;
+                    _profileId = settings.ProfileId; _configurationId = settings.ConfigurationId; _applyFailed = false;
+                    return;
+                }
                 var budget = Role switch { "all" => values.CacheBytes, "smtp" => values.CacheBytes / 2,
                     "imap" or "worker" => values.CacheBytes / 4, _ => 0 };
                 cache.Reconfigure(budget, Math.Min(values.EntryBytes, budget), values.VersionPollSeconds,
@@ -140,7 +211,8 @@ public sealed class ResourceRuntime(string role, IConfiguration configuration)
                     configuration.GetValue("Smtp:MaximumActiveMessages", 16)));
                 Imap.Resize(Math.Min(values.ImapConnections, configuration.GetValue<int?>("Imap:MaximumConnections") ?? int.MaxValue));
                 Delivery.Resize(values.DeliveryConcurrency);
-                LargeMime.Resize(settings.ProfileId == "512mb" ? 1 : Math.Clamp(values.ImapConnections / 16, 1, 8));
+                LargeMime.Resize(Math.Clamp(configuration.GetValue("Resources:MaximumHeavyOperations",
+                    settings.ProfileId is "512mb" or "1gb" ? 1 : 2), 1, 8));
             }
             _cacheBudget = UsesCache && cache.Options.Enabled ? cache.Options.SizeLimitBytes : 0;
             _profileId = settings.ProfileId;
@@ -151,7 +223,7 @@ public sealed class ResourceRuntime(string role, IConfiguration configuration)
 }
 
 public sealed class ResourceSettingsService(IDbContextFactory<MailDbContext> factory,
-    ConfigurationSnapshotCache cache)
+    ConfigurationSnapshotCache cache, ResourceRuntime? runtime = null)
 {
     public const string Key = "resources:profile";
     public async Task<ResourceSettingsView> ReadAsync(CancellationToken token)
@@ -204,29 +276,20 @@ public sealed class ResourceSettingsService(IDbContextFactory<MailDbContext> fac
     public async Task<ResourceStatusView> StatusAsync(CancellationToken token)
     {
         var desired = await ReadAsync(token);
-        await using var db = await factory.CreateDbContextAsync(token);
-        var rows = await db.ConfigurationProcessStatuses.AsNoTracking().OrderBy(x => x.InstanceName).ToListAsync(token);
-        var cutoff = DateTimeOffset.UtcNow.AddSeconds(-90);
-        var processes = rows.Where(x => x.Roles.Split(',').Any(r => r is "api" or "smtp" or "imap" or "worker" or "all"))
-            .Select(x =>
-            {
-                ResourceUsage? usage = null;
-                try { if (x.ResourceStatusJson is not null) usage = JsonSerializer.Deserialize<ResourceUsage>(x.ResourceStatusJson); }
-                catch (JsonException) { }
-                var state = x.LastSeenAt < cutoff || usage is null ? "unreported"
-                    : usage.ApplyFailed ? "failed" : usage.ConfigurationId != desired.ConfigurationId ? "applying" : "applied";
-                var roles = x.Roles.Split(',');
-                if (roles.Length == 1 && roles[0] == "api" && state != "unreported") state = "applied";
-                var serviceStarting = roles.Where(role => role is "smtp" or "imap" or "worker")
-                    .Any(role => usage?.ServiceStates?.ContainsKey(role) != true);
-                if (state == "applied" && serviceStarting) state = "applying";
-                var serviceIssue = roles.Any(role => usage?.ServiceStates?.GetValueOrDefault(role) is "stopped" or "error");
-                if (state == "applied" && serviceIssue) state = "failed";
-                return new ResourceProcessView(x.ProcessId, x.InstanceName, roles, x.LastSeenAt,
-                    x.EstimatedCacheBytes, usage, state, state == "failed" ? "服务未正常监听或工作，或暂时无法应用设置，请查看服务日志。" : null);
-            }).ToArray();
-        var online = processes.Where(x => x.State != "unreported").ToArray();
-        return new(online.Sum(x => x.Usage?.CacheBudgetBytes ?? 0), processes,
-            desired.ProfileId, desired.Values, online.Sum(x => x.EstimatedCacheBytes));
+        if (runtime is null) return new(0, [], desired.ProfileId, desired.Values, 0);
+        var usage = runtime.Snapshot();
+        var roles = runtime.Role == "all" ? new[] { "api", "smtp", "imap", "worker" } : new[] { runtime.Role };
+        var state = usage.ApplyFailed ? "failed"
+            : runtime.Role == "api" || usage.ConfigurationId == desired.ConfigurationId ? "applied" : "applying";
+        var serviceStarting = roles.Where(role => role is "smtp" or "imap" or "worker")
+            .Any(role => usage.ServiceStates?.ContainsKey(role) != true);
+        if (state == "applied" && serviceStarting) state = "applying";
+        var serviceIssue = roles.Any(role => usage.ServiceStates?.GetValueOrDefault(role) is "stopped" or "error");
+        if (state == "applied" && serviceIssue) state = "failed";
+        var process = new ResourceProcessView(
+            $"{Environment.MachineName}:{Environment.ProcessId}", Environment.MachineName, roles,
+            DateTimeOffset.UtcNow, cache.EstimatedBytes, usage, state,
+            state == "failed" ? "服务未正常监听或工作，或暂时无法应用设置，请查看服务日志。" : null);
+        return new(usage.CacheBudgetBytes, [process], desired.ProfileId, desired.Values, cache.EstimatedBytes);
     }
 }

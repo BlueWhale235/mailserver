@@ -27,7 +27,6 @@ builder.Logging.AddMailServerLogging(builder.Configuration);
 var adminCertificate = AdminWebHosting.ConfigureAdminListeners(builder);
 builder.Services.AddMailServerInfrastructure(builder.Configuration);
 var runAll = builder.Configuration.GetValue("RunAll:Enabled", false);
-if (!runAll) builder.Services.AddHostedService<ApiProcessHeartbeat>();
 // RunAll 模式用于单进程便携部署；生产拆分部署时 API 只加载管理端相关插件和服务。
 builder.Services.AddMailServerPlugins(builder.Configuration, runAll ? "all" : "api");
 builder.Services.AddMailServerAdminWeb(builder.Configuration);

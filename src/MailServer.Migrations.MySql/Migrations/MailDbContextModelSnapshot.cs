@@ -1148,6 +1148,42 @@ namespace MailServer.Migrations.MySql.Migrations
                     b.ToTable("mailbox_messages", (string)null);
                 });
 
+            modelBuilder.Entity("MailServer.Domain.MessageSearchRecord", b =>
+                {
+                    b.Property<Guid>("MessageId")
+                        .HasColumnType("char(36)");
+
+                    b.Property<string>("Body")
+                        .IsRequired()
+                        .HasColumnType("longtext");
+
+                    b.Property<bool>("Complete")
+                        .HasColumnType("tinyint(1)");
+
+                    b.Property<string>("HeadersJson")
+                        .IsRequired()
+                        .HasColumnType("longtext");
+
+                    b.Property<int>("ParserVersion")
+                        .HasColumnType("int");
+
+                    b.Property<DateTimeOffset?>("RetryAfter")
+                        .HasColumnType("datetime");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(24)
+                        .HasColumnType("varchar(24)");
+
+                    b.Property<string>("Subject")
+                        .IsRequired()
+                        .HasColumnType("longtext");
+
+                    b.HasKey("MessageId");
+
+                    b.ToTable("message_search_records", (string)null);
+                });
+
             modelBuilder.Entity("MailServer.Domain.MtaStsPolicyCache", b =>
                 {
                     b.Property<string>("Domain")
@@ -2144,6 +2180,17 @@ namespace MailServer.Migrations.MySql.Migrations
                         .IsRequired();
 
                     b.Navigation("Mailbox");
+
+                    b.Navigation("Message");
+                });
+
+            modelBuilder.Entity("MailServer.Domain.MessageSearchRecord", b =>
+                {
+                    b.HasOne("MailServer.Domain.StoredMessage", "Message")
+                        .WithOne()
+                        .HasForeignKey("MailServer.Domain.MessageSearchRecord", "MessageId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
 
                     b.Navigation("Message");
                 });

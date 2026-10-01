@@ -18,7 +18,8 @@ public sealed class DeliveryWorker(
     SystemSettingsService settings,
     IOptions<DeliveryOptions> deliveryDefaults,
     ILogger<DeliveryWorker> logger,
-    ResourceRuntime? resources = null) : BackgroundService
+    ResourceRuntime? resources = null,
+    DeliveryWakeSignal? deliveryWake = null) : BackgroundService
 {
     private readonly string _owner = $"{Environment.MachineName}:{Environment.ProcessId}:{Guid.NewGuid():N}";
     private readonly AdjustableConcurrencyLimit _deliveryLimit = resources?.Delivery ?? new(8);
@@ -34,6 +35,7 @@ public sealed class DeliveryWorker(
                 running.RemoveAll(task => task.IsCompleted);
                 if (_deliveryLimit.Available == 0)
                 {
+                    resources?.Telemetry.RecordOutboundDemand();
                     await Task.WhenAny(running.Append(Task.Delay(250, stoppingToken)));
                     continue;
                 }
@@ -48,6 +50,7 @@ public sealed class DeliveryWorker(
                     options = deliveryDefaults.Value;
                 }
                 IReadOnlyList<DeliveryLease> jobs;
+                var observedVersion = deliveryWake?.Version ?? 0;
                 var permits = new List<IDisposable>();
                 try
                 {
@@ -76,7 +79,11 @@ public sealed class DeliveryWorker(
 
                 if (jobs.Count == 0)
                 {
-                    await Task.Delay(TimeSpan.FromSeconds(options.PollIntervalSeconds), stoppingToken);
+                    if (deliveryWake is null)
+                        await Task.Delay(TimeSpan.FromSeconds(options.PollIntervalSeconds), stoppingToken);
+                    else
+                        await deliveryWake.WaitForChangeAsync(observedVersion,
+                            TimeSpan.FromSeconds(options.PollIntervalSeconds), stoppingToken);
                     continue;
                 }
 
@@ -115,6 +122,7 @@ public sealed class DeliveryWorker(
         DeliveryOptions options,
         CancellationToken cancellationToken)
     {
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
         var job = lease.Job;
         using var attemptCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var leaseLost = 0;
@@ -186,6 +194,7 @@ public sealed class DeliveryWorker(
             attemptCancellation.Cancel();
             await renewal;
             if (!completion.Applied) return;
+            if (result.Succeeded) resources?.Telemetry.RecordCompletion(false, stopwatch.Elapsed);
             try
             {
                 await pipeline.OnDeliveryCompletedAsync(

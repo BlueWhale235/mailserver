@@ -67,6 +67,8 @@ public sealed class PerformanceCollector : IDisposable
     private long _truncated;
     private PerformanceSettings _settings = new();
     public PerformanceSettings Settings { get => Volatile.Read(ref _settings); set => Volatile.Write(ref _settings, value); }
+    internal void ApplyStoredSettings(PerformanceSettings observed, PerformanceSettings loaded) =>
+        Interlocked.CompareExchange(ref _settings, loaded, observed);
     public string ProcessId { get; } = $"{Environment.MachineName}:{Environment.ProcessId}:{Guid.NewGuid():N}";
     public long BudgetBytes { get; set; } = 8 * 1024 * 1024;
     public bool StorageUnavailable { get; set; }

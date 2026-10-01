@@ -27,11 +27,15 @@ public static class DependencyInjection
         services.Configure<DatabaseOptions>(configuration.GetSection(DatabaseOptions.SectionName));
         services.Configure<StorageOptions>(configuration.GetSection(StorageOptions.SectionName));
         services.Configure<DeliveryOptions>(configuration.GetSection(DeliveryOptions.SectionName));
+        services.Configure<MessageSearchOptions>(configuration.GetSection(MessageSearchOptions.SectionName));
+        services.Configure<SmtpConnectionReuseOptions>(configuration.GetSection(SmtpConnectionReuseOptions.SectionName));
         services.Configure<MailboxDefaultsOptions>(configuration.GetSection(MailboxDefaultsOptions.SectionName));
         services.Configure<MailRulesOptions>(configuration.GetSection(MailRulesOptions.SectionName));
         services.Configure<ConfigurationCacheOptions>(configuration.GetSection(ConfigurationCacheOptions.SectionName));
         var runtime = new ResourceRuntime(configuration.GetValue("RunAll:Enabled", false) ? "all" : role, configuration);
         services.AddSingleton(runtime);
+        services.AddSingleton<AdaptiveDatabaseLatencyInterceptor>();
+        services.AddHostedService<AdaptiveResourceHostedService>();
         if (!runtime.UsesCache) services.PostConfigure<ConfigurationCacheOptions>(value => value.Enabled = false);
         services.AddSingleton<ResourceSettingsService>();
         services.AddSingleton<ConnectionProtectionSettingsService>();
@@ -45,15 +49,24 @@ public static class DependencyInjection
         services.Configure<MaintenanceOptions>(configuration.GetSection(MaintenanceOptions.SectionName));
         services.AddHttpContextAccessor();
         services.AddSingleton<DeliveryNotificationService>();
+        services.AddSingleton<DeliveryWakeSignal>();
+        services.AddSingleton<SearchBackfillWakeSignal>();
+        services.AddSingleton<MailboxChangeSignal>();
+        services.AddSingleton<SmtpConnectionPool>();
+        if (role == "worker" || configuration.GetValue("RunAll:Enabled", false))
+            services.AddHostedService<MessageSearchBackfillService>();
         services.AddSingleton<AuditStampInterceptor>();
         services.AddSingleton<PerformanceCollector>();
         services.AddSingleton<PerformanceSqlInterceptor>();
         services.AddSingleton<PerformanceConnectionInterceptor>();
         services.AddSingleton<PerformanceTransactionInterceptor>();
         services.AddHostedService<PerformanceStorage>();
+        if (configuration.GetValue("EfficiencyDiagnostics:Enabled", false))
+            services.AddHostedService<EfficiencyRuntimeSampler>();
         services.AddPooledDbContextFactory<MailDbContext>((provider, options) =>
         {
             options.AddInterceptors(provider.GetRequiredService<AuditStampInterceptor>());
+            options.AddInterceptors(provider.GetRequiredService<AdaptiveDatabaseLatencyInterceptor>());
             options.AddInterceptors(provider.GetRequiredService<PerformanceSqlInterceptor>());
             options.AddInterceptors(provider.GetRequiredService<PerformanceConnectionInterceptor>(), provider.GetRequiredService<PerformanceTransactionInterceptor>());
             var migrationsAssembly = database.Provider.MigrationsAssemblyName();

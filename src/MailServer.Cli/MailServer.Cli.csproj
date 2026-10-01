@@ -84,13 +84,13 @@
 
   <Target Name="CleanReferencedHostPublishFiles" AfterTargets="Publish">
     <ItemGroup>
-      <_ReferencedHostPublishFile Include="$(PublishDir)MailServer.Api.exe;$(PublishDir)MailServer.Api.deps.json;$(PublishDir)MailServer.Api.runtimeconfig.json;$(PublishDir)MailServer.Api.pdb" />
+      <_ReferencedHostPublishFile Include="$(PublishDir)MailServer.Api.exe;$(PublishDir)MailServer.Api.deps.json;$(PublishDir)MailServer.Api.runtimeconfig.json" />
       <_ReferencedHostPublishFile Include="$(PublishDir)MailServer.Api.staticwebassets.*.json" />
-      <_ReferencedHostPublishFile Include="$(PublishDir)MailServer.Smtp.exe;$(PublishDir)MailServer.Smtp.deps.json;$(PublishDir)MailServer.Smtp.runtimeconfig.json;$(PublishDir)MailServer.Smtp.pdb" />
-      <_ReferencedHostPublishFile Include="$(PublishDir)MailServer.Imap.exe;$(PublishDir)MailServer.Imap.deps.json;$(PublishDir)MailServer.Imap.runtimeconfig.json;$(PublishDir)MailServer.Imap.pdb" />
-      <_ReferencedHostPublishFile Include="$(PublishDir)MailServer.Worker.exe;$(PublishDir)MailServer.Worker.deps.json;$(PublishDir)MailServer.Worker.runtimeconfig.json;$(PublishDir)MailServer.Worker.pdb" />
+      <_ReferencedHostPublishFile Include="$(PublishDir)MailServer.Smtp.exe;$(PublishDir)MailServer.Smtp.deps.json;$(PublishDir)MailServer.Smtp.runtimeconfig.json" />
+      <_ReferencedHostPublishFile Include="$(PublishDir)MailServer.Imap.exe;$(PublishDir)MailServer.Imap.deps.json;$(PublishDir)MailServer.Imap.runtimeconfig.json" />
+      <_ReferencedHostPublishFile Include="$(PublishDir)MailServer.Worker.exe;$(PublishDir)MailServer.Worker.deps.json;$(PublishDir)MailServer.Worker.runtimeconfig.json" />
       <_ReferencedHostPublishFile Include="$(PublishDir)MailServer.Api.dll;$(PublishDir)MailServer.Smtp.dll;$(PublishDir)MailServer.Imap.dll;$(PublishDir)MailServer.Worker.dll" Condition="'$(PublishSingleFile)' == 'true'" />
-      <_ReferencedHostPublishFile Include="$(PublishDir)*.pdb" />
+      <_ReferencedHostPublishFile Include="$(PublishDir)*.pdb" Condition="'$(PreservePublishSymbols)' != 'true'" />
     </ItemGroup>
     <Delete Files="@(_ReferencedHostPublishFile)" TreatErrorsAsWarnings="true" />
   </Target>

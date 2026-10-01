@@ -2,7 +2,8 @@ param(
     [ValidateSet("win-x64", "linux-x64", "linux-arm64")]
     [string[]]$Runtime = @(),
     [string]$Output = "builds\publish",
-    [switch]$RemoveBuildCache
+    [switch]$RemoveBuildCache,
+    [switch]$IncludeSymbols
 )
 
 $ErrorActionPreference = "Stop"
@@ -49,10 +50,12 @@ function Remove-ReferencedHostPublishFiles {
         foreach ($name in @(
             "$prefix.exe",
             "$prefix.deps.json",
-            "$prefix.runtimeconfig.json",
-            "$prefix.pdb"
+            "$prefix.runtimeconfig.json"
         )) {
             Remove-Item -LiteralPath (Join-Path $Target $name) -Force -ErrorAction SilentlyContinue
+        }
+        if (-not $IncludeSymbols) {
+            Remove-Item -LiteralPath (Join-Path $Target "$prefix.pdb") -Force -ErrorAction SilentlyContinue
         }
 
         Get-ChildItem -LiteralPath $Target -Filter "$prefix.staticwebassets.*.json" -File -ErrorAction SilentlyContinue |
@@ -93,6 +96,11 @@ foreach ($rid in $Runtime) {
     New-Item -ItemType Directory -Path $target -Force | Out-Null
     $temporaryArtifacts = Join-Path ([System.IO.Path]::GetTempPath()) "mailserver-publish-$rid-$([guid]::NewGuid().ToString('N'))"
     $platformArgs = if ($rid.EndsWith("-x64", [StringComparison]::OrdinalIgnoreCase)) { @("-p:Platform=x64") } else { @() }
+    $symbolArgs = if ($IncludeSymbols) {
+        @("-p:DebugType=portable", "-p:DebugSymbols=true", "-p:PreservePublishSymbols=true")
+    } else {
+        @("-p:DebugType=None", "-p:DebugSymbols=false", "-p:PreservePublishSymbols=false")
+    }
     try {
         dotnet publish $project `
             -c Release `
@@ -103,15 +111,16 @@ foreach ($rid in $Runtime) {
             -p:PublishSingleFile=true `
             -p:IncludeNativeLibrariesForSelfExtract=true `
             -p:ValidateExecutableReferencesMatchSelfContained=false `
-            -p:DebugType=None `
-            -p:DebugSymbols=false `
+            $symbolArgs `
             -o $target
         if ($LASTEXITCODE -ne 0) {
             throw "dotnet publish failed for '$rid' with exit code $LASTEXITCODE."
         }
 
-        Get-ChildItem -LiteralPath $target -Filter *.pdb -File -ErrorAction SilentlyContinue |
-            Remove-Item -Force
+        if (-not $IncludeSymbols) {
+            Get-ChildItem -LiteralPath $target -Filter *.pdb -File -ErrorAction SilentlyContinue |
+                Remove-Item -Force
+        }
         Remove-ReferencedHostPublishFiles -Target $target -SingleFile
         Copy-DeploymentAssets -Target $target
 

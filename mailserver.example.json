@@ -13,7 +13,14 @@
     "RootPath": "security-assets"
   },
   "MailboxDefaults": {
-    "Folders": [ "INBOX", "Sent", "Drafts", "Trash", "Junk", "Archives" ]
+    "Folders": [
+      "INBOX",
+      "Sent",
+      "Drafts",
+      "Trash",
+      "Junk",
+      "Archives"
+    ]
   },
   "MailRules": {
     "SentCopyGraceSeconds": 60,
@@ -27,9 +34,7 @@
     "AbsoluteRefreshSeconds": 60,
     "MaximumConcurrentLoads": 2,
     "RuleFallbackBatchSize": 64,
-    "StatusHeartbeatSeconds": 30,
-    "ProcessStaleSeconds": 90,
-    "ProcessRetentionHours": 24
+    "ProcessStaleSeconds": 90
   },
   "Forwarding": {
     "SrsSecret": "replace-with-an-independent-32-byte-secret",
@@ -73,9 +78,36 @@
     "MaximumRecipients": 100,
     "MaximumMessageBytes": 52428800,
     "Endpoints": [
-      { "Address": "0.0.0.0", "Port": 25, "Security": "StartTls", "RequireAuthentication": false },
-      { "Address": "0.0.0.0", "Port": 465, "Security": "ImplicitTls", "RequireAuthentication": true, "AuthenticationMechanisms": [ "PLAIN", "LOGIN", "XOAUTH2", "OAUTHBEARER" ] },
-      { "Address": "0.0.0.0", "Port": 587, "Security": "StartTls", "RequireAuthentication": true, "AuthenticationMechanisms": [ "PLAIN", "LOGIN", "XOAUTH2", "OAUTHBEARER" ] }
+      {
+        "Address": "0.0.0.0",
+        "Port": 25,
+        "Security": "StartTls",
+        "RequireAuthentication": false
+      },
+      {
+        "Address": "0.0.0.0",
+        "Port": 465,
+        "Security": "ImplicitTls",
+        "RequireAuthentication": true,
+        "AuthenticationMechanisms": [
+          "PLAIN",
+          "LOGIN",
+          "XOAUTH2",
+          "OAUTHBEARER"
+        ]
+      },
+      {
+        "Address": "0.0.0.0",
+        "Port": 587,
+        "Security": "StartTls",
+        "RequireAuthentication": true,
+        "AuthenticationMechanisms": [
+          "PLAIN",
+          "LOGIN",
+          "XOAUTH2",
+          "OAUTHBEARER"
+        ]
+      }
     ]
   },
   "SmtpAbuse": {
@@ -95,10 +127,23 @@
     "CommandTimeoutSeconds": 1800,
     "MaximumAppendBytes": 52428800,
     "IdlePollSeconds": 15,
-    "AuthenticationMechanisms": [ "LOGIN", "PLAIN", "XOAUTH2", "OAUTHBEARER" ],
+    "AuthenticationMechanisms": [
+      "LOGIN",
+      "PLAIN",
+      "XOAUTH2",
+      "OAUTHBEARER"
+    ],
     "Endpoints": [
-      { "Address": "0.0.0.0", "Port": 143, "Security": "StartTls" },
-      { "Address": "0.0.0.0", "Port": 993, "Security": "ImplicitTls" }
+      {
+        "Address": "0.0.0.0",
+        "Port": 143,
+        "Security": "StartTls"
+      },
+      {
+        "Address": "0.0.0.0",
+        "Port": 993,
+        "Security": "ImplicitTls"
+      }
     ]
   },
   "Delivery": {
@@ -110,6 +155,22 @@
   "Worker": {
     "HostName": "mail.localhost"
   },
+  "MessageSearch": {
+    "UseCompleteHeaders": true,
+    "UsePersistentSearchStreams": false,
+    "CacheDecodedSearchBodies": true,
+    "UseAsciiSearchNormalization": true,
+    "Enabled": true,
+    "BackfillBatchSize": 16,
+    "BackfillDelaySeconds": 1
+  },
+  "SmtpConnectionReuse": {
+    "Enabled": false,
+    "MaximumIdleConnections": 4,
+    "IdleSeconds": 30,
+    "MaximumLifetimeSeconds": 300,
+    "MaximumMessages": 50
+  },
   "Logging": {
     "LogLevel": {
       "Default": "Information",
@@ -119,8 +180,26 @@
     }
   },
   "MailServerLogging": {
-    "Console": { "Enabled": true, "Color": true },
-    "File": { "Enabled": true, "Directory": "logs" },
+    "Console": {
+      "Enabled": true,
+      "Color": true
+    },
+    "File": {
+      "Enabled": true,
+      "Directory": "logs"
+    },
     "TimestampFormat": "yyyy/MM/dd HH:mm:ss"
+  },
+  "AdaptiveResources": {
+    "Enabled": false,
+    "AutomaticEnabled": false,
+    "PauseBackfill": true,
+    "InitialInbound": 16,
+    "InitialOutbound": 32,
+    "InitialHeavy": 4,
+    "MaximumInbound": 32,
+    "MaximumOutbound": 64,
+    "MaximumHeavy": 12,
+    "DatabaseBaselineWindowSeconds": 10
   }
 }

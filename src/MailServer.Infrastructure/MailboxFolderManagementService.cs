@@ -63,7 +63,7 @@ public sealed class MailboxFolderManagementService(
             throw new InvalidOperationException("System folders already exist and cannot be added again.");
 
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
-        await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
+        await using var transaction = await MailboxWriteCoordinator.BeginAsync(db, [domainId], cancellationToken);
         var configured = await GetConfiguredFoldersAsync(db, domainId, cancellationToken);
         if (configured.Any(x => x.Equals(normalized, StringComparison.OrdinalIgnoreCase)))
             throw new InvalidOperationException("The folder already exists in this domain configuration.");
@@ -207,7 +207,9 @@ public sealed class MailboxFolderManagementService(
 
         try
         {
-            await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
+            var writeDomainId = await db.MailboxFolderDeletionJobs.AsNoTracking().Where(x => x.Id == jobId.Value)
+                .Select(x => x.DomainId).SingleAsync(cancellationToken);
+            await using var transaction = await MailboxWriteCoordinator.BeginAsync(db, [writeDomainId], cancellationToken);
             var job = await db.MailboxFolderDeletionJobs.SingleAsync(x => x.Id == jobId.Value, cancellationToken);
             job.Status = MailboxFolderDeletionStatus.Running;
             job.StartedAt ??= DateTimeOffset.UtcNow;
@@ -289,7 +291,7 @@ public sealed class MailboxFolderManagementService(
         CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
-        await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
+        await using var transaction = await MailboxWriteCoordinator.BeginAsync(db, [domainId], cancellationToken);
         var existing = await db.MailboxFolderDeletionJobs.FirstOrDefaultAsync(x =>
             x.DomainId == domainId && x.AccountId == accountId
             && x.FolderName == normalized

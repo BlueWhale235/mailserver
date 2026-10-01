@@ -159,7 +159,7 @@ public sealed class QuarantineService(
     public async Task ReleaseAsync(Guid domainId, Guid id, string actor, string? note, CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
-        await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
+        await using var transaction = await MailboxWriteCoordinator.BeginAsync(db, [domainId], cancellationToken);
         var record = await db.QuarantineRecords
             .Include(x => x.Message)
             .SingleOrDefaultAsync(x => x.Id == id && x.DomainId == domainId, cancellationToken)

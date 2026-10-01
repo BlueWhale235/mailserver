@@ -83,7 +83,8 @@ public sealed class SmtpServerService(
     SystemSettingsService? systemSettings = null,
     ResourceRuntime? resources = null,
     ConnectionProtection? protection = null,
-    RelayRootService? relay = null) : BackgroundService
+    RelayRootService? relay = null,
+    IOptions<StorageOptions>? storageOptions = null) : BackgroundService
 {
     private readonly SmtpServerOptions _options = options.Value;
     private readonly List<TcpListener> _listeners = [];
@@ -287,7 +288,10 @@ public sealed class SmtpServerService(
                 await using var connection = new SmtpConnection(
                     stream,
                     TimeSpan.FromSeconds(smtpSettings.CommandTimeoutSeconds),
-                    _options.MaximumMessageBytes);
+                    _options.MaximumMessageBytes,
+                    storageOptions?.Value.PreparedInboundEnabled == true
+                        ? Path.GetFullPath(storageOptions.Value.InboundTemporaryPath
+                            ?? Path.Combine(storageOptions.Value.RootPath, ".incoming")) : null);
                 using (var scope = scopeFactory.CreateScope())
                 {
                     var pipeline = scope.ServiceProvider.GetService<PluginPipeline>();
@@ -611,6 +615,7 @@ public sealed class SmtpServerService(
                             {
                                 logger.LogInformation("SMTP DATA from {Remote} deferred: active message limit reached.", remote);
                                 state.ResetTransaction();
+                                resources?.Telemetry.RecordInboundDemand();
                                 await connection.ReplyAsync("451 4.3.2 Server busy; retry later", serverCancellationToken);
                                 break;
                             }
@@ -1669,7 +1674,7 @@ internal static class AddressParserForSmtp
     }
 }
 
-internal sealed class SmtpConnection(Stream stream, TimeSpan timeout, long maximumMessageBytes) : IAsyncDisposable
+internal sealed class SmtpConnection(Stream stream, TimeSpan timeout, long maximumMessageBytes, string? preparedDirectory = null) : IAsyncDisposable
 {
     private static readonly byte[] CrLf = "\r\n"u8.ToArray();
     private Stream _stream = stream;
@@ -1695,12 +1700,17 @@ internal sealed class SmtpConnection(Stream stream, TimeSpan timeout, long maxim
     public async Task<Stream> ReadDataAsync(CancellationToken cancellationToken)
     {
         using var performance = PerformanceTelemetry.Stage("smtp.upload", "wait");
-        var path = Path.Combine(Path.GetTempPath(), $"mailserver-{Guid.NewGuid():N}.eml");
+        var directory = preparedDirectory ?? Path.GetTempPath();
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, $"mailserver-{Guid.NewGuid():N}.eml");
+        using var hash = System.Security.Cryptography.IncrementalHash.CreateHash(System.Security.Cryptography.HashAlgorithmName.SHA256);
+        long size = 0;
+        var writeBuffer = System.Buffers.ArrayPool<byte>.Shared.Rent(64 * 1024);
+        var buffered = 0;
         try
         {
             await using (var output = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None, 64 * 1024, FileOptions.Asynchronous))
             {
-                long size = 0;
                 var headerBytes = 0;
                 var inHeaders = true;
                 var hasHeader = false;
@@ -1758,18 +1768,40 @@ internal sealed class SmtpConnection(Stream stream, TimeSpan timeout, long maxim
                     {
                         throw new InvalidDataException($"Message exceeds the {maximumMessageBytes} byte limit.");
                     }
-                    await output.WriteAsync(line, cancellationToken);
-                    await output.WriteAsync(CrLf, cancellationToken);
+                    if (buffered + line.Length + CrLf.Length > writeBuffer.Length && buffered > 0)
+                    {
+                        if (preparedDirectory is not null) hash.AppendData(writeBuffer, 0, buffered);
+                        await output.WriteAsync(writeBuffer.AsMemory(0, buffered), cancellationToken);
+                        buffered = 0;
+                    }
+                    if (line.Length + CrLf.Length > writeBuffer.Length)
+                    {
+                        if (preparedDirectory is not null) { hash.AppendData(line.Span); hash.AppendData(CrLf); }
+                        await output.WriteAsync(line, cancellationToken);
+                        await output.WriteAsync(CrLf, cancellationToken);
+                    }
+                    else
+                    {
+                        line.Span.CopyTo(writeBuffer.AsSpan(buffered)); buffered += line.Length;
+                        CrLf.CopyTo(writeBuffer, buffered); buffered += CrLf.Length;
+                    }
+                }
+                if (buffered > 0)
+                {
+                    if (preparedDirectory is not null) hash.AppendData(writeBuffer, 0, buffered);
+                    await output.WriteAsync(writeBuffer.AsMemory(0, buffered), cancellationToken);
                 }
             }
 
-            return new DeleteOnDisposeFileStream(path);
+            return preparedDirectory is null ? new DeleteOnDisposeFileStream(path)
+                : new PreparedMessageContent(path, new ContentDescriptor(Convert.ToHexStringLower(hash.GetHashAndReset()), size));
         }
         catch
         {
             if (File.Exists(path)) File.Delete(path);
             throw;
         }
+        finally { System.Buffers.ArrayPool<byte>.Shared.Return(writeBuffer); }
     }
 
     private ValueTask<ReadOnlyMemory<byte>?> ReadDataLineAsync(CancellationToken cancellationToken) =>

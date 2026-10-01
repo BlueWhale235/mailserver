@@ -7,6 +7,8 @@ public sealed class StorageOptions
 {
     public const string SectionName = "Storage";
     public string RootPath { get; set; } = "data/messages";
+    public bool PreparedInboundEnabled { get; set; }
+    public string? InboundTemporaryPath { get; set; }
     public long MaximumMessageBytes { get; set; } = 52_428_800;
 }
 
@@ -20,6 +22,28 @@ public sealed class DeliveryOptions
     public int LeaseSeconds { get; set; } = 120;
     public int MaximumAttempts { get; set; } = 12;
     public int PollIntervalSeconds { get; set; } = 5;
+}
+
+public sealed class MessageSearchOptions
+{
+    public const string SectionName = "MessageSearch";
+    public bool Enabled { get; set; } = true;
+    public bool UseCompleteHeaders { get; set; } = true;
+    public bool UsePersistentSearchStreams { get; set; }
+    public bool CacheDecodedSearchBodies { get; set; } = true;
+    public bool UseAsciiSearchNormalization { get; set; } = true;
+    public int BackfillBatchSize { get; set; } = 16;
+    public int BackfillDelaySeconds { get; set; } = 1;
+}
+
+public sealed class SmtpConnectionReuseOptions
+{
+    public const string SectionName = "SmtpConnectionReuse";
+    public bool Enabled { get; set; }
+    public int MaximumIdleConnections { get; set; } = 4;
+    public int IdleSeconds { get; set; } = 30;
+    public int MaximumLifetimeSeconds { get; set; } = 300;
+    public int MaximumMessages { get; set; } = 50;
 }
 
 /// <summary>
@@ -54,9 +78,7 @@ public sealed class ConfigurationCacheOptions
     public int AbsoluteRefreshSeconds { get; set; } = 60;
     public int MaximumConcurrentLoads { get; set; } = 2;
     public int RuleFallbackBatchSize { get; set; } = 64;
-    public int StatusHeartbeatSeconds { get; set; } = 30;
     public int ProcessStaleSeconds { get; set; } = 90;
-    public int ProcessRetentionHours { get; set; } = 24;
 }
 
 /// <summary>

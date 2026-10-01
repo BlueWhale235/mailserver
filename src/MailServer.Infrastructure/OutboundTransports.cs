@@ -26,7 +26,9 @@ public sealed class DirectMxTransport(
     TransportSecurityPolicyService transportSecurity,
     ILogger<DirectMxTransport> logger,
     RelaySettingsService? relaySettings = null,
-    RelayRootService? relay = null) : IOutboundTransport
+    RelayRootService? relay = null,
+    SmtpConnectionPool? connectionPool = null,
+    ResourceRuntime? resources = null) : IOutboundTransport
 {
     internal static string? ExtractEnhancedStatusCode(string response)
     {
@@ -92,11 +94,29 @@ public sealed class DirectMxTransport(
             hosts.Count,
             domain,
             job.Recipient);
-        var messageBytes = await ReadAllAsync(content, cancellationToken);
-        var suppressTlsReporting = Encoding.ASCII.GetString(
-                messageBytes,
-                0,
-                Math.Min(messageBytes.Length, 64 * 1024))
+        // The content store supplies a seekable file. Spool other streams to disk so a
+        // large message never needs a second complete managed-memory copy.
+        await using var spool = content.CanSeek ? null : new FileStream(
+            Path.Combine(Path.GetTempPath(), $"mailserver-outbound-{Guid.NewGuid():N}.tmp"),
+            FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None, 64 * 1024,
+            FileOptions.Asynchronous | FileOptions.SequentialScan | FileOptions.DeleteOnClose);
+        if (spool is not null)
+        {
+            await content.CopyToAsync(spool, cancellationToken);
+            spool.Position = 0;
+            content = spool;
+        }
+        var start = content.Position;
+        var header = new byte[64 * 1024];
+        var headerLength = 0;
+        while (headerLength < header.Length)
+        {
+            var read = await content.ReadAsync(header.AsMemory(headerLength), cancellationToken);
+            if (read == 0) break;
+            headerLength += read;
+        }
+        content.Position = start;
+        var suppressTlsReporting = Encoding.ASCII.GetString(header, 0, headerLength)
             .Contains("TLS-Report-Submitter:", StringComparison.OrdinalIgnoreCase);
         // TLS 报告本身不再触发 TLS-RPT 事件，避免报告投递失败形成反馈循环。
         Task RecordTlsEventAsync(
@@ -112,6 +132,10 @@ public sealed class DirectMxTransport(
         var profile = await OutboundDeliveryProfile.ResolveAsync(dbFactory, job, cancellationToken);
         var useRelay = relaySettings is not null && (await relaySettings.ReadAsync(cancellationToken)).SendEnabled;
         var stsPolicy = await transportSecurity.ResolveMtaStsAsync(domain, cancellationToken);
+        using var heavyLease = resources?.AdaptiveOptions.Enabled == true
+            ? await resources.HeavyBudget.AcquireAsync(HeavyOperationRole.Outbound, cancellationToken) : null;
+        using var message = await OutboundMessage.LoadAndSignAsync(content, job, dbFactory, srs, cancellationToken, persistent: true);
+        heavyLease?.ReleaseHeavy();
         return await DeliverAcrossMxAsync(hosts, async host =>
         {
             // DANE 只有在 MX 查询具备可信 DNSSEC 结果时才启用；否则优先使用 MTA-STS 策略。
@@ -138,9 +162,26 @@ public sealed class DirectMxTransport(
             string? remoteAddress = null;
             try
             {
-                await using var messageStream = new MemoryStream(messageBytes, writable: false);
-                var message = await OutboundMessage.LoadAndSignAsync(messageStream, job, dbFactory, srs, cancellationToken);
-                using var client = new SmtpClient();
+                var deliverySecurity = danePolicy is not null || stsPolicy?.Mode == "enforce"
+                    ? SecureSocketOptions.StartTls
+                    : DeliverySecurity;
+                // Testing-mode TLS reports need the validation result of each handshake.
+                var allowConnectionReuse = !useRelay && stsPolicy?.Mode != "testing";
+                // A hostname can keep its MX identity while its A/AAAA route changes.
+                // Resolve on every attempt and isolate idle sockets by that route too.
+                var remoteAddresses = useRelay ? null : await Dns.GetHostAddressesAsync(host, cancellationToken);
+                var poolKey = System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    domain, Host = host.ToLowerInvariant(), Port = DeliveryPort,
+                    profile.HeloName,
+                    Source = profile.SourceAddresses.Select(x => x.ToString()).ToArray(),
+                    Route = remoteAddresses?.Select(x => x.ToString()).OrderBy(x => x, StringComparer.Ordinal).ToArray(),
+                    policyType, policyString, Mode = stsPolicy?.Mode, deliverySecurity
+                });
+                using var lease = connectionPool?.Rent(poolKey, allowConnectionReuse)
+                    ?? new SmtpConnectionPool.Lease(null,
+                        new SmtpConnectionPool.Entry(poolKey, new SmtpClient(), DateTimeOffset.UtcNow), false);
+                var client = lease.Client;
                 client.Timeout = 60_000;
                 client.LocalDomain = profile.HeloName;
                 SslPolicyErrors? testingPolicyErrors = null;
@@ -157,9 +198,6 @@ public sealed class DirectMxTransport(
                         return true;
                     };
                 }
-                var deliverySecurity = danePolicy is not null || stsPolicy?.Mode == "enforce"
-                    ? SecureSocketOptions.StartTls
-                    : DeliverySecurity;
                 logger.LogInformation(
                     "Direct MX delivery job {JobId} connecting to {Host}:{Port} for recipient={Recipient}, security={Security}, helo={HeloName}, sourceIps={SourceIps}.",
                     job.Id,
@@ -175,7 +213,12 @@ public sealed class DirectMxTransport(
                     : null;
                 using (PerformanceTelemetry.Stage("smtp.connect-and-tls"))
                 {
-                if (relayConnection is not null)
+                if (lease.Reused)
+                {
+                    remoteAddress = lease.RemoteAddress;
+                    await client.NoOpAsync(cancellationToken);
+                }
+                else if (relayConnection is not null)
                 {
                     await client.ConnectAsync(relayConnection.Stream, host, DeliveryPort, deliverySecurity, cancellationToken);
                     remoteAddress = $"{relayConnection.RemoteAddress}（中继出口 {relayConnection.SourceAddress}）";
@@ -184,7 +227,7 @@ public sealed class DirectMxTransport(
                 {
                     remoteAddress = (await OutboundDeliveryProfile.ConnectAsync(
                         client, host, DeliveryPort, deliverySecurity,
-                        profile.SourceAddresses, cancellationToken)).ToString();
+                        profile.SourceAddresses, cancellationToken, remoteAddresses)).ToString();
                 }
                 }
                 var response = await PerformanceTelemetry.MeasureAsync("smtp.send-and-peer-response", () => client.SendAsync(
@@ -194,7 +237,8 @@ public sealed class DirectMxTransport(
                     cancellationToken));
                 var tlsProtocol = client.IsSecure ? client.SslProtocol.ToString() : null;
                 var tlsCipherSuite = client.IsSecure ? client.SslCipherSuite.ToString() : null;
-                await client.DisconnectAsync(true, cancellationToken);
+                if (!allowConnectionReuse || connectionPool?.Enabled != true)
+                    await client.DisconnectAsync(true, cancellationToken);
                 await RecordTlsEventAsync(
                     host,
                     policyType,
@@ -210,6 +254,7 @@ public sealed class DirectMxTransport(
                     DeliveryPort,
                     job.Recipient,
                     response);
+                if (allowConnectionReuse && connectionPool?.Enabled == true) lease.MarkSuccessful(remoteAddress);
                 return DeliveryResult.Success(response, $"{host}:{DeliveryPort}", new DeliveryDiagnostic("SMTP", RemoteAddress: remoteAddress, SmtpStatusCode: "250", TlsProtocol: tlsProtocol, TlsCipherSuite: tlsCipherSuite, DurationMilliseconds: stopwatch.ElapsedMilliseconds, SessionSummary: response));
             }
             catch (SmtpCommandException exception)
@@ -272,12 +317,6 @@ public sealed class DirectMxTransport(
         return lastResult ?? noHostsResult();
     }
 
-    private static async Task<byte[]> ReadAllAsync(Stream content, CancellationToken cancellationToken)
-    {
-        await using var memory = new MemoryStream();
-        await content.CopyToAsync(memory, cancellationToken);
-        return memory.ToArray();
-    }
 }
 
 internal sealed record OutboundDeliveryProfile(
@@ -364,8 +403,9 @@ internal static class OutboundMessage
         DeliveryJob job,
         IDbContextFactory<MailDbContext> dbFactory,
         SrsService srs,
-        CancellationToken cancellationToken) =>
-        LoadAndSignAsync(content, job.Sender, job, dbFactory, srs, cancellationToken);
+        CancellationToken cancellationToken,
+        bool persistent = false) =>
+        LoadAndSignAsync(content, job.Sender, job, dbFactory, srs, cancellationToken, persistent);
 
     private static async Task<MimeMessage> LoadAndSignAsync(
         Stream content,
@@ -373,10 +413,11 @@ internal static class OutboundMessage
         DeliveryJob? job,
         IDbContextFactory<MailDbContext> dbFactory,
         SrsService? srs,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool persistent = false)
     {
         using var performance = PerformanceTelemetry.Stage("mime.parse-and-sign");
-        var message = await MimeMessage.LoadAsync(content, cancellationToken);
+        var message = await MimeMessage.LoadAsync(content, persistent, cancellationToken);
         var hasSenderDomain = AddressParser.TrySplit(sender, out _, out var domainName);
         var hasForwardingTrace = job?.OriginRuleId is not null && job.ForwardDepth > 0 && srs is not null;
         if (!hasSenderDomain && !hasForwardingTrace)
@@ -409,7 +450,9 @@ internal static class OutboundMessage
             SignatureAlgorithm = DkimSignatureAlgorithm.RsaSha256,
             AgentOrUserIdentifier = $"@{domain.Name}"
         };
-        message.Prepare(EncodingConstraint.EightBit);
+        // Prepare once for the least-capable MX before signing. A fallback server
+        // without 8BITMIME must not force a body re-encoding after DKIM signing.
+        message.Prepare(EncodingConstraint.SevenBit);
         signer.Sign(
             message,
             [

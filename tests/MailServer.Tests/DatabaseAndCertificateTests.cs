@@ -1223,7 +1223,7 @@ public sealed class DatabaseAndCertificateTests
             message.From.Add(MailboxAddress.Parse("sender@example.test"));
             message.To.Add(MailboxAddress.Parse("recipient@example.net"));
             message.Subject = "DKIM test";
-            message.Body = new TextPart("plain") { Text = "hello" };
+            message.Body = new TextPart("plain") { Text = "hello 中文 résumé" };
             await using var input = new MemoryStream();
             await message.WriteToAsync(input);
             input.Position = 0;
@@ -1235,12 +1235,34 @@ public sealed class DatabaseAndCertificateTests
                 CancellationToken.None);
 
             Assert.NotNull(signed.Headers[HeaderId.DkimSignature]);
+            await using var keyDb = await factory.CreateDbContextAsync();
+            var publicKey = await keyDb.Domains.Where(x => x.Id == domainId).Select(x => x.DkimPublicKey).SingleAsync();
+            var verifier = new MimeKit.Cryptography.DkimVerifier(new TestDkimKeyLocator(publicKey!));
+            Assert.True(await verifier.VerifyAsync(signed, signed.Headers.First(x => x.Id == HeaderId.DkimSignature)));
+            // A backup MX that lacks 8BITMIME must not change the signed body.
+            signed.Prepare(EncodingConstraint.SevenBit);
+            using var wire = new MemoryStream();
+            await signed.WriteToAsync(wire);
+            wire.Position = 0;
+            var received = await MimeMessage.LoadAsync(wire);
+            Assert.True(await verifier.VerifyAsync(received, received.Headers.First(x => x.Id == HeaderId.DkimSignature)));
         }
         finally
         {
             SqliteConnection.ClearAllPools();
             Directory.Delete(root, recursive: true);
         }
+    }
+
+    private sealed class TestDkimKeyLocator(string publicKey) : MimeKit.Cryptography.DkimPublicKeyLocatorBase
+    {
+        public override Org.BouncyCastle.Crypto.AsymmetricKeyParameter LocatePublicKey(
+            string methods, string domain, string selector, CancellationToken cancellationToken = default) =>
+            GetPublicKey($"v=DKIM1; k=rsa; p={publicKey}");
+
+        public override Task<Org.BouncyCastle.Crypto.AsymmetricKeyParameter> LocatePublicKeyAsync(
+            string methods, string domain, string selector, CancellationToken cancellationToken = default) =>
+            Task.FromResult(LocatePublicKey(methods, domain, selector, cancellationToken));
     }
 
     private static string CreateCertificateFiles(bool encrypted, bool mismatched, bool expired)

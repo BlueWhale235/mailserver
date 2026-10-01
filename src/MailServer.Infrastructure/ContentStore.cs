@@ -15,6 +15,21 @@ public sealed class FileMessageContentStore(
     {
         using var performance = PerformanceTelemetry.Stage("storage.write");
         var root = Path.GetFullPath(_options.RootPath);
+        if (_options.PreparedInboundEnabled && content is PreparedMessageContent prepared)
+        {
+            var descriptor = prepared.Descriptor;
+            ValidateKey(descriptor.Key);
+            if (descriptor.Size < 0 || descriptor.Size > _options.MaximumMessageBytes)
+                throw new InvalidDataException("Prepared message exceeds the configured size limit.");
+            var finalDirectory = Path.Combine(root, descriptor.Key[..2], descriptor.Key[2..4]);
+            Directory.CreateDirectory(finalDirectory);
+            var destination = Path.Combine(finalDirectory, descriptor.Key + ".eml");
+            if (File.Exists(destination)) return descriptor;
+            cancellationToken.ThrowIfCancellationRequested();
+            if (prepared.TryTransferTo(destination)) return descriptor;
+            // Cross-device moves and destination races retain the existing verified copy path.
+            prepared.Position = 0;
+        }
         var temporaryDirectory = Path.Combine(root, ".tmp");
         Directory.CreateDirectory(temporaryDirectory);
         var temporaryPath = Path.Combine(temporaryDirectory, $"{Guid.NewGuid():N}.eml");

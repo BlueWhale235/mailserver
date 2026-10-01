@@ -56,12 +56,13 @@ public sealed class PerformanceStorage(
             db.Database.SetCommandTimeout(3);
             if (DateTimeOffset.UtcNow - _lastConfiguration > TimeSpan.FromSeconds(10))
             {
+                var observedSettings = collector.Settings;
                 var json = await db.SystemSettings.Where(x => x.Key == SettingsKey).Select(x => x.Value).SingleOrDefaultAsync(token);
                 if (json is not null)
                 {
                     var settings = JsonSerializer.Deserialize<PerformanceSettings>(json)!;
                     settings.Validate();
-                    collector.Settings = settings;
+                    collector.ApplyStoredSettings(observedSettings, settings);
                 }
                 collector.BudgetBytes = resources.Snapshot().ProfileId == "512mb" ? 2 * 1024 * 1024 : 8 * 1024 * 1024;
                 _lastConfiguration = DateTimeOffset.UtcNow;

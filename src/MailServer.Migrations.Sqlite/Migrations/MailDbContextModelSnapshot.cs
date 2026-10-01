@@ -1146,6 +1146,42 @@ namespace MailServer.Migrations.Sqlite.Migrations
                     b.ToTable("mailbox_messages", (string)null);
                 });
 
+            modelBuilder.Entity("MailServer.Domain.MessageSearchRecord", b =>
+                {
+                    b.Property<Guid>("MessageId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Body")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<bool>("Complete")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("HeadersJson")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("ParserVersion")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long?>("RetryAfter")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(24)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Subject")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("MessageId");
+
+                    b.ToTable("message_search_records", (string)null);
+                });
+
             modelBuilder.Entity("MailServer.Domain.MtaStsPolicyCache", b =>
                 {
                     b.Property<string>("Domain")
@@ -2142,6 +2178,17 @@ namespace MailServer.Migrations.Sqlite.Migrations
                         .IsRequired();
 
                     b.Navigation("Mailbox");
+
+                    b.Navigation("Message");
+                });
+
+            modelBuilder.Entity("MailServer.Domain.MessageSearchRecord", b =>
+                {
+                    b.HasOne("MailServer.Domain.StoredMessage", "Message")
+                        .WithOne()
+                        .HasForeignKey("MailServer.Domain.MessageSearchRecord", "MessageId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
 
                     b.Navigation("Message");
                 });

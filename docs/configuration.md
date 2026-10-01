@@ -182,3 +182,36 @@ TLS 握手会优先按照客户端 SNI 精确选择域名证书；客户端不�
 - 支持 PKCS#8、RSA PEM 和加密私钥。
 - 后台 HTTPS 证书继续使用全局 `Admin` 配置。
 - 邮件域证书不再从 `Certificates:Mail` 读取。
+
+## 邮件检索补建与外发连接复用
+
+`MessageSearch:Enabled` 默认开启。升级后先运行 `mailserver db update`，Worker 会自动补建新邮件和历史邮件的预解析检索数据。每批最多 16 封，默认批间等待 1 秒；与大型 MIME 操作共用处理许可，每封邮件保存的检索文本总量最多 512 KiB（UTF-8）。缺失、解析失败、旧版本或不完整记录会回到原文搜索。失败补建在 10 分钟后重试，进程重启可继续；COPY/MOVE 复用原邮件的记录，最终删除原邮件时级联清理。
+
+设置 `MessageSearch:Enabled=false` 可停止补建并恢复原文搜索；保留数据库表和已补建记录。该开关和补建批次、间隔由配置文件控制，修改后重启相关服务。
+
+`MessageSearch:UseCompleteHeaders` 默认开启。解析版本 2 区分完整邮件头与不完整正文：正文超限时，主题和邮件头的未命中也可直接采用检索记录；邮件头本身超限、记录缺失或旧版本仍检查原文。`MessageSearch:CacheDecodedSearchBodies` 和 `UseAsciiSearchNormalization` 默认开启，分别避免一次搜索内重复解码正文，以及对纯 ASCII 文本使用与 Unicode 路径一致的大写转换；含非 ASCII 字符的文本继续采用原有规范化方式。分别关闭开关并重启可恢复对应路径；旧版本服务无法识别的新状态会安全回退原文。
+
+`MessageSearch:UsePersistentSearchStreams` 默认关闭。开启后，可定位的原文搜索流由 MIME 解析器直接引用，避免先复制完整原文到内存；不可定位流沿用复制路径。小内存实测仍出现较大的 Swap 和延迟峰值，因此保留为实验开关。超长正文的解码和规范化仍可能产生较大字符串。
+
+`SmtpConnectionReuse:Enabled` 默认关闭。开启后 Direct MX 按目标域、MX、端口、出口地址配置、HELO 和 TLS 策略隔离连接，并在每次尝试时重新解析目标地址；路由改变后使用新连接。每个目标最多保留一条空闲连接，全进程默认最多四条；默认空闲 30 秒、总寿命 300 秒或发送 50 封后关闭。复用前用 NOOP 检查连接，检查或发送失败后淘汰，不在连接池内自动重发。实时中继与 MTA-STS testing 模式仍按单次连接处理，testing 模式保留逐次握手的证书诊断。关闭开关并重启 Worker 可恢复原连接生命周期。
+
+`EfficiencyDiagnostics:Enabled=true` 可在验收实例中每 10 秒记录进程工作集、峰值工作集、堆大小、累计分配量和各代 GC 次数。默认关闭；它只写日志，不改变邮件处理策略。
+
+## 入站暂存与重操作预算
+
+`Storage:PreparedInboundEnabled` 默认 `false`。开启后 SMTP DATA 在暂存时计算内容 hash，存储层对同卷文件采用原子移动，避免再写一遍完整原文。重复内容仍复用已有文件；Linux 先核对源文件与目标目录的设备编号；跨设备或不能确认设备时直接沿用校验和复制路径，不依赖 File.Move 的隐式跨卷复制。其他平台保留复制路径。同卷移动失败会重新打开暂存流，继续沿用复制路径。`Storage:InboundTemporaryPath` 默认空，开启后使用存储目录下的 `.incoming`；指定路径应位于同一存储卷。取消、拒收与数据库回滚保留原有清理责任。关闭开关并重启 SMTP 可恢复原暂存路径，既有邮件无需转换。
+
+`Resources:MaximumHeavyOperations` 默认按资源档选择：512mb/1gb 为 1，其余为 2，范围 1–8。入站解析、APPEND 保存及解析、原文 BODY 回退、需要 MIME 解析的 FETCH 和检索补建共用这一预算；连接额度另行控制。前台等待最多 30 秒，等待队列有界且支持取消；后台资源不足时暂停。本机许可释放时直接通知等待者，不轮询等待。不应根据机器总内存直接放大活跃任务数量。
+
+检索补建的持久游标保存在现有 `system_settings` 的 `internal.search.backfill.cursor.v2`，以 `(ReceivedAt, Id)` 推进。当前版本失败记录按重试时间优先处理；扫描结束后循环校验，防止旧版本和较早时间的新记录永久遗漏。新邮件提交后的进程内通知只加速空批等待，非空批仍至少间隔 1 秒。回退旧版无需删除游标或检索数据。
+
+`Imap:NoDelay` 默认 `true`，接受 TCP 连接后禁用 Nagle 等待，避免较小的 TLS/IMAP 分段响应等待对端延迟 ACK。它不改变响应内容、连接额度或重操作额度。设置为 `false` 并重启 IMAP 可恢复原套接字行为。
+
+
+## 实验性动态资源调节
+
+`AdaptiveResources.Enabled` 默认 `false`，保持既有资源档位行为。启用后固定初始额度为入站16、外发32、重MIME4；`AutomaticEnabled=true` 才根据CPU、Linux cgroup内存余量、GC和数据库延迟调整至32/64/12上限。缓存固定32MiB，`PauseBackfill=true` 暂停检索补建。每秒输出脱敏资源日志，不依赖诊断API。
+
+该配置用于突发实验，不是生产默认。当前内存准入采用每项256MiB保守预留，加512MiB余量；尚未实现可信的逐任务峰值学习。外发解析完成后释放重MIME额度，内存预留到内容释放才归还。后台控制器发出停止请求时，实验编排器必须停止新负载；控制器不自行终止服务。采样失败禁止扩容。
+
+`SmtpConnectionReuse.MaximumIdleConnections` 默认仍为4，实验可设置到16，保持每目标最多1条空闲连接。动态并发及连接复用需单独开关；测试后恢复原配置。应用cgroup4GiB上限不包含独立MySQL或宿主操作系统。
