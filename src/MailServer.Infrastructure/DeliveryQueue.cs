@@ -183,6 +183,7 @@ public sealed class DeliveryQueue(
             attempt.NextRetryAt = job.NextAttemptAt;
         }
 
+        var completionStatus = job.Status;
         if (db.Database.IsRelational())
         {
             // The read above is not a lock on MySQL: recheck ownership in the write itself.
@@ -190,28 +191,32 @@ public sealed class DeliveryQueue(
             var applied = await db.DeliveryJobs.Where(x => x.Id == job.Id && x.Status == DeliveryStatus.Processing
                     && x.LeaseOwner == lease.Owner && x.Attempts == lease.Attempt && x.LeaseUntil > now)
                 .ExecuteUpdateAsync(setters => setters
-                    .SetProperty(x => x.Status, job.Status)
+                    .SetProperty(x => x.Status, completionStatus)
                     .SetProperty(x => x.LeaseOwner, (string?)null)
                     .SetProperty(x => x.LeaseUntil, (DateTimeOffset?)null)
                     .SetProperty(x => x.LastError, job.LastError)
                     .SetProperty(x => x.UpdatedAt, job.UpdatedAt)
                     .SetProperty(x => x.NextAttemptAt, job.NextAttemptAt), cancellationToken);
             if (applied == 0) return new DeliveryCompletion(false, null, false);
-            db.Entry(job).State = EntityState.Unchanged;
+            // ExecuteUpdate bypasses tracked values. Accept this successful guarded write
+            // before marking unchanged; otherwise EF restores the original Processing state.
+            var entry = db.Entry(job);
+            entry.OriginalValues.SetValues(job);
+            entry.State = EntityState.Unchanged;
         }
         await db.SaveChangesAsync(cancellationToken);
         if (transaction is not null) await transaction.CommitAsync(cancellationToken);
         logger.LogInformation(
             "Delivery job {JobId} completed: status={Status}, succeeded={Succeeded}, permanentFailure={PermanentFailure}, attempts={Attempts}, nextAttemptAt={NextAttemptAt}, remoteHost={RemoteHost}, response={Response}.",
             job.Id,
-            job.Status,
+            completionStatus,
             result.Succeeded,
             result.PermanentFailure,
             job.Attempts,
             job.NextAttemptAt,
             result.RemoteHost ?? string.Empty,
             safeResponse);
-        return new DeliveryCompletion(true, job.Status, job.Status == DeliveryStatus.Failed);
+        return new DeliveryCompletion(true, completionStatus, completionStatus == DeliveryStatus.Failed);
     }
 
     public async Task RetryNowAsync(Guid jobId, CancellationToken cancellationToken, int? expectedAttempts = null)

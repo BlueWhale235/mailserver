@@ -28,9 +28,18 @@ internal static class MailboxWriteAccounting
 
     public static async Task EnsureUidNextAsync(MailDbContext db, Mailbox mailbox, CancellationToken token)
     {
-        // Also repairs counters left behind by old versions or a failed import.
-        var next = (await db.MailboxMessages.Where(x => x.MailboxId == mailbox.Id)
-            .MaxAsync(x => (long?)x.Uid, token) ?? 0) + 1;
+        // New mailboxes have no persisted UIDs. Existing legacy/imported counters
+        // are repaired with the (MailboxId, Uid) index rather than an aggregate scan.
+        if (db.Entry(mailbox).State == EntityState.Added)
+        {
+            mailbox.UidNext = Math.Max(1, mailbox.UidNext);
+            return;
+        }
+        // Deleted UIDs are also allocated history and must never be reused.
+        var highest = await db.MailboxMessages.IgnoreQueryFilters()
+            .Where(x => x.MailboxId == mailbox.Id).OrderByDescending(x => x.Uid)
+            .Select(x => (long?)x.Uid).FirstOrDefaultAsync(token);
+        var next = checked((highest ?? 0) + 1);
         if (mailbox.UidNext < next) mailbox.UidNext = next;
     }
 

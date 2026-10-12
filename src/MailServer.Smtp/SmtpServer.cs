@@ -27,6 +27,8 @@ public sealed class SmtpServerOptions
     public int CommandTimeoutSeconds { get; set; } = 300;
     public int MaximumConnections { get; set; } = 200;
     public int MaximumActiveMessages { get; set; } = 4;
+    public int ActiveMessageWaitMilliseconds { get; set; } = 2000;
+    public int MaximumWaitingMessages { get; set; } = 128;
     public int MaximumRecipients { get; set; } = 100;
     public long MaximumMessageBytes { get; set; } = 52_428_800;
     public List<SmtpEndpointOptions> Endpoints { get; set; } = [];
@@ -94,6 +96,25 @@ public sealed class SmtpServerService(
         ?? new AdjustableConcurrencyLimit(options.Value.MaximumActiveMessages);
     private readonly SmtpAuthFailureLimiter _authFailures = new(abuseOptions?.Value ?? new SmtpAbuseOptions());
     private volatile bool _stopping;
+
+    private async Task<IDisposable?> AcquireMessagePermitAsync(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var permit = _messageLimit.TryAcquire();
+        if (permit is not null) return permit;
+        resources?.Telemetry.RecordInboundDemand();
+        if (_options.ActiveMessageWaitMilliseconds <= 0) return null;
+        try
+        {
+            return await _messageLimit.AcquireAsync(cancellationToken,
+                TimeSpan.FromMilliseconds(Math.Clamp(_options.ActiveMessageWaitMilliseconds, 1, 30_000)),
+                Math.Clamp(_options.MaximumWaitingMessages, 1, 128));
+        }
+        catch (IOException)
+        {
+            return null;
+        }
+    }
 
     protected override Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -610,12 +631,11 @@ public sealed class SmtpServerService(
                                 break;
                             }
 
-                            using var messagePermit = _messageLimit.TryAcquire();
+                            using var messagePermit = await AcquireMessagePermitAsync(serverCancellationToken);
                             if (messagePermit is null)
                             {
-                                logger.LogInformation("SMTP DATA from {Remote} deferred: active message limit reached.", remote);
+                                logger.LogInformation("SMTP DATA from {Remote} deferred: bounded active message wait exhausted.", remote);
                                 state.ResetTransaction();
-                                resources?.Telemetry.RecordInboundDemand();
                                 await connection.ReplyAsync("451 4.3.2 Server busy; retry later", serverCancellationToken);
                                 break;
                             }

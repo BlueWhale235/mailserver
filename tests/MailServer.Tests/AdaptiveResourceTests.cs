@@ -8,7 +8,7 @@ public sealed class AdaptiveResourceTests
     private static AdaptiveResourceSample Sample(int seconds, long memory = 2L * 1024 * 1024 * 1024, bool valid = true,
         double database = 1, double cpu = 50, int inbound = 1, int outbound = 1, int heavy = 0,
         long completed = 0, double operation = 1, double gc = 0) => new(Start.AddSeconds(seconds), valid, memory,
-            8L * 1024 * 1024 * 1024, cpu, gc, new(completed, completed, inbound, outbound, operation, database, 20, 256L * 1024 * 1024), inbound, outbound, heavy);
+            8L * 1024 * 1024 * 1024, cpu, gc, new(completed, completed, inbound, outbound, operation, database, 20, 256L * 1024 * 1024, operation, operation), inbound, outbound, heavy);
     [Fact] public void DefaultsDisableExperimentAndInvalidCapsRejected()
     {
         Assert.False(AdaptiveResourceOptions.Read(new ConfigurationBuilder().Build()).Enabled);
@@ -38,6 +38,39 @@ public sealed class AdaptiveResourceTests
         Assert.Equal("observe-increase",p.Evaluate(Sample(2,completed:10),18,32,4).Reason);
         var b = p.Evaluate(Sample(6,completed:30),18,32,4);
         Assert.Equal((18,36),(b.Inbound,b.Outbound));
+    }
+    [Fact] public void RotatingDimensionsDoesNotLetHeavyDemandStarveOtherRoles()
+    {
+        var p = new AdaptiveResourcePolicy(new() { Enabled=true,AutomaticEnabled=true,DatabaseBaselineWindowSeconds=0 });
+        var a=p.Evaluate(Sample(0,heavy:10),16,32,4); Assert.Equal("increase-inbound",a.Reason);
+        var b=p.Evaluate(Sample(6,heavy:10,completed:100),a.Inbound,a.Outbound,a.Heavy); Assert.Equal("increase-outbound",b.Reason);
+        var c=p.Evaluate(Sample(12,heavy:10,completed:200),b.Inbound,b.Outbound,b.Heavy); Assert.Equal("increase-heavy",c.Reason);
+        Assert.Equal((18,36,5),(c.Inbound,c.Outbound,c.Heavy));
+    }
+    [Fact] public void HostSaturationOrPressurePreventsExpansionAndMissingMetricsRestoresDefaults()
+    {
+        foreach(var sample in new[] {Sample(0) with { HostCpuPercent=96 },Sample(0) with { HostCpuPressurePercent=21 }})
+        {var p=new AdaptiveResourcePolicy(new() { Enabled=true,AutomaticEnabled=true,DatabaseBaselineWindowSeconds=0 });Assert.Equal("capacity-guard",p.Evaluate(sample,16,32,4).Reason);}
+        var missing=new AdaptiveResourcePolicy(new() { Enabled=true,AutomaticEnabled=true,DatabaseBaselineWindowSeconds=0 }).Evaluate(Sample(0) with {HostMetricsValid=false},24,48,8);
+        Assert.Equal((16,32,4,"sample-unavailable"),(missing.Inbound,missing.Outbound,missing.Heavy,missing.Reason));
+    }
+    [Fact] public void KnownMemoryEmergencyStillStopsWhenHostCpuMetricsAreMissing()
+    {
+        foreach(var automatic in new[] {false,true})
+        {
+            var p=new AdaptiveResourcePolicy(new() {Enabled=true,AutomaticEnabled=automatic,DatabaseBaselineWindowSeconds=0});
+            Assert.False(p.Evaluate(Sample(0,memory:64L*1024*1024) with {HostMetricsValid=false},16,32,4).StopRequested);
+            Assert.True(p.Evaluate(Sample(5,memory:64L*1024*1024) with {HostMetricsValid=false},16,32,4).StopRequested);
+        }
+    }
+    [Fact] public void OtherRolesProgressCannotHideRegressionOfExpandedRole()
+    {
+        var p=new AdaptiveResourcePolicy(new() { Enabled=true,AutomaticEnabled=true,DatabaseBaselineWindowSeconds=0 });
+        p.Evaluate(Sample(0,inbound:0,outbound:0),16,32,4);
+        p.Evaluate(Sample(2,completed:20),16,32,4);
+        var s=Sample(8,completed:21,operation:2);
+        s=s with { Telemetry=s.Telemetry with {OutboundCompleted=200,OutboundP95Milliseconds=1} };
+        Assert.Equal("revert-no-benefit",p.Evaluate(s,18,32,4).Reason);
     }
     [Fact] public void CpuGuardPreventsExpansionAndPressureDownscalesWithoutRevocation()
     {
@@ -82,6 +115,6 @@ public sealed class AdaptiveResourceTests
         telemetry.RecordCompletion(true,TimeSpan.FromMilliseconds(10));
         var a=telemetry.Snapshot(); var b=telemetry.Snapshot();
         Assert.Equal(512,a.DatabaseSamples); Assert.Equal(574,a.DatabaseP95Milliseconds);
-        Assert.Equal(1,a.InboundDemand); Assert.Equal(0,b.InboundDemand); Assert.Equal(1,b.InboundCompleted);
+        Assert.Equal(1,a.InboundDemand); Assert.Equal(0,b.InboundDemand); Assert.Equal(1,b.InboundCompleted); Assert.Equal(10,b.InboundP95Milliseconds); Assert.Equal(0,b.OutboundP95Milliseconds);
     }
 }

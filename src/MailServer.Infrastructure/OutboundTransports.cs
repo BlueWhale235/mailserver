@@ -37,6 +37,11 @@ public sealed class DirectMxTransport(
         return match.Success ? match.Value : null;
     }
 
+    // An explicit empty mailbox encodes SMTP's legal MAIL FROM:<> without
+    // substituting the message's From header as the envelope sender.
+    internal static MailboxAddress ParseEnvelopeSender(string sender) =>
+        sender == string.Empty ? new MailboxAddress(string.Empty, string.Empty) : MailboxAddress.Parse(sender);
+
     internal const int DeliveryPort = 25;
     internal const SecureSocketOptions DeliverySecurity = SecureSocketOptions.StartTlsWhenAvailable;
 
@@ -232,7 +237,7 @@ public sealed class DirectMxTransport(
                 }
                 var response = await PerformanceTelemetry.MeasureAsync("smtp.send-and-peer-response", () => client.SendAsync(
                     message,
-                    MailboxAddress.Parse(job.Sender),
+                    ParseEnvelopeSender(job.Sender),
                     [MailboxAddress.Parse(job.Recipient)],
                     cancellationToken));
                 var tlsProtocol = client.IsSecure ? client.SslProtocol.ToString() : null;

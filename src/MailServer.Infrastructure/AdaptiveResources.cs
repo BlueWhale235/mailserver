@@ -32,12 +32,13 @@ public sealed class AdaptiveResourceOptions
     }
 }
 public sealed record AdaptiveTelemetrySnapshot(long InboundCompleted, long OutboundCompleted, int InboundDemand,
-    int OutboundDemand, double OperationP95Milliseconds, double DatabaseP95Milliseconds, int DatabaseSamples, long HeavyEstimateBytes);
+    int OutboundDemand, double OperationP95Milliseconds, double DatabaseP95Milliseconds, int DatabaseSamples, long HeavyEstimateBytes,
+    double InboundP95Milliseconds = 0, double OutboundP95Milliseconds = 0);
 public sealed class AdaptiveResourceTelemetry(TimeProvider? timeProvider = null)
 {
     private readonly TimeProvider _clock = timeProvider ?? TimeProvider.System;
     private readonly object _sync = new();
-    private readonly Queue<(DateTimeOffset At, double Value)> _operations = new(), _database = new();
+    private readonly Queue<(DateTimeOffset At, double Value)> _operations = new(), _database = new(), _inboundOperations = new(), _outboundOperations = new();
     private long _inbound, _outbound, _heavy = 256L * 1024 * 1024;
     private int _inboundDemand, _outboundDemand;
     public void RecordInboundDemand() => Interlocked.Increment(ref _inboundDemand);
@@ -45,7 +46,7 @@ public sealed class AdaptiveResourceTelemetry(TimeProvider? timeProvider = null)
     public void RecordCompletion(bool inbound, TimeSpan duration)
     {
         if (inbound) Interlocked.Increment(ref _inbound); else Interlocked.Increment(ref _outbound);
-        lock (_sync) Add(_operations, duration.TotalMilliseconds);
+        lock (_sync) { Add(_operations, duration.TotalMilliseconds); Add(inbound ? _inboundOperations : _outboundOperations, duration.TotalMilliseconds); }
     }
     public void RecordDatabase(TimeSpan duration) { lock (_sync) Add(_database, duration.TotalMilliseconds); }
     public void RecordHeavyCost(long bytes) { if (bytes > 0) lock (_sync) _heavy = Math.Max(_heavy, bytes); }
@@ -58,11 +59,11 @@ public sealed class AdaptiveResourceTelemetry(TimeProvider? timeProvider = null)
     {
         lock (_sync)
         {
-        Expire(_operations); Expire(_database);
+        Expire(_operations); Expire(_database); Expire(_inboundOperations); Expire(_outboundOperations);
         return new(Interlocked.Read(ref _inbound), Interlocked.Read(ref _outbound),
             resetDemand ? Interlocked.Exchange(ref _inboundDemand, 0) : Volatile.Read(ref _inboundDemand),
             resetDemand ? Interlocked.Exchange(ref _outboundDemand, 0) : Volatile.Read(ref _outboundDemand),
-            P95(_operations), P95(_database), _database.Count, _heavy);
+            P95(_operations), P95(_database), _database.Count, _heavy, P95(_inboundOperations), P95(_outboundOperations));
         }
     }
 }
@@ -78,7 +79,8 @@ public sealed class AdaptiveDatabaseLatencyInterceptor(ResourceRuntime runtime) 
 }
 public sealed record AdaptiveResourceSample(DateTimeOffset At, bool Valid, long MemoryHeadroomBytes,
     long HostAvailableBytes, double CpuPercent, double GcPausePercent, AdaptiveTelemetrySnapshot Telemetry,
-    int InboundWaiting, int OutboundWaiting, int HeavyWaiting);
+    int InboundWaiting, int OutboundWaiting, int HeavyWaiting,
+    double HostCpuPercent = 0, double HostCpuPressurePercent = 0, bool HostMetricsValid = true);
 public sealed record AdaptiveResourceDecision(int Inbound, int Outbound, int Heavy, string Reason, bool StopRequested = false);
 
 // Pure state machine: sampling, experiment orchestration, and limits can be tested independently.
@@ -89,15 +91,16 @@ public sealed class AdaptiveResourcePolicy(AdaptiveResourceOptions options)
     private DateTimeOffset _baselineStart;
     private bool _baselineFrozen;
     private DateTimeOffset _lastDecision, _lastHeavy, _cooldown, _criticalSince, _gcSince, _databaseSince;
-    private bool _outboundTurn;
-    private (DateTimeOffset At, AdaptiveResourceDecision Before, long Completed, double P95, double Rate)? _pending;
-    private (DateTimeOffset At, long Completed)? _previous;
+    private int _nextDimension;
+    private (DateTimeOffset At, AdaptiveResourceDecision Before, long Completed, double P95, double Rate, int Dimension)? _pending;
+    private (DateTimeOffset At, long Inbound, long Outbound)? _previous;
     public AdaptiveResourceDecision Evaluate(AdaptiveResourceSample s, int inbound, int outbound, int heavy)
     {
         var current = new AdaptiveResourceDecision(inbound, outbound, heavy, "hold");
-        var completed = s.Telemetry.InboundCompleted + s.Telemetry.OutboundCompleted;
-        var rate = _previous is { } p && s.At > p.At ? (completed - p.Completed) / (s.At - p.At).TotalSeconds : 0;
-        _previous = (s.At, completed);
+        var previous = _previous;
+        double Rate(int dimension) => previous is { } p && s.At > p.At
+            ? (Completed(s.Telemetry, dimension) - (dimension == 0 ? p.Inbound : dimension == 1 ? p.Outbound : p.Inbound + p.Outbound)) / (s.At - p.At).TotalSeconds : 0;
+        _previous = (s.At, s.Telemetry.InboundCompleted, s.Telemetry.OutboundCompleted);
         if (!s.Valid) { _pending = null; return new(options.InitialInbound, options.InitialOutbound, options.InitialHeavy, "sample-unavailable"); }
         if (_baselineStart == default) _baselineStart = s.At;
         if (!_baselineFrozen && s.Telemetry.DatabaseSamples >= 16)
@@ -117,36 +120,46 @@ public sealed class AdaptiveResourcePolicy(AdaptiveResourceOptions options)
             return new(Math.Max(1, (int)Math.Floor(inbound * .75)), Math.Max(1, (int)Math.Floor(outbound * .75)),
                 Math.Max(1, (int)Math.Floor(heavy * .75)), "downscale-pressure");
         }
+        if (!s.HostMetricsValid)
+        { _pending = null; return new(options.InitialInbound, options.InitialOutbound, options.InitialHeavy, "sample-unavailable"); }
         if (_pending is { } increase)
         {
             if ((s.At - increase.At).TotalSeconds < 6) return current with { Reason = "observe-increase" };
-            var observed = (completed - increase.Completed) / (s.At - increase.At).TotalSeconds;
+            var observed = (Completed(s.Telemetry, increase.Dimension) - increase.Completed) / (s.At - increase.At).TotalSeconds;
             _pending = null;
-            if (observed < increase.Rate * 1.05 && s.Telemetry.OperationP95Milliseconds > increase.P95 * 1.2)
+            if (observed < increase.Rate * 1.05 && Latency(s.Telemetry, increase.Dimension) > increase.P95 * 1.2)
             { _cooldown = s.At.AddSeconds(10); return increase.Before with { Reason = "revert-no-benefit" }; }
         }
         if (s.At < _cooldown || (s.At - _lastDecision).TotalSeconds < 2) return current;
         _lastDecision = s.At;
         if (!_baselineFrozen || s.MemoryHeadroomBytes <= 768 * MiB || s.CpuPercent >= 90
-            || s.GcPausePercent >= 15 || s.Telemetry.DatabaseP95Milliseconds >= _databaseBaseline * 2) return current with { Reason = "capacity-guard" };
-        AdaptiveResourceDecision next;
-        if (s.HeavyWaiting > 0 && s.MemoryHeadroomBytes > 1024 * MiB && heavy < options.MaximumHeavy
-            && (s.At - _lastHeavy).TotalSeconds >= 6
-            && s.MemoryHeadroomBytes - 512 * MiB >= s.Telemetry.HeavyEstimateBytes)
-        { _lastHeavy = s.At; next = current with { Heavy = heavy + 1, Reason = "increase-heavy" }; }
-        else
+            || s.GcPausePercent >= 15 || s.HostCpuPercent >= 95 || s.HostCpuPressurePercent >= 20
+            || s.Telemetry.DatabaseP95Milliseconds >= _databaseBaseline * 2) return current with { Reason = "capacity-guard" };
+        var inDemand = s.InboundWaiting > 0 || s.Telemetry.InboundDemand > 0;
+        var outDemand = s.OutboundWaiting > 0 || s.Telemetry.OutboundDemand > 0;
+        for (var offset = 0; offset < 3; offset++)
         {
-            var inDemand = s.InboundWaiting > 0 || s.Telemetry.InboundDemand > 0;
-            var outDemand = s.OutboundWaiting > 0 || s.Telemetry.OutboundDemand > 0;
-            if ((_outboundTurn && outDemand && outbound < options.MaximumOutbound) || (!inDemand && outDemand && outbound < options.MaximumOutbound))
-            { next = current with { Outbound = Math.Min(options.MaximumOutbound, outbound + 4), Reason = "increase-outbound" }; _outboundTurn = false; }
-            else if (inDemand && inbound < options.MaximumInbound)
-            { next = current with { Inbound = Math.Min(options.MaximumInbound, inbound + 2), Reason = "increase-inbound" }; _outboundTurn = true; }
-            else return current;
+            var dimension = (_nextDimension + offset) % 3;
+            AdaptiveResourceDecision? next = dimension switch
+            {
+                0 when inDemand && inbound < options.MaximumInbound => current with { Inbound = Math.Min(options.MaximumInbound, inbound + 2), Reason = "increase-inbound" },
+                1 when outDemand && outbound < options.MaximumOutbound => current with { Outbound = Math.Min(options.MaximumOutbound, outbound + 4), Reason = "increase-outbound" },
+                2 when s.HeavyWaiting > 0 && s.MemoryHeadroomBytes > 1024 * MiB && heavy < options.MaximumHeavy
+                    && (s.At - _lastHeavy).TotalSeconds >= 6 && s.MemoryHeadroomBytes - 512 * MiB >= s.Telemetry.HeavyEstimateBytes
+                    => current with { Heavy = heavy + 1, Reason = "increase-heavy" },
+                _ => null
+            };
+            if (next is null) continue;
+            if (dimension == 2) _lastHeavy = s.At;
+            _nextDimension = (dimension + 1) % 3;
+            _pending = (s.At, current, Completed(s.Telemetry, dimension), Latency(s.Telemetry, dimension), Rate(dimension), dimension);
+            return next;
         }
-        _pending = (s.At, current, completed, s.Telemetry.OperationP95Milliseconds, rate);
-        return next;
+        return current;
     }
+    private static long Completed(AdaptiveTelemetrySnapshot t, int dimension) => dimension == 0 ? t.InboundCompleted : dimension == 1 ? t.OutboundCompleted : t.InboundCompleted + t.OutboundCompleted;
+    private static double Latency(AdaptiveTelemetrySnapshot t, int dimension) => dimension == 0 ? t.InboundP95Milliseconds : dimension == 1 ? t.OutboundP95Milliseconds : Math.Max(t.InboundP95Milliseconds, t.OutboundP95Milliseconds);
+
     private static DateTimeOffset Since(bool condition, DateTimeOffset previous, DateTimeOffset now) => condition ? previous == default ? now : previous : default;
     private static bool Elapsed(DateTimeOffset since, DateTimeOffset now, int seconds) => since != default && (now - since).TotalSeconds >= seconds;
 }
@@ -156,6 +169,7 @@ public sealed class AdaptiveResourceSampler
     private readonly Process _process = Process.GetCurrentProcess();
     private long _lastTicks = Stopwatch.GetTimestamp();
     private TimeSpan _lastCpu, _lastPause;
+    private long _hostTotal, _hostIdle;
     private readonly string? _cgroup;
     public AdaptiveResourceSampler()
     {
@@ -188,11 +202,26 @@ public sealed class AdaptiveResourceSampler
                 host = long.Parse(line.Split(' ', StringSplitOptions.RemoveEmptyEntries)[1], CultureInfo.InvariantCulture) * 1024;
                 if (!bounded) headroom = host;
             }
+            var hostCpu = 0d; var hostPressure = 0d; var hostValid = false;
+            if (OperatingSystem.IsLinux())
+            {
+                try
+                {
+                var counters = File.ReadLines("/proc/stat").First().Split(' ', StringSplitOptions.RemoveEmptyEntries).Skip(1).Take(8).Select(x => long.Parse(x, CultureInfo.InvariantCulture)).ToArray();
+                var total = counters.Sum(); var idle = counters[3] + counters[4];
+                if (_hostTotal > 0 && total > _hostTotal) hostCpu = 100d * (1 - (double)(idle - _hostIdle) / (total - _hostTotal));
+                _hostTotal = total; _hostIdle = idle;
+                var pressure = File.ReadLines("/proc/pressure/cpu").First(x => x.StartsWith("some ")).Split(' ', StringSplitOptions.RemoveEmptyEntries).First(x => x.StartsWith("avg10="));
+                hostPressure = double.Parse(pressure[6..], CultureInfo.InvariantCulture); hostValid = true;
+                }
+                catch (Exception error) when (error is IOException or UnauthorizedAccessException or FormatException or InvalidOperationException or IndexOutOfRangeException)
+                { hostValid = false; }
+            }
             var percent = elapsed > 0 ? (cpu - _lastCpu).TotalSeconds / elapsed / Math.Max(.01, cores) * 100 : 0;
             var pause = elapsed > 0 ? (gc - _lastPause).TotalSeconds / elapsed * 100 : 0;
             _lastCpu = cpu; _lastPause = gc;
             return new(DateTimeOffset.UtcNow, (bounded || headroom > 0) && host > 0, Math.Min(headroom, host), host, percent, pause,
-                runtime.Telemetry.Snapshot(), runtime.SmtpMessages.Waiting, runtime.Delivery.Waiting, runtime.HeavyBudget.WaitingTotal);
+                runtime.Telemetry.Snapshot(), runtime.SmtpMessages.Waiting, runtime.Delivery.Waiting, runtime.HeavyBudget.WaitingTotal, hostCpu, hostPressure, hostValid);
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException or FormatException or InvalidOperationException)
         { return new(DateTimeOffset.UtcNow, false, 0, 0, 0, 0, runtime.Telemetry.Snapshot(), 0, 0, 0); }

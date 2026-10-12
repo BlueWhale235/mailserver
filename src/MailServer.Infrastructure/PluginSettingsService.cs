@@ -28,7 +28,8 @@ public sealed record PluginConfigurationView(
 public sealed class PluginSettingsService(
     IDbContextFactory<MailDbContext> dbFactory,
     PluginCatalog catalog,
-    IDataProtectionProvider protectionProvider) : IPluginSettingsProvider
+    IDataProtectionProvider protectionProvider,
+    ConfigurationSnapshotCache? cache = null) : IPluginSettingsProvider
 {
     private const string Prefix = "plugin:";
     private const string OrderKey = Prefix + "order";
@@ -50,6 +51,7 @@ public sealed class PluginSettingsService(
 
     public async Task<IReadOnlyList<PluginListItem>> ListAsync(CancellationToken cancellationToken)
     {
+        using var freshAdminRead = new ConfigurationCacheBypass();
         var orders = await ReadOrderOverridesAsync(cancellationToken);
         var result = new List<PluginListItem>();
         foreach (var plugin in catalog.Plugins.OrderBy(x => EffectiveOrder(x.Manifest, orders)).ThenBy(x => x.Manifest.Id))
@@ -82,6 +84,8 @@ public sealed class PluginSettingsService(
             orders[pluginIds[index]] = (index + 1) * 10;
 
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+        await using var transaction = db.Database.IsRelational() ? await db.Database.BeginTransactionAsync(cancellationToken) : null;
+        var version = await ConfigurationVersionService.BumpAsync(db, ConfigurationScopes.Settings, cancellationToken);
         var setting = await db.SystemSettings.SingleOrDefaultAsync(x => x.Key == OrderKey, cancellationToken);
         var json = JsonSerializer.Serialize(orders);
         if (setting is null) db.SystemSettings.Add(new SystemSetting { Key = OrderKey, Value = json });
@@ -97,12 +101,15 @@ public sealed class PluginSettingsService(
             RawJson = AuditLogService.SafeJson(new { pluginIds })
         });
         await db.SaveChangesAsync(cancellationToken);
+        if (transaction is not null) await transaction.CommitAsync(cancellationToken);
+        cache?.ObserveCommittedVersion(ConfigurationScopes.Settings, version);
     }
 
     public async Task<PluginConfigurationView> GetConfigurationAsync(
         string pluginId,
         CancellationToken cancellationToken)
     {
+        using var freshAdminRead = new ConfigurationCacheBypass();
         var plugin = Find(pluginId);
         var snapshot = await GetAsync(pluginId, cancellationToken);
         var orders = await ReadOrderOverridesAsync(cancellationToken);
@@ -132,6 +139,7 @@ public sealed class PluginSettingsService(
         var definitions = plugin.Manifest.Settings.ToDictionary(x => x.Key, StringComparer.OrdinalIgnoreCase);
         if (input.Keys.Any(key => !definitions.ContainsKey(key)))
             throw new FormatException("Plugin configuration contains an unknown setting.");
+        using var freshAdminWrite = new ConfigurationCacheBypass();
         var stored = await ReadStoredAsync(pluginId, cancellationToken);
         var previous = await GetAsync(pluginId, cancellationToken);
         var changes = new List<AuditFieldChangeView>();
@@ -168,6 +176,8 @@ public sealed class PluginSettingsService(
         }
 
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+        await using var transaction = db.Database.IsRelational() ? await db.Database.BeginTransactionAsync(cancellationToken) : null;
+        var version = await ConfigurationVersionService.BumpAsync(db, ConfigurationScopes.Settings, cancellationToken);
         var key = Key(pluginId);
         var setting = await db.SystemSettings.SingleOrDefaultAsync(x => x.Key == key, cancellationToken);
         var json = JsonSerializer.Serialize(stored);
@@ -193,6 +203,8 @@ public sealed class PluginSettingsService(
             })
         });
         await db.SaveChangesAsync(cancellationToken);
+        if (transaction is not null) await transaction.CommitAsync(cancellationToken);
+        cache?.ObserveCommittedVersion(ConfigurationScopes.Settings, version);
         return await GetConfigurationAsync(pluginId, cancellationToken);
     }
 
@@ -225,14 +237,21 @@ public sealed class PluginSettingsService(
 
     private async Task<StoredPluginSettings> ReadStoredAsync(string pluginId, CancellationToken cancellationToken)
     {
-        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
-        var json = await db.SystemSettings.AsNoTracking()
-            .Where(x => x.Key == Key(pluginId))
-            .Select(x => x.Value)
-            .SingleOrDefaultAsync(cancellationToken);
-        return json is null
-            ? new StoredPluginSettings()
-            : JsonSerializer.Deserialize<StoredPluginSettings>(json) ?? new StoredPluginSettings();
+        var key = Key(pluginId);
+        async Task<(StoredPluginSettings Value, long Size)> Load(CancellationToken token)
+        {
+            await using var db = await dbFactory.CreateDbContextAsync(token);
+            var json = await db.SystemSettings.AsNoTracking().Where(x => x.Key == key)
+                .Select(x => x.Value).SingleOrDefaultAsync(token);
+            return (json is null ? new() : JsonSerializer.Deserialize<StoredPluginSettings>(json) ?? new(),
+                256L + (json?.Length ?? 0) * 4L);
+        }
+        var stored = cache is null ? (await Load(cancellationToken)).Value
+            : await cache.GetAsync(key, ConfigurationScopes.Settings, Load, cancellationToken);
+        // Saves edit an independent copy; neither callers nor validation mutate the shared cache.
+        return new StoredPluginSettings { Enabled = stored.Enabled,
+            Values = new(stored.Values, StringComparer.OrdinalIgnoreCase),
+            Secrets = new(stored.Secrets, StringComparer.OrdinalIgnoreCase) };
     }
 
     private LoadedPlugin Find(string pluginId) =>
@@ -246,22 +265,22 @@ public sealed class PluginSettingsService(
 
     private async Task<Dictionary<string, int>> ReadOrderOverridesAsync(CancellationToken cancellationToken)
     {
-        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
-        var json = await db.SystemSettings.AsNoTracking()
-            .Where(x => x.Key == OrderKey)
-            .Select(x => x.Value)
-            .SingleOrDefaultAsync(cancellationToken);
-        if (string.IsNullOrWhiteSpace(json))
-            return new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-        try
+        async Task<(Dictionary<string, int> Value, long Size)> Load(CancellationToken token)
         {
-            return JsonSerializer.Deserialize<Dictionary<string, int>>(json)
-                   ?? new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            await using var db = await dbFactory.CreateDbContextAsync(token);
+            var json = await db.SystemSettings.AsNoTracking().Where(x => x.Key == OrderKey)
+                .Select(x => x.Value).SingleOrDefaultAsync(token);
+            Dictionary<string, int> value;
+            try
+            {
+                value = string.IsNullOrWhiteSpace(json) ? new(StringComparer.OrdinalIgnoreCase)
+                    : JsonSerializer.Deserialize<Dictionary<string, int>>(json) ?? new(StringComparer.OrdinalIgnoreCase);
+            }
+            catch (JsonException) { value = new(StringComparer.OrdinalIgnoreCase); }
+            return (value, 128L + (json?.Length ?? 0) * 4L);
         }
-        catch (JsonException)
-        {
-            return new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-        }
+        return cache is null ? (await Load(cancellationToken)).Value
+            : await cache.GetAsync(OrderKey, ConfigurationScopes.Settings, Load, cancellationToken);
     }
 
     private static int EffectiveOrder(PluginManifest manifest, IReadOnlyDictionary<string, int> orders) =>

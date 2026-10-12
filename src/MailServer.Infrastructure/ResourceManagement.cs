@@ -71,19 +71,27 @@ public sealed class AdjustableConcurrencyLimit(int limit)
             return new Permit(this);
         }
     }
-    public async Task<IDisposable> AcquireAsync(CancellationToken token)
+    public async Task<IDisposable> AcquireAsync(CancellationToken token,
+        TimeSpan? waitTimeout = null, int? maximumWaiting = null)
     {
+        token.ThrowIfCancellationRequested();
+        var duration = waitTimeout ?? TimeSpan.FromSeconds(30);
+        if (duration <= TimeSpan.Zero || duration > TimeSpan.FromMinutes(5))
+            throw new ArgumentOutOfRangeException(nameof(waitTimeout));
+        if (maximumWaiting is <= 0 or > 128)
+            throw new ArgumentOutOfRangeException(nameof(maximumWaiting));
         var immediate = TryAcquire();
         if (immediate is not null) return immediate;
         lock (_sync)
         {
-            if (_waiting >= Math.Min(64, Math.Max(16, _limit * 8))) throw new IOException("Heavy operation queue is full.");
+            if (_waiting >= (maximumWaiting ?? Math.Min(64, Math.Max(16, (long)_limit * 8))))
+                throw new IOException("Operation capacity waiting queue is full.");
             _waiting++;
         }
         try
         {
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
-            timeout.CancelAfter(TimeSpan.FromSeconds(30));
+            timeout.CancelAfter(duration);
             try
             {
                 while (true)
@@ -99,7 +107,7 @@ public sealed class AdjustableConcurrencyLimit(int limit)
                 }
             }
             catch (OperationCanceledException) when (!token.IsCancellationRequested)
-            { throw new IOException("Heavy operation capacity wait timed out."); }
+            { throw new IOException("Operation capacity wait timed out."); }
         }
         finally { lock (_sync) _waiting--; }
     }

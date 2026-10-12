@@ -73,6 +73,8 @@
     "Minutes": 15
   },
   "Smtp": {
+    "ActiveMessageWaitMilliseconds": 2000,
+    "MaximumWaitingMessages": 128,
     "HostName": "mail.localhost",
     "CommandTimeoutSeconds": 300,
     "MaximumRecipients": 100,
