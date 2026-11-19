@@ -12,7 +12,7 @@ public sealed record PerformanceSettings
     public int SqlMilliseconds { get; init; } = 200;
     public int SqlTotalMilliseconds { get; init; } = 500;
     public int RepeatedSqlCount { get; init; } = 20;
-    public int DetailDays { get; init; } = 7;
+    public int DetailDays { get; init; } = 30;
     public int AggregateDays { get; init; } = 30;
     public long DetailBudgetBytes { get; init; } = 512L * 1024 * 1024;
     public DateTimeOffset? DiagnosticUntil { get; init; }
@@ -33,7 +33,7 @@ public sealed record PerformanceSettings
 
 public sealed class PerformanceOperation
 {
-    public Guid Id { get; set; } = Guid.NewGuid();
+    public long Id { get; set; } = MailServer.Domain.SnowflakeIds.NewId();
     public string TraceId { get; set; } = "";
     public string? SourceTraceId { get; set; }
     public string ProcessId { get; set; } = "";
@@ -47,8 +47,8 @@ public sealed class PerformanceOperation
     public int SqlCount { get; set; }
     public bool Slow { get; set; }
     public bool Truncated { get; set; }
-    public Guid? MessageId { get; set; }
-    public Guid? DeliveryJobId { get; set; }
+    public long? MessageId { get; set; }
+    public long? DeliveryJobId { get; set; }
     public int? Attempt { get; set; }
     public double? QueueWaitMilliseconds { get; set; }
     public double? RetryBackoffMilliseconds { get; set; }
@@ -64,7 +64,7 @@ public sealed record PerformanceStage(string Id, string? ParentId, string Name, 
 
 public sealed class PerformanceMinute
 {
-    public Guid Id { get; set; } = Guid.NewGuid();
+    public long Id { get; set; } = MailServer.Domain.SnowflakeIds.NewId();
     public string ProcessId { get; set; } = "";
     public DateTimeOffset Minute { get; set; }
     public string Kind { get; set; } = "operation";

@@ -12,7 +12,7 @@ public sealed record SmtpSenderContext(
     string Sender,
     string RemoteAddress,
     string? AuthenticatedUser,
-    Guid? AuthenticatedAccountId,
+    long? AuthenticatedAccountId,
     PluginSettingsSnapshot? Settings = null);
 
 /// <summary>
@@ -24,7 +24,7 @@ public sealed record SmtpRecipientContext(
     IReadOnlyList<string> AcceptedRecipients,
     string RemoteAddress,
     string? AuthenticatedUser,
-    Guid? AuthenticatedAccountId,
+    long? AuthenticatedAccountId,
     PluginSettingsSnapshot? Settings = null);
 
 /// <summary>
@@ -53,7 +53,7 @@ public sealed record MessageContentContext(
 /// 消息已经被宿主持久化后的通知上下文。此阶段不再影响 SMTP 接受结果，适合异步审计或旁路集成。
 /// </summary>
 public sealed record MessageAcceptedContext(
-    Guid MessageId,
+    long MessageId,
     string Sender,
     IReadOnlyList<string> Recipients,
     string RemoteAddress,

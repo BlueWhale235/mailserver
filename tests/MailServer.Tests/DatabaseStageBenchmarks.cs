@@ -21,14 +21,14 @@ public sealed class DatabaseStageBenchmarks(ITestOutputHelper output)
     {
         if (Environment.GetEnvironmentVariable("MAILSERVER_DATABASE_BENCHMARK") != "1") return;
         SQLitePCL.raw.SetProvider(new SQLitePCL.SQLite3Provider_e_sqlite3());
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-db-bench-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-db-bench-{MailServer.Domain.SnowflakeIds.NewId()}");
         Directory.CreateDirectory(root);
         try
         {
             var database = Path.Combine(root, "mail.db");
             await MeasureSqlitePoolAsync(database);
             using var collector = new PerformanceCollector { Settings = new() { SampleRate = 1 } };
-            var factory = new PooledDbContextFactory<MailDbContext>(new DbContextOptionsBuilder<MailDbContext>()
+            var factory = new TestMailDbContextFactory(new DbContextOptionsBuilder<MailDbContext>()
                 .UseSqlite($"Data Source={database};Pooling=True")
                 .AddInterceptors(new PerformanceSqlInterceptor(collector), new PerformanceConnectionInterceptor(),
                     new PerformanceTransactionInterceptor()).Options);
@@ -168,12 +168,12 @@ public sealed class DatabaseStageBenchmarks(ITestOutputHelper output)
 
     private async Task MeasureMySqlSmtpAsync(string connectionString)
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-mysql-db-bench-{Guid.NewGuid():N}");
-        var domainName = $"bench-{Guid.NewGuid():N}.example.test";
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-mysql-db-bench-{MailServer.Domain.SnowflakeIds.NewId()}");
+        var domainName = $"bench-{MailServer.Domain.SnowflakeIds.NewId()}.example.test";
         try
         {
             using var collector = new PerformanceCollector { Settings = new() { SampleRate = 1 } };
-            var factory = new PooledDbContextFactory<MailDbContext>(new DbContextOptionsBuilder<MailDbContext>()
+            var factory = new TestMailDbContextFactory(new DbContextOptionsBuilder<MailDbContext>()
                 .UseMySQL(connectionString, options => options.MigrationsAssembly("MailServer.Migrations.MySql"))
                 .AddInterceptors(new PerformanceSqlInterceptor(collector), new PerformanceConnectionInterceptor(),
                     new PerformanceTransactionInterceptor()).Options);

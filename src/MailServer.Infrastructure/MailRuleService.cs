@@ -29,21 +29,21 @@ public sealed record MailRuleInput(
     IReadOnlyList<MailRuleActionInput>? Actions = null);
 
 public sealed record MailRuleConditionView(
-    Guid Id,
+    long Id,
     MailRuleField Field,
     MailRuleOperator Operator,
     IReadOnlyList<string> Values,
     int Position);
 
 public sealed record MailRuleActionView(
-    Guid Id,
+    long Id,
     MailRuleActionKind Kind,
     IReadOnlyList<string> Values,
     int Position);
 
 public sealed record MailRuleView(
-    Guid Id,
-    Guid DomainId,
+    long Id,
+    long DomainId,
     string Name,
     MailRuleDirection Direction,
     MailRuleMatchMode MatchMode,
@@ -94,7 +94,7 @@ public sealed class MailRuleFacts
 }
 
 public sealed record MailRuleMatch(
-    Guid RuleId,
+    long RuleId,
     string RuleName,
     string TargetMailboxName,
     IReadOnlyList<MailRuleActionView> Actions);
@@ -102,7 +102,7 @@ public sealed record MailRuleMatch(
 /// <summary>
 /// 发信规则命中「拒绝发信」后的结果，Reason 可回传给发信客户端。
 /// </summary>
-public sealed record MailRuleRejection(Guid RuleId, string RuleName, string? Reason);
+public sealed record MailRuleRejection(long RuleId, string RuleName, string? Reason);
 
 public sealed partial class MailRuleService(
     IDbContextFactory<MailDbContext> dbFactory,
@@ -117,9 +117,9 @@ public sealed partial class MailRuleService(
     private const int EstimatedConditionResultBytes = 128;
     private sealed class EvaluationScope
     {
-        public readonly Dictionary<(Guid DomainId, MailRuleDirection Direction), RuleSnapshot> Snapshots = new();
-        public readonly Dictionary<(Guid DomainId, MailRuleDirection Direction, MailRuleFacts Facts), MailRuleMatch?> Matches = new();
-        public readonly Dictionary<(Guid AccountId, MailRuleFacts Facts), MailRuleRejection?> Rejections = new();
+        public readonly Dictionary<(long DomainId, MailRuleDirection Direction), RuleSnapshot> Snapshots = new();
+        public readonly Dictionary<(long DomainId, MailRuleDirection Direction, MailRuleFacts Facts), MailRuleMatch?> Matches = new();
+        public readonly Dictionary<(long AccountId, MailRuleFacts Facts), MailRuleRejection?> Rejections = new();
         public readonly Dictionary<MimeMessage, (Lazy<string> Body, Lazy<IReadOnlyList<string>> Attachments)> MimeContent = new();
         public readonly Dictionary<(MimeMessage Message, string Sender, string Recipients),
             (IReadOnlyList<string> Senders, IReadOnlyList<string> Domains,
@@ -175,7 +175,7 @@ public sealed partial class MailRuleService(
         IReadOnlyList<CompiledPattern> Values, long? Number, DateTimeOffset? FirstTime,
         DateTimeOffset? SecondTime, bool? Boolean);
     private sealed record CompiledRule(
-        Guid Id,
+        long Id,
         string Name,
         MailRuleMatchMode MatchMode,
         string TargetMailboxName,
@@ -201,7 +201,7 @@ public sealed partial class MailRuleService(
     }
 
     public async Task<IReadOnlyList<MailRuleView>> GetRulesAsync(
-        Guid domainId,
+        long domainId,
         MailRuleDirection direction,
         CancellationToken cancellationToken)
     {
@@ -221,7 +221,7 @@ public sealed partial class MailRuleService(
     }
 
     public async Task<IReadOnlyList<RuleFolderCoverage>> GetFolderCoverageAsync(
-        Guid domainId,
+        long domainId,
         CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
@@ -240,7 +240,7 @@ public sealed partial class MailRuleService(
     }
 
     public async Task<MailRuleView> CreateAsync(
-        Guid domainId,
+        long domainId,
         MailRuleInput input,
         string actor,
         CancellationToken cancellationToken)
@@ -287,8 +287,8 @@ public sealed partial class MailRuleService(
     }
 
     public async Task<MailRuleView> UpdateAsync(
-        Guid domainId,
-        Guid ruleId,
+        long domainId,
+        long ruleId,
         MailRuleInput input,
         string actor,
         CancellationToken cancellationToken)
@@ -349,8 +349,8 @@ public sealed partial class MailRuleService(
     }
 
     public async Task DeleteAsync(
-        Guid domainId,
-        Guid ruleId,
+        long domainId,
+        long ruleId,
         string actor,
         CancellationToken cancellationToken)
     {
@@ -371,9 +371,9 @@ public sealed partial class MailRuleService(
     }
 
     public async Task ReorderAsync(
-        Guid domainId,
+        long domainId,
         MailRuleDirection direction,
-        IReadOnlyList<Guid> ruleIds,
+        IReadOnlyList<long> ruleIds,
         string actor,
         CancellationToken cancellationToken)
     {
@@ -400,7 +400,7 @@ public sealed partial class MailRuleService(
     }
 
     public async Task<MailRuleMatch?> MatchAsync(
-        Guid domainId,
+        long domainId,
         MailRuleDirection direction,
         MailRuleFacts facts,
         CancellationToken cancellationToken)
@@ -430,7 +430,7 @@ public sealed partial class MailRuleService(
                 var actions = rule.Actions;
                 if (actions.Count == 0)
                 {
-                    actions = [new MailRuleActionView(Guid.Empty, MailRuleActionKind.MoveToFolder, [rule.TargetMailboxName], 0)];
+                    actions = [new MailRuleActionView(0, MailRuleActionKind.MoveToFolder, [rule.TargetMailboxName], 0)];
                 }
                 var match = new MailRuleMatch(rule.Id, rule.Name, rule.TargetMailboxName, actions);
                 if (evaluation is not null) evaluation.Matches[resultKey] = match;
@@ -447,7 +447,7 @@ public sealed partial class MailRuleService(
     /// 调用方据此在落库前用 550 拒绝整封信。
     /// </summary>
     public async Task<MailRuleRejection?> EvaluateOutgoingRejectionAsync(
-        Guid accountId,
+        long accountId,
         MailRuleFacts facts,
         CancellationToken cancellationToken)
     {
@@ -456,7 +456,7 @@ public sealed partial class MailRuleService(
         if (evaluation is not null && evaluation.Rejections.TryGetValue(resultKey, out var prior)) return prior;
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         var domainId = await db.Accounts.Where(x => x.Id == accountId)
-            .Select(x => (Guid?)x.DomainId)
+            .Select(x => (long?)x.DomainId)
             .SingleOrDefaultAsync(cancellationToken);
         if (domainId is null) return null;
         var snapshot = await GetSnapshotAsync(domainId.Value, MailRuleDirection.Outgoing, cancellationToken);
@@ -488,7 +488,7 @@ public sealed partial class MailRuleService(
     }
 
     private async Task<RuleSnapshot> GetSnapshotAsync(
-        Guid domainId,
+        long domainId,
         MailRuleDirection direction,
         CancellationToken cancellationToken)
     {
@@ -497,7 +497,7 @@ public sealed partial class MailRuleService(
         if (evaluation is not null && evaluation.Snapshots.TryGetValue(key, out var pinned)) return pinned;
         if (cache is not null) evaluation?.CheckVersion(cache.Versions.Rules);
         var snapshot = cache is null ? (await LoadSnapshotAsync(domainId, direction, cancellationToken)).Value : await cache.GetAsync(
-            $"rules:{domainId:N}:{direction}",
+            $"rules:{domainId}:{direction}",
             ConfigurationScopes.Rules,
             token => LoadSnapshotAsync(domainId, direction, token),
             cancellationToken);
@@ -506,7 +506,7 @@ public sealed partial class MailRuleService(
     }
 
     private async Task<(RuleSnapshot Value, long Size)> LoadSnapshotAsync(
-        Guid domainId,
+        long domainId,
         MailRuleDirection direction,
         CancellationToken cancellationToken)
     {
@@ -523,7 +523,7 @@ public sealed partial class MailRuleService(
     }
 
     private async Task<(RuleSnapshot Value, long Size)> LoadSnapshotOnceAsync(
-        Guid domainId,
+        long domainId,
         MailRuleDirection direction,
         CancellationToken cancellationToken)
     {
@@ -561,7 +561,7 @@ public sealed partial class MailRuleService(
     }
 
     private async Task<object?> MatchBatchedAsync(
-        Guid domainId,
+        long domainId,
         MailRuleDirection direction,
         MailRuleFacts facts,
         bool rejectionOnly,
@@ -592,7 +592,7 @@ public sealed partial class MailRuleService(
                         continue;
                     }
                     IReadOnlyList<MailRuleActionView> actions = rule.Actions.Count == 0
-                        ? [new MailRuleActionView(Guid.Empty, MailRuleActionKind.MoveToFolder, [rule.TargetMailboxName], 0)]
+                        ? [new MailRuleActionView(0, MailRuleActionKind.MoveToFolder, [rule.TargetMailboxName], 0)]
                         : rule.Actions;
                     candidate = new MailRuleMatch(rule.Id, rule.Name, rule.TargetMailboxName, actions);
                     break;
@@ -611,7 +611,7 @@ public sealed partial class MailRuleService(
 
     private static Task<List<MailRule>> LoadRuleBatchAsync(
         MailDbContext db,
-        Guid domainId,
+        long domainId,
         MailRuleDirection direction,
         int offset,
         int count,
@@ -1111,7 +1111,7 @@ public sealed partial class MailRuleService(
 
     private static async Task NormalizePrioritiesAsync(
         MailDbContext db,
-        Guid domainId,
+        long domainId,
         MailRuleDirection direction,
         CancellationToken cancellationToken)
     {

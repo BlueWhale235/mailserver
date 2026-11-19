@@ -95,18 +95,18 @@ public sealed class ProtocolAndPluginTests
     [Fact]
     public async Task SmtpDataReaderDeletesTemporaryMessageWhenClientDisconnects()
     {
-        var before = Directory.GetFiles(Path.GetTempPath(), "mailserver-*.eml").ToHashSet();
-        await using var connection = new SmtpConnection(
-            new MemoryStream("Subject: incomplete\r\n\r\nbody"u8.ToArray()),
-            TimeSpan.FromSeconds(1),
-            4096);
-
-        await Assert.ThrowsAsync<EndOfStreamException>(
-            () => connection.ReadDataAsync(CancellationToken.None));
-
-        Assert.DoesNotContain(
-            Directory.GetFiles(Path.GetTempPath(), "mailserver-*.eml"),
-            path => !before.Contains(path));
+        var directory = Path.Combine(Path.GetTempPath(), "mail-disconnect-test-" + Guid.NewGuid());
+        try
+        {
+            await using var connection = new SmtpConnection(
+                new MemoryStream("Subject: incomplete\r\n\r\nbody"u8.ToArray()),
+                TimeSpan.FromSeconds(1), 4096, directory);
+            await Assert.ThrowsAsync<EndOfStreamException>(
+                () => connection.ReadDataAsync(CancellationToken.None));
+            // Inspect this connection's directory; other parallel tests legitimately upload mail.
+            Assert.Empty(Directory.GetFiles(directory, "*.eml"));
+        }
+        finally { if (Directory.Exists(directory)) Directory.Delete(directory, true); }
     }
 
     [Fact]
@@ -419,11 +419,11 @@ public sealed class ProtocolAndPluginTests
     [Fact]
     public async Task ImapAppendStoresThunderbirdSentCopy()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-append-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-append-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var factory = CreateFactory();
-            Guid accountId;
+            long accountId;
             await using (var db = await factory.CreateDbContextAsync())
             {
                 var domain = new MailDomain { Name = "example.com" };
@@ -486,11 +486,11 @@ public sealed class ProtocolAndPluginTests
     [Fact]
     public async Task ImapAppendStoresUtf8WrappedMessage()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-append-utf8-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-append-utf8-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var factory = CreateFactory();
-            Guid accountId;
+            long accountId;
             await using (var db = await factory.CreateDbContextAsync())
             {
                 var domain = new MailDomain { Name = "example.com" };
@@ -550,11 +550,11 @@ public sealed class ProtocolAndPluginTests
     [Fact]
     public async Task ImapAppendStoresThunderbirdLiteralMailboxCopy()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-append-literal-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-append-literal-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var factory = CreateFactory();
-            Guid accountId;
+            long accountId;
             await using (var db = await factory.CreateDbContextAsync())
             {
                 var domain = new MailDomain { Name = "example.com" };
@@ -616,11 +616,11 @@ public sealed class ProtocolAndPluginTests
     [Fact]
     public async Task ImapAppendMissingMailboxReturnsTryCreateWithoutReadingMessageLiteral()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-append-missing-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-append-missing-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var factory = CreateFactory();
-            Guid accountId;
+            long accountId;
             await using (var db = await factory.CreateDbContextAsync())
             {
                 var domain = new MailDomain { Name = "example.com" };
@@ -677,11 +677,11 @@ public sealed class ProtocolAndPluginTests
     [Fact]
     public async Task ImapAppendMissingMailboxDrainsNonSynchronizingUtf8Literal()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-append-missing-nonsync-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-append-missing-nonsync-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var factory = CreateFactory();
-            Guid accountId;
+            long accountId;
             await using (var db = await factory.CreateDbContextAsync())
             {
                 var domain = new MailDomain { Name = "example.com" };
@@ -741,7 +741,7 @@ public sealed class ProtocolAndPluginTests
     public async Task ImapListReturnsSpecialUseAttributesForDefaultFolders()
     {
         var factory = CreateFactory();
-        Guid accountId;
+        long accountId;
         await using (var db = await factory.CreateDbContextAsync())
         {
             var domain = new MailDomain { Name = "example.com" };
@@ -799,7 +799,7 @@ public sealed class ProtocolAndPluginTests
     [Fact]
     public async Task ImapFetchReturnsHeaderFieldsForClientMessageLists()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-fetch-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-fetch-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var scenario = await CreateImapInboxScenarioAsync(root);
@@ -828,7 +828,7 @@ public sealed class ProtocolAndPluginTests
     [Fact]
     public async Task ImapFetchReturnsEnvelopeBodyStructureAndBodySections()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-fetch-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-fetch-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var scenario = await CreateImapInboxScenarioAsync(root);
@@ -859,7 +859,7 @@ public sealed class ProtocolAndPluginTests
     [Fact]
     public async Task ImapRawFetchStreamsExactHeaderTextAndPartialLiterals()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-stream-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-stream-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var scenario = await CreateImapInboxScenarioAsync(root);
@@ -884,7 +884,7 @@ public sealed class ProtocolAndPluginTests
     [Fact]
     public async Task ImapHeaderFetchFiltersCaseFoldedAndRepeatedFields()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-header-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-header-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var scenario = await CreateImapInboxScenarioAsync(root);
@@ -936,7 +936,7 @@ public sealed class ProtocolAndPluginTests
     [Fact]
     public async Task ImapBodyPeekDoesNotMarkSeenButBodyFetchDoes()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-seen-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-seen-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var scenario = await CreateImapInboxScenarioAsync(root);
@@ -971,7 +971,7 @@ public sealed class ProtocolAndPluginTests
     [Fact]
     public async Task ImapSearchDateCriteriaUseInternalDateBoundaries()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-search-date-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-search-date-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var scenario = await CreateImapInboxScenarioAsync(root);
@@ -987,21 +987,21 @@ public sealed class ProtocolAndPluginTests
                 scenario.MailboxId,
                 1,
                 "Date: Wed, 01 Jul 2026 23:59:59 +0000\r\nSubject: header lies\r\n\r\nbody\r\n",
-                internalDate: new DateTimeOffset(2026, 6, 30, 23, 59, 59, TimeSpan.FromHours(8)));
+                internalDate: new DateTimeOffset(2026, 6, 30, 23, 59, 59, TimeZoneInfo.Local.GetUtcOffset(new DateTime(2026, 6, 30))));
             await AddInboxMessageAsync(
                 scenario.Factory,
                 scenario.Store,
                 scenario.MailboxId,
                 2,
                 "Date: Tue, 30 Jun 2026 00:00:00 +0000\r\nSubject: internal wins\r\n\r\nbody\r\n",
-                internalDate: new DateTimeOffset(2026, 7, 1, 0, 0, 0, TimeSpan.FromHours(8)));
+                internalDate: new DateTimeOffset(2026, 7, 1, 0, 0, 0, TimeZoneInfo.Local.GetUtcOffset(new DateTime(2026, 7, 1))));
             await AddInboxMessageAsync(
                 scenario.Factory,
                 scenario.Store,
                 scenario.MailboxId,
                 3,
                 "Subject: later\r\n\r\nbody\r\n",
-                internalDate: new DateTimeOffset(2026, 7, 2, 0, 0, 0, TimeSpan.FromHours(8)));
+                internalDate: new DateTimeOffset(2026, 7, 2, 0, 0, 0, TimeZoneInfo.Local.GetUtcOffset(new DateTime(2026, 7, 2))));
             var mailbox = scenario.Provider.GetRequiredService<IMailboxService>();
 
             Assert.Equal([2], await mailbox.SearchAsync(scenario.MailboxId, "ON 1-Jul-2026", useUid: false, CancellationToken.None));
@@ -1018,7 +1018,7 @@ public sealed class ProtocolAndPluginTests
     [Fact]
     public async Task ImapSearchFlagsKeepOriginalSequenceNumbersAndWholeFlagMatches()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-search-flags-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-search-flags-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var scenario = await CreateImapInboxScenarioAsync(root);
@@ -1057,7 +1057,7 @@ public sealed class ProtocolAndPluginTests
     [Fact]
     public async Task ImapUnsupportedSortThreadAndInvalidStatesReturnTaggedErrors()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-state-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-state-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var scenario = await CreateImapInboxScenarioAsync(root);
@@ -1092,7 +1092,7 @@ public sealed class ProtocolAndPluginTests
     [Fact]
     public async Task ImapIdlePushesMailboxChangesAndTerminatesOnDone()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-idle-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-idle-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var scenario = await CreateImapInboxScenarioAsync(root);
@@ -1129,7 +1129,7 @@ public sealed class ProtocolAndPluginTests
     [Fact]
     public async Task ImapAppendLiteralLimitReturnsTaggedError()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-literal-limit-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-literal-limit-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var scenario = await CreateImapInboxScenarioAsync(root);
@@ -1160,7 +1160,7 @@ public sealed class ProtocolAndPluginTests
     [Fact]
     public async Task ImapExamineRejectsWritesAndCloseExpungesWithoutUntaggedExpunge()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-close-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-close-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var scenario = await CreateImapInboxScenarioAsync(root);
@@ -1197,7 +1197,7 @@ public sealed class ProtocolAndPluginTests
     [Fact]
     public async Task ImapUnselectReturnsToAuthenticatedState()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-unselect-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-unselect-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var scenario = await CreateImapInboxScenarioAsync(root);
@@ -1223,7 +1223,7 @@ public sealed class ProtocolAndPluginTests
     [Fact]
     public async Task ImapNoopPipeliningAndTagsStayOrdered()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-pipeline-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-pipeline-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var scenario = await CreateImapInboxScenarioAsync(root);
@@ -1254,7 +1254,7 @@ public sealed class ProtocolAndPluginTests
     [Fact]
     public async Task ImapLargeAndMissingFetchRangesAreStable()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-large-fetch-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-large-fetch-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var scenario = await CreateImapInboxScenarioAsync(root);
@@ -1291,7 +1291,7 @@ public sealed class ProtocolAndPluginTests
     [Fact]
     public async Task ImapUidFetchUsesExistingMessageSequenceAcrossSparseAndOverlappingRanges()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-uid-ranges-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-uid-ranges-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var scenario = await CreateImapInboxScenarioAsync(root);
@@ -1319,7 +1319,7 @@ public sealed class ProtocolAndPluginTests
     [Fact]
     public async Task ImapEmptyMailboxCommandsReturnEmptyResults()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-empty-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-empty-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var scenario = await CreateImapInboxScenarioAsync(root);
@@ -1356,7 +1356,7 @@ public sealed class ProtocolAndPluginTests
     [Fact]
     public async Task ImapSearchCharsetAndUnicodeNormalizationAreStable()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-search-unicode-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-search-unicode-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var scenario = await CreateImapInboxScenarioAsync(root);
@@ -1400,7 +1400,7 @@ public sealed class ProtocolAndPluginTests
     [Fact]
     public async Task ImapExpungeUpdatesSequencesWithoutChangingRemainingUids()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-expunge-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-expunge-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var scenario = await CreateImapInboxScenarioAsync(root);
@@ -1455,7 +1455,7 @@ public sealed class ProtocolAndPluginTests
     [Fact]
     public async Task ImapCopyAndMoveReturnUidMappingsAndAssignNewTargetUids()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-copy-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-copy-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var scenario = await CreateImapInboxScenarioAsync(root);
@@ -1505,7 +1505,7 @@ public sealed class ProtocolAndPluginTests
     [Fact]
     public async Task ImapStoresCustomFlagsAndAdvertisesPermanentKeywordSupport()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-flags-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-flags-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var scenario = await CreateImapInboxScenarioAsync(root);
@@ -1543,7 +1543,7 @@ public sealed class ProtocolAndPluginTests
     [Fact]
     public async Task ImapMailboxNamesSupportSpecialCharactersAndInboxCasePolicy()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-names-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-names-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var scenario = await CreateImapInboxScenarioAsync(root);
@@ -1579,7 +1579,7 @@ public sealed class ProtocolAndPluginTests
     [Fact]
     public async Task ImapPartialFetchSlicesBodySectionsByUtf8ByteOffset()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-partial-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-partial-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var scenario = await CreateImapInboxScenarioAsync(root);
@@ -1619,7 +1619,7 @@ public sealed class ProtocolAndPluginTests
     [Fact]
     public async Task ImapSearchHeaderMatchesFoldedHeaderValues()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-search-header-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-search-header-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var scenario = await CreateImapInboxScenarioAsync(root);
@@ -1659,7 +1659,7 @@ public sealed class ProtocolAndPluginTests
     [Fact]
     public async Task ImapBodyStructureDescribesMultipartAndAttachments()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-bodystructure-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-bodystructure-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var scenario = await CreateImapInboxScenarioAsync(root);
@@ -1722,7 +1722,7 @@ public sealed class ProtocolAndPluginTests
     [Fact]
     public async Task ImapRfc822SizeUsesOriginalStoredBytes()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-rfc822-size-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-rfc822-size-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var scenario = await CreateImapInboxScenarioAsync(root);
@@ -1758,7 +1758,7 @@ public sealed class ProtocolAndPluginTests
     [Fact]
     public async Task ImapAppendUidUsesTargetUidValidityAndPreservesUidNext()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-appenduid-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-appenduid-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var scenario = await CreateImapInboxScenarioAsync(root);
@@ -1793,7 +1793,7 @@ public sealed class ProtocolAndPluginTests
     [Fact]
     public async Task ImapCopyMoveKeepInternalDateStable()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-internaldate-stable-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-internaldate-stable-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var scenario = await CreateImapInboxScenarioAsync(root);
@@ -1825,7 +1825,7 @@ public sealed class ProtocolAndPluginTests
     [Fact]
     public async Task ImapLiteralPlusIsAcceptedButNotAdvertised()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-literal-plus-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-literal-plus-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var scenario = await CreateImapInboxScenarioAsync(root);
@@ -1854,7 +1854,7 @@ public sealed class ProtocolAndPluginTests
     [Fact]
     public async Task ImapQuotedMailboxNamesRoundTripAndListWildcardFilters()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-list-wildcard-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-list-wildcard-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var scenario = await CreateImapInboxScenarioAsync(root);
@@ -1900,7 +1900,7 @@ public sealed class ProtocolAndPluginTests
     [Fact]
     public async Task ImapSubscribeLsubAndUnsubscribePersist()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-lsub-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-lsub-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var scenario = await CreateImapInboxScenarioAsync(root);
@@ -1928,7 +1928,7 @@ public sealed class ProtocolAndPluginTests
     [Fact]
     public async Task ImapSelectedMailboxDeletedByAnotherConnectionDeselectsOnNoop()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-selected-deleted-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-selected-deleted-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var scenario = await CreateImapInboxScenarioAsync(root);
@@ -1958,7 +1958,7 @@ public sealed class ProtocolAndPluginTests
     [Fact]
     public async Task ImapRenameParentMailboxMovesChildrenAndSystemMailboxesAreProtected()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-rename-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-rename-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var scenario = await CreateImapInboxScenarioAsync(root);
@@ -1999,7 +1999,7 @@ public sealed class ProtocolAndPluginTests
     [Fact]
     public async Task ImapDeleteMailboxWithChildrenIsRejectedAndStatusDoesNotSelect()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-delete-status-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-delete-status-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var scenario = await CreateImapInboxScenarioAsync(root);
@@ -2030,7 +2030,7 @@ public sealed class ProtocolAndPluginTests
     [Fact]
     public async Task ImapMimeBoundaryLikeTextNestedMultipartAndMalformedContentStayFetchable()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-mime-87-90-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-mime-87-90-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var scenario = await CreateImapInboxScenarioAsync(root);
@@ -2122,7 +2122,7 @@ public sealed class ProtocolAndPluginTests
     [Fact]
     public async Task ImapMimeAttachmentsKeepDuplicateAndEncodedFileNamesDistinct()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-mime-91-92-99-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-mime-91-92-99-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var scenario = await CreateImapInboxScenarioAsync(root);
@@ -2194,7 +2194,7 @@ public sealed class ProtocolAndPluginTests
     [Fact]
     public async Task ImapSearchTextFindsHtmlOnlyPlainOnlyAndEncodedSubject()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-mime-93-94-98-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-mime-93-94-98-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var scenario = await CreateImapInboxScenarioAsync(root);
@@ -2248,7 +2248,7 @@ public sealed class ProtocolAndPluginTests
     [Fact]
     public async Task ImapDirtyMultipartBoundariesRemainFetchable()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-mime-95-97-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-mime-95-97-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var scenario = await CreateImapInboxScenarioAsync(root);
@@ -2316,7 +2316,7 @@ public sealed class ProtocolAndPluginTests
     [Fact]
     public async Task ImapMismatchedTransferEncodingKeepsOriginalBytesFetchable()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-mime-100-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-mime-100-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var scenario = await CreateImapInboxScenarioAsync(root);
@@ -2349,7 +2349,7 @@ public sealed class ProtocolAndPluginTests
     [Fact]
     public async Task ImapMime101To111StructuresSearchAndFetchRemainStable()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-mime-101-111-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-mime-101-111-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var scenario = await CreateImapInboxScenarioAsync(root);
@@ -2461,7 +2461,7 @@ public sealed class ProtocolAndPluginTests
     [Fact]
     public async Task ImapFetchHandlesMissingBlobAndLargePartialFetchWithoutLosingMailbox()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-recovery-partial-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-recovery-partial-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var scenario = await CreateImapInboxScenarioAsync(root);
@@ -2513,7 +2513,7 @@ public sealed class ProtocolAndPluginTests
     [Fact]
     public async Task ImapClientCompatibilityFetchSubscriptionsDraftsAndTrashRemainStable()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-client-124-131-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-client-124-131-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var scenario = await CreateImapInboxScenarioAsync(root);
@@ -2562,7 +2562,7 @@ public sealed class ProtocolAndPluginTests
     [Fact]
     public async Task ImapRefreshSelectedMailboxReportsNewExists()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-refresh-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-imap-refresh-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var scenario = await CreateImapInboxScenarioAsync(root);
@@ -2655,7 +2655,7 @@ public sealed class ProtocolAndPluginTests
     [Fact]
     public void SmtpRsetClearsOnlyTransactionState()
     {
-        var accountId = Guid.NewGuid();
+        var accountId = MailServer.Domain.SnowflakeIds.NewId();
         var state = new SmtpSessionState
         {
             HeloName = "client.example.com",
@@ -3172,7 +3172,7 @@ public sealed class ProtocolAndPluginTests
     [Fact]
     public void PluginLoaderDiscoversTrustedDllAndRegistersMiddleware()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-plugin-test-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-plugin-test-{MailServer.Domain.SnowflakeIds.NewId()}");
         Directory.CreateDirectory(root);
         try
         {
@@ -3207,7 +3207,7 @@ public sealed class ProtocolAndPluginTests
     [Fact]
     public void PluginLoaderRejectsOlderContractVersion()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-plugin-contract-test-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-plugin-contract-test-{MailServer.Domain.SnowflakeIds.NewId()}");
         Directory.CreateDirectory(root);
         try
         {
@@ -3241,7 +3241,7 @@ public sealed class ProtocolAndPluginTests
     [Fact]
     public void PluginLoaderDoesNotTreatPluginSourceDirectoryAsAnInstallation()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-plugin-source-test-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-plugin-source-test-{MailServer.Domain.SnowflakeIds.NewId()}");
         Directory.CreateDirectory(root);
         try
         {
@@ -3375,7 +3375,7 @@ public sealed class ProtocolAndPluginTests
                 "sender@example.com",
                 "203.0.113.10:25",
                 "alice@example.com",
-                Guid.NewGuid()),
+                MailServer.Domain.SnowflakeIds.NewId()),
             CancellationToken.None);
 
         Assert.Equal(PluginDecisionKind.Reject, result.Kind);
@@ -3386,8 +3386,8 @@ public sealed class ProtocolAndPluginTests
     private static async Task<ImapInboxScenario> CreateImapInboxScenarioAsync(string root)
     {
         var factory = CreateFactory();
-        Guid accountId;
-        Guid mailboxId;
+        long accountId;
+        long mailboxId;
         await using (var db = await factory.CreateDbContextAsync())
         {
             var domain = new MailDomain { Name = "example.com" };
@@ -3450,7 +3450,7 @@ public sealed class ProtocolAndPluginTests
     private static async Task AddInboxMessageAsync(
         IDbContextFactory<MailDbContext> factory,
         IMessageContentStore store,
-        Guid mailboxId,
+        long mailboxId,
         long uid,
         string rawMessage,
         string flags = "",
@@ -3498,7 +3498,7 @@ public sealed class ProtocolAndPluginTests
     private static async Task<SmtpSenderScenario> CreateSmtpSenderScenarioAsync()
     {
         var factory = CreateFactory();
-        Guid accountId;
+        long accountId;
         await using (var db = await factory.CreateDbContextAsync())
         {
             var domain = new MailDomain { Name = "example.com" };
@@ -3560,10 +3560,10 @@ public sealed class ProtocolAndPluginTests
     private static IDbContextFactory<MailDbContext> CreateFactory()
     {
         var options = new DbContextOptionsBuilder<MailDbContext>()
-            .UseInMemoryDatabase($"mailserver-{Guid.NewGuid():N}")
+            .UseInMemoryDatabase($"mailserver-{MailServer.Domain.SnowflakeIds.NewId()}")
             .ConfigureWarnings(warnings => warnings.Ignore(InMemoryEventId.TransactionIgnoredWarning))
             .Options;
-        return new PooledDbContextFactory<MailDbContext>(options);
+        return new TestMailDbContextFactory(options);
     }
 
     private sealed record ImapInboxScenario(
@@ -3572,7 +3572,7 @@ public sealed class ProtocolAndPluginTests
         ServiceProvider Provider,
         ImapServerService Service,
         ImapSessionState State,
-        Guid MailboxId) : IDisposable
+        long MailboxId) : IDisposable
     {
         public void Dispose() => Provider.Dispose();
     }
@@ -3581,7 +3581,7 @@ public sealed class ProtocolAndPluginTests
         ServiceProvider Provider,
         SmtpServerService Service,
         IDbContextFactory<MailDbContext> Factory,
-        Guid AccountId)
+        long AccountId)
     {
         public SmtpSessionState AuthenticatedState() =>
             new()
@@ -3594,22 +3594,22 @@ public sealed class ProtocolAndPluginTests
 
     private sealed class FakeAccountAuthenticator(string userName, string password) : IAccountAuthenticator
     {
-        public Task<Guid?> AuthenticateMailboxAsync(
+        public Task<long?> AuthenticateMailboxAsync(
             string address,
             string candidatePassword,
             CancellationToken cancellationToken) =>
-            Task.FromResult<Guid?>(
+            Task.FromResult<long?>(
                 address.Equals(userName, StringComparison.OrdinalIgnoreCase)
                 && candidatePassword == password
-                    ? Guid.NewGuid()
+                    ? MailServer.Domain.SnowflakeIds.NewId()
                     : null);
 
-        public Task<Guid?> ResolveMailboxIdentityAsync(
+        public Task<long?> ResolveMailboxIdentityAsync(
             string address,
             CancellationToken cancellationToken) =>
-            Task.FromResult<Guid?>(
+            Task.FromResult<long?>(
                 address.Equals(userName, StringComparison.OrdinalIgnoreCase)
-                    ? Guid.NewGuid()
+                    ? MailServer.Domain.SnowflakeIds.NewId()
                     : null);
     }
 

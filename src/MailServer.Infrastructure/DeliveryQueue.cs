@@ -219,7 +219,7 @@ public sealed class DeliveryQueue(
         return new DeliveryCompletion(true, completionStatus, completionStatus == DeliveryStatus.Failed);
     }
 
-    public async Task RetryNowAsync(Guid jobId, CancellationToken cancellationToken, int? expectedAttempts = null)
+    public async Task RetryNowAsync(long jobId, CancellationToken cancellationToken, int? expectedAttempts = null)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         var now = DateTimeOffset.UtcNow;
@@ -259,7 +259,7 @@ public sealed class DeliveryQueue(
         deliveryWake?.Pulse();
     }
 
-    public async Task DeleteAsync(Guid jobId, CancellationToken cancellationToken)
+    public async Task DeleteAsync(long jobId, CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         if (!db.Database.IsRelational())

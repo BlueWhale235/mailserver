@@ -27,7 +27,7 @@ public static class PerformanceTelemetry
     }
     public static PerformanceScope? Stage(string name, string category = "processing") =>
         IsSuppressed || CurrentScope.Value is not { } parent ? null : parent.CreateChild(name, category);
-    public static void Resource(Guid? messageId = null, Guid? deliveryJobId = null, int? attempt = null)
+    public static void Resource(long? messageId = null, long? deliveryJobId = null, int? attempt = null)
     {
         if (CurrentScope.Value is not { } scope) return;
         lock (scope.Root.Gate)
@@ -61,6 +61,7 @@ public sealed class PerformanceCollector : IDisposable
     private readonly Dictionary<string, Aggregate> _aggregates = new();
     private readonly Dictionary<string, PerformanceSql> _sql = new();
     private readonly ActivityListener _listener;
+    private readonly ResourceCacheBudget? _cacheBudget;
     private long _reserved;
     private long _dropped;
     private long _droppedAggregates;
@@ -69,13 +70,27 @@ public sealed class PerformanceCollector : IDisposable
     public PerformanceSettings Settings { get => Volatile.Read(ref _settings); set => Volatile.Write(ref _settings, value); }
     internal void ApplyStoredSettings(PerformanceSettings observed, PerformanceSettings loaded) =>
         Interlocked.CompareExchange(ref _settings, loaded, observed);
-    public string ProcessId { get; } = $"{Environment.MachineName}:{Environment.ProcessId}:{Guid.NewGuid():N}";
-    public long BudgetBytes { get; set; } = 8 * 1024 * 1024;
+    public string ProcessId { get; } = $"{Environment.MachineName}:{Environment.ProcessId}:{System.Guid.NewGuid()}";
+    private long _budgetBytes = 8 * 1024 * 1024;
+    public long BudgetBytes { get => Interlocked.Read(ref _budgetBytes); set => Interlocked.Exchange(ref _budgetBytes, Math.Max(0, value)); }
     public bool StorageUnavailable { get; set; }
-    private int AggregateLimit => BudgetBytes <= 2 * 1024 * 1024 ? 128 : 512;
-
-    public PerformanceCollector()
+    private int AggregateLimit => (int)Math.Clamp(BudgetBytes / 4 / 4096, 0, 512);
+    public long EstimatedBufferBytes
     {
+        get
+        {
+            lock (_aggregateGate) return Interlocked.Read(ref _reserved) + _aggregates.Count * 2048L + _sql.Count * 8192L;
+        }
+    }
+
+    public PerformanceCollector(ResourceRuntime? resources = null)
+    {
+        _cacheBudget = resources?.CacheBudgets;
+        if (_cacheBudget is not null)
+        {
+            _cacheBudget.Changed += ApplyBudget;
+            ApplyBudget(_cacheBudget.Allocation);
+        }
         _listener = new ActivityListener
         {
             ShouldListenTo = source => source.Name == "MailServer.Performance",
@@ -84,6 +99,8 @@ public sealed class PerformanceCollector : IDisposable
         };
         ActivitySource.AddActivityListener(_listener);
     }
+
+    private void ApplyBudget(CacheBudgetAllocation allocation) => BudgetBytes = allocation.DiagnosticsBytes;
 
     public PerformanceScope? Start(string module, string name, string? sourceTraceId = null)
     {
@@ -199,7 +216,11 @@ public sealed class PerformanceCollector : IDisposable
         for (var i = 0; i < histogram.Length; i++) { total += histogram[i]; if (total >= threshold) return Math.Pow(2, i); }
         return null;
     }
-    public void Dispose() => _listener.Dispose();
+    public void Dispose()
+    {
+        if (_cacheBudget is not null) _cacheBudget.Changed -= ApplyBudget;
+        _listener.Dispose();
+    }
     private sealed record Aggregate(PerformanceMinute Row) { public long[] Buckets { get; } = new long[25]; }
 }
 

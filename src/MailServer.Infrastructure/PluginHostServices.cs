@@ -48,7 +48,7 @@ public sealed class PluginDeliveryQueue(
     IDbContextFactory<MailDbContext> dbFactory,
     IDeliveryQueue deliveryQueue) : IPluginDeliveryQueue
 {
-    public async Task<PluginDeliveryJobInfo?> GetAsync(Guid jobId, CancellationToken cancellationToken)
+    public async Task<PluginDeliveryJobInfo?> GetAsync(long jobId, CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         return await db.DeliveryJobs.AsNoTracking()
@@ -65,10 +65,10 @@ public sealed class PluginDeliveryQueue(
             .SingleOrDefaultAsync(cancellationToken);
     }
 
-    public Task RetryAsync(Guid jobId, CancellationToken cancellationToken) =>
+    public Task RetryAsync(long jobId, CancellationToken cancellationToken) =>
         deliveryQueue.RetryNowAsync(jobId, cancellationToken);
 
-    public async Task DeferAsync(Guid jobId, TimeSpan delay, string reason, CancellationToken cancellationToken)
+    public async Task DeferAsync(long jobId, TimeSpan delay, string reason, CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         var job = await db.DeliveryJobs.SingleOrDefaultAsync(x => x.Id == jobId, cancellationToken)
@@ -85,7 +85,7 @@ public sealed class PluginDeliveryQueue(
         await db.SaveChangesAsync(cancellationToken);
     }
 
-    public async Task FailPermanentAsync(Guid jobId, string reason, CancellationToken cancellationToken)
+    public async Task FailPermanentAsync(long jobId, string reason, CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         var job = await db.DeliveryJobs.SingleOrDefaultAsync(x => x.Id == jobId, cancellationToken)
@@ -108,7 +108,7 @@ public sealed class PluginDeliveryQueue(
         await db.SaveChangesAsync(cancellationToken);
     }
 
-    public async Task CancelAsync(Guid jobId, string reason, CancellationToken cancellationToken)
+    public async Task CancelAsync(long jobId, string reason, CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         var job = await db.DeliveryJobs.SingleOrDefaultAsync(x => x.Id == jobId, cancellationToken)
@@ -118,7 +118,7 @@ public sealed class PluginDeliveryQueue(
         await db.SaveChangesAsync(cancellationToken);
     }
 
-    public async Task AddNoteAsync(Guid jobId, string note, CancellationToken cancellationToken)
+    public async Task AddNoteAsync(long jobId, string note, CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         if (!await db.DeliveryJobs.AnyAsync(x => x.Id == jobId, cancellationToken))
@@ -204,7 +204,7 @@ public sealed class PluginMessageStore(
     IMessageContentStore contentStore,
     ILogger<PluginMessageStore> logger) : IPluginMessageStore
 {
-    public async Task<PluginStoredMessageInfo?> GetAsync(Guid messageId, CancellationToken cancellationToken)
+    public async Task<PluginStoredMessageInfo?> GetAsync(long messageId, CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         return await db.Messages.AsNoTracking()
@@ -219,13 +219,13 @@ public sealed class PluginMessageStore(
             .SingleOrDefaultAsync(cancellationToken);
     }
 
-    public async Task<Stream> OpenReadAsync(Guid messageId, CancellationToken cancellationToken)
+    public async Task<Stream> OpenReadAsync(long messageId, CancellationToken cancellationToken)
     {
         var info = await GetRequiredAsync(messageId, cancellationToken);
         return await contentStore.OpenReadAsync(info.ContentKey, cancellationToken);
     }
 
-    public async Task<IReadOnlyList<PluginMessageHeader>> ReadHeadersAsync(Guid messageId, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<PluginMessageHeader>> ReadHeadersAsync(long messageId, CancellationToken cancellationToken)
     {
         await using var stream = await OpenReadAsync(messageId, cancellationToken);
         var message = await LoadMimeMessageWithFallbackAsync(stream, cancellationToken);
@@ -234,7 +234,7 @@ public sealed class PluginMessageStore(
             .ToArray();
     }
 
-    public async Task ReplaceContentAsync(Guid messageId, Stream content, CancellationToken cancellationToken)
+    public async Task ReplaceContentAsync(long messageId, Stream content, CancellationToken cancellationToken)
     {
         if (!content.CanRead) throw new ArgumentException("Content stream must be readable.", nameof(content));
         var descriptor = await contentStore.SaveAsync(content, cancellationToken);
@@ -262,7 +262,7 @@ public sealed class PluginMessageStore(
     }
 
     public async Task UpsertHeadersAsync(
-        Guid messageId,
+        long messageId,
         IReadOnlyList<PluginMessageHeaderUpdate> headers,
         CancellationToken cancellationToken)
     {
@@ -289,7 +289,7 @@ public sealed class PluginMessageStore(
         await ReplaceContentAsync(messageId, updated, cancellationToken);
     }
 
-    private async Task<PluginStoredMessageInfo> GetRequiredAsync(Guid messageId, CancellationToken cancellationToken) =>
+    private async Task<PluginStoredMessageInfo> GetRequiredAsync(long messageId, CancellationToken cancellationToken) =>
         await GetAsync(messageId, cancellationToken) ?? throw new KeyNotFoundException("Message not found.");
 
     private async Task<string?> ReadInternetMessageIdAsync(string contentKey, CancellationToken cancellationToken)
@@ -319,7 +319,7 @@ public sealed class PluginMailboxStore(
     IMailboxService mailboxes) : IPluginMailboxStore
 {
     public async Task<IReadOnlyList<PluginMailboxInfo>> ListMailboxesAsync(
-        Guid accountId,
+        long accountId,
         CancellationToken cancellationToken)
     {
         await EnsureActiveAccountAsync(accountId, cancellationToken);
@@ -332,7 +332,7 @@ public sealed class PluginMailboxStore(
         await ListMailboxesAsync(await ResolveActiveAccountIdAsync(accountAddress, cancellationToken), cancellationToken);
 
     public async Task<PluginMailboxInfo> CreateMailboxAsync(
-        Guid accountId,
+        long accountId,
         string mailboxName,
         CancellationToken cancellationToken)
     {
@@ -349,7 +349,7 @@ public sealed class PluginMailboxStore(
         await CreateMailboxAsync(await ResolveActiveAccountIdAsync(accountAddress, cancellationToken), mailboxName, cancellationToken);
 
     public async Task<IReadOnlyList<PluginMailboxMessageInfo>> ListMessagesAsync(
-        Guid accountId,
+        long accountId,
         string mailboxName,
         CancellationToken cancellationToken)
     {
@@ -370,7 +370,7 @@ public sealed class PluginMailboxStore(
         await ListMessagesAsync(await ResolveActiveAccountIdAsync(accountAddress, cancellationToken), mailboxName, cancellationToken);
 
     public Task<PluginMailboxOperationResult> MoveAsync(
-        Guid accountId,
+        long accountId,
         string sourceMailboxName,
         PluginMailboxMessageSelector selector,
         string destinationMailboxName,
@@ -378,7 +378,7 @@ public sealed class PluginMailboxStore(
         CopyOrMoveAsync(accountId, sourceMailboxName, selector, destinationMailboxName, move: true, cancellationToken);
 
     public Task<PluginMailboxOperationResult> CopyAsync(
-        Guid accountId,
+        long accountId,
         string sourceMailboxName,
         PluginMailboxMessageSelector selector,
         string destinationMailboxName,
@@ -386,7 +386,7 @@ public sealed class PluginMailboxStore(
         CopyOrMoveAsync(accountId, sourceMailboxName, selector, destinationMailboxName, move: false, cancellationToken);
 
     public Task<PluginMailboxOperationResult> SetFlagsAsync(
-        Guid accountId,
+        long accountId,
         string mailboxName,
         PluginMailboxMessageSelector selector,
         IReadOnlyCollection<string> flags,
@@ -394,7 +394,7 @@ public sealed class PluginMailboxStore(
         ChangeFlagsAsync(accountId, mailboxName, selector, "FLAGS", flags, cancellationToken);
 
     public Task<PluginMailboxOperationResult> AddFlagsAsync(
-        Guid accountId,
+        long accountId,
         string mailboxName,
         PluginMailboxMessageSelector selector,
         IReadOnlyCollection<string> flags,
@@ -402,7 +402,7 @@ public sealed class PluginMailboxStore(
         ChangeFlagsAsync(accountId, mailboxName, selector, "+FLAGS", flags, cancellationToken);
 
     public Task<PluginMailboxOperationResult> RemoveFlagsAsync(
-        Guid accountId,
+        long accountId,
         string mailboxName,
         PluginMailboxMessageSelector selector,
         IReadOnlyCollection<string> flags,
@@ -410,21 +410,21 @@ public sealed class PluginMailboxStore(
         ChangeFlagsAsync(accountId, mailboxName, selector, "-FLAGS", flags, cancellationToken);
 
     public Task<PluginMailboxOperationResult> MarkReadAsync(
-        Guid accountId,
+        long accountId,
         string mailboxName,
         PluginMailboxMessageSelector selector,
         CancellationToken cancellationToken) =>
         AddFlagsAsync(accountId, mailboxName, selector, ["\\Seen"], cancellationToken);
 
     public Task<PluginMailboxOperationResult> MarkUnreadAsync(
-        Guid accountId,
+        long accountId,
         string mailboxName,
         PluginMailboxMessageSelector selector,
         CancellationToken cancellationToken) =>
         RemoveFlagsAsync(accountId, mailboxName, selector, ["\\Seen"], cancellationToken);
 
     private async Task<PluginMailboxOperationResult> CopyOrMoveAsync(
-        Guid accountId,
+        long accountId,
         string sourceMailboxName,
         PluginMailboxMessageSelector selector,
         string destinationMailboxName,
@@ -450,7 +450,7 @@ public sealed class PluginMailboxStore(
     }
 
     private async Task<PluginMailboxOperationResult> ChangeFlagsAsync(
-        Guid accountId,
+        long accountId,
         string mailboxName,
         PluginMailboxMessageSelector selector,
         string operation,
@@ -477,7 +477,7 @@ public sealed class PluginMailboxStore(
             selected.Select(x => x.MailboxMessageId).ToArray());
     }
 
-    private async Task<Guid> ResolveActiveAccountIdAsync(string accountAddress, CancellationToken cancellationToken)
+    private async Task<long> ResolveActiveAccountIdAsync(string accountAddress, CancellationToken cancellationToken)
     {
         if (!AddressParser.TrySplit(accountAddress, out var localPart, out var domain))
             throw new ArgumentException("Account address is invalid.", nameof(accountAddress));
@@ -486,12 +486,12 @@ public sealed class PluginMailboxStore(
             .Where(x => x.LocalPart == localPart && x.Domain.Name == domain && x.IsEnabled && x.Domain.IsActive)
             .Select(x => x.Id)
             .SingleOrDefaultAsync(cancellationToken)
-            is { } id && id != Guid.Empty
+            is { } id && id != 0
                 ? id
                 : throw new KeyNotFoundException("Active local account not found.");
     }
 
-    private async Task EnsureActiveAccountAsync(Guid accountId, CancellationToken cancellationToken)
+    private async Task EnsureActiveAccountAsync(long accountId, CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         if (!await db.Accounts.AsNoTracking()
@@ -500,7 +500,7 @@ public sealed class PluginMailboxStore(
     }
 
     private async Task<MailboxSummary> ResolveMailboxAsync(
-        Guid accountId,
+        long accountId,
         string mailboxName,
         CancellationToken cancellationToken)
     {
@@ -510,7 +510,7 @@ public sealed class PluginMailboxStore(
     }
 
     private async Task<IReadOnlyList<SelectedMailboxMessage>> ResolveSelectorAsync(
-        Guid mailboxId,
+        long mailboxId,
         PluginMailboxMessageSelector selector,
         CancellationToken cancellationToken)
     {
@@ -588,7 +588,7 @@ public sealed class PluginMailboxStore(
             message.Message.Size,
             message.Message.ContentKey);
 
-    private sealed record SelectedMailboxMessage(Guid MailboxMessageId, long Uid);
+    private sealed record SelectedMailboxMessage(long MailboxMessageId, long Uid);
 }
 
 public sealed class PluginAuditWriter(IDbContextFactory<MailDbContext> dbFactory) : IPluginAuditWriter

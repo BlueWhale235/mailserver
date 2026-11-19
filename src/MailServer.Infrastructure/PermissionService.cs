@@ -149,19 +149,19 @@ public sealed record PermissionGrantInput(
 
 public sealed record PermissionGrantView(
     PermissionSubjectType SubjectType,
-    Guid SubjectId,
+    long SubjectId,
     string PermissionCode,
     string ResourceType,
     string ResourceKey,
     string CreatedBy,
     DateTimeOffset CreatedAt);
 
-public sealed record PermissionSubject(PermissionSubjectType Type, Guid Id);
+public sealed record PermissionSubject(PermissionSubjectType Type, long Id);
 
 /// <summary>
 /// 当前主体可访问的域范围。AllDomains 为 true 时 DomainIds 不再限制访问。
 /// </summary>
-public sealed record PermittedDomainScope(bool AllDomains, IReadOnlySet<Guid> DomainIds)
+public sealed record PermittedDomainScope(bool AllDomains, IReadOnlySet<long> DomainIds)
 {
     public bool HasAny => AllDomains || DomainIds.Count > 0;
 }
@@ -174,9 +174,9 @@ public sealed class PermissionSnapshot
     public bool FullAccess { get; set; }
     public HashSet<string> SystemPermissions { get; } = new(StringComparer.OrdinalIgnoreCase);
     public HashSet<string> AllDomainPermissions { get; } = new(StringComparer.OrdinalIgnoreCase);
-    public Dictionary<string, HashSet<Guid>> DomainPermissions { get; } = new(StringComparer.OrdinalIgnoreCase);
+    public Dictionary<string, HashSet<long>> DomainPermissions { get; } = new(StringComparer.OrdinalIgnoreCase);
 
-    public bool Has(string code, Guid? domainId = null)
+    public bool Has(string code, long? domainId = null)
     {
         if (FullAccess) return true;
         var canonical = code.Trim().ToLowerInvariant();
@@ -220,7 +220,7 @@ public sealed class PermissionSnapshot
         };
     }
 
-    private bool HasDomainPermission(string code, Guid domainId)
+    private bool HasDomainPermission(string code, long domainId)
     {
         if (AllDomainPermissions.Contains(code)
             || (DomainPermissions.TryGetValue(code, out var ids) && ids.Contains(domainId)))
@@ -321,13 +321,13 @@ public sealed class PermissionService(IDbContextFactory<MailDbContext> dbFactory
         return BuildSnapshot(grants);
     }
 
-    public async Task<bool> IsPrimaryAdminAsync(Guid adminId, CancellationToken cancellationToken)
+    public async Task<bool> IsPrimaryAdminAsync(long adminId, CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         var primaryAdminId = await db.AdminUsers.AsNoTracking()
             .OrderBy(x => x.CreatedAt)
             .ThenBy(x => x.Id)
-            .Select(x => (Guid?)x.Id)
+            .Select(x => (long?)x.Id)
             .FirstOrDefaultAsync(cancellationToken);
         return primaryAdminId == adminId;
     }
@@ -335,7 +335,7 @@ public sealed class PermissionService(IDbContextFactory<MailDbContext> dbFactory
     public async Task<bool> HasPermissionAsync(
         ClaimsPrincipal principal,
         string permissionCode,
-        Guid? domainId,
+        long? domainId,
         CancellationToken cancellationToken)
     {
         var snapshot = await GetSnapshotAsync(principal, cancellationToken);
@@ -359,12 +359,12 @@ public sealed class PermissionService(IDbContextFactory<MailDbContext> dbFactory
         var snapshot = await GetSnapshotAsync(principal, cancellationToken);
         if (snapshot.HasAllDomains(permissionCode))
         {
-            return new PermittedDomainScope(true, new HashSet<Guid>());
+            return new PermittedDomainScope(true, new HashSet<long>());
         }
 
         var canonical = permissionCode.Trim().ToLowerInvariant();
         var management = PermissionCodes.ManagementPermissionFor(canonical);
-        var result = new HashSet<Guid>();
+        var result = new HashSet<long>();
         if (snapshot.DomainPermissions.TryGetValue(canonical, out var ids))
         {
             result.UnionWith(ids);
@@ -410,7 +410,7 @@ public sealed class PermissionService(IDbContextFactory<MailDbContext> dbFactory
                 {
                     if (!snapshot.HasAllDomains(grant.PermissionCode)) return false;
                 }
-                else if (!Guid.TryParse(grant.ResourceKey, out var domainId)
+                else if (!long.TryParse(grant.ResourceKey, out var domainId)
                          || !snapshot.Has(grant.PermissionCode, domainId))
                 {
                     return false;
@@ -426,7 +426,7 @@ public sealed class PermissionService(IDbContextFactory<MailDbContext> dbFactory
 
     public async Task<IReadOnlyList<PermissionGrantView>> GetGrantsAsync(
         PermissionSubjectType subjectType,
-        Guid subjectId,
+        long subjectId,
         CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
@@ -449,7 +449,7 @@ public sealed class PermissionService(IDbContextFactory<MailDbContext> dbFactory
 
     public async Task<IReadOnlyList<PermissionGrantView>> ReplaceGrantsAsync(
         PermissionSubjectType subjectType,
-        Guid subjectId,
+        long subjectId,
         IReadOnlyCollection<PermissionGrantInput> grants,
         string actor,
         CancellationToken cancellationToken)
@@ -511,7 +511,7 @@ public sealed class PermissionService(IDbContextFactory<MailDbContext> dbFactory
     }
 
     public async Task EnsureAdminCanBeDisabledOrDeletedAsync(
-        Guid adminId,
+        long adminId,
         CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
@@ -528,7 +528,7 @@ public sealed class PermissionService(IDbContextFactory<MailDbContext> dbFactory
 
     public async Task GrantFullAccessIfMissingAsync(
         PermissionSubjectType subjectType,
-        Guid subjectId,
+        long subjectId,
         string actor,
         CancellationToken cancellationToken)
     {
@@ -558,7 +558,7 @@ public sealed class PermissionService(IDbContextFactory<MailDbContext> dbFactory
     {
         var idValue = principal.FindFirstValue(ClaimTypes.NameIdentifier)
                       ?? principal.FindFirstValue("sub");
-        if (!Guid.TryParse(idValue, out var id)) return null;
+        if (!long.TryParse(idValue, out var id)) return null;
         var authType = principal.FindFirstValue("auth_type");
         var subjectType = string.Equals(authType, "api_key", StringComparison.OrdinalIgnoreCase)
             ? PermissionSubjectType.ApiKey
@@ -591,7 +591,7 @@ public sealed class PermissionService(IDbContextFactory<MailDbContext> dbFactory
                     ? AllResources
                     : input.ResourceKey.Trim();
                 if (!string.Equals(resourceKey, AllResources, StringComparison.Ordinal)
-                    && !Guid.TryParse(resourceKey, out _))
+                    && !long.TryParse(resourceKey, out _))
                 {
                     throw new InvalidOperationException("Domain-scoped permissions require a valid domain id.");
                 }
@@ -606,7 +606,7 @@ public sealed class PermissionService(IDbContextFactory<MailDbContext> dbFactory
 
     private async Task<IReadOnlyList<PermissionGrant>> LoadGrantsAsync(
         PermissionSubjectType subjectType,
-        Guid subjectId,
+        long subjectId,
         CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
@@ -632,7 +632,7 @@ public sealed class PermissionService(IDbContextFactory<MailDbContext> dbFactory
                 {
                     snapshot.AllDomainPermissions.Add(grant.PermissionCode);
                 }
-                else if (Guid.TryParse(grant.ResourceKey, out var domainId))
+                else if (long.TryParse(grant.ResourceKey, out var domainId))
                 {
                     if (!snapshot.DomainPermissions.TryGetValue(grant.PermissionCode, out var ids))
                     {
@@ -672,7 +672,7 @@ public sealed class PermissionService(IDbContextFactory<MailDbContext> dbFactory
     private static async Task EnsureSubjectExistsAsync(
         MailDbContext db,
         PermissionSubjectType subjectType,
-        Guid subjectId,
+        long subjectId,
         CancellationToken cancellationToken)
     {
         var exists = subjectType switch
@@ -692,7 +692,7 @@ public sealed class PermissionService(IDbContextFactory<MailDbContext> dbFactory
         var domainIds = grants
             .Where(x => string.Equals(x.ResourceType, DomainResourceType, StringComparison.OrdinalIgnoreCase)
                         && !string.Equals(x.ResourceKey, AllResources, StringComparison.Ordinal))
-            .Select(x => Guid.Parse(x.ResourceKey!))
+            .Select(x => long.Parse(x.ResourceKey!))
             .Distinct()
             .ToArray();
         if (domainIds.Length == 0) return;
@@ -703,7 +703,7 @@ public sealed class PermissionService(IDbContextFactory<MailDbContext> dbFactory
 
     private static async Task EnsureAdminKeepsManagerAsync(
         MailDbContext db,
-        Guid adminId,
+        long adminId,
         IReadOnlyList<PermissionGrantInput> proposed,
         CancellationToken cancellationToken)
     {
@@ -722,20 +722,20 @@ public sealed class PermissionService(IDbContextFactory<MailDbContext> dbFactory
 
     private static async Task<bool> IsPrimaryAdminAsync(
         MailDbContext db,
-        Guid adminId,
+        long adminId,
         CancellationToken cancellationToken)
     {
         var primaryAdminId = await db.AdminUsers.AsNoTracking()
             .OrderBy(x => x.CreatedAt)
             .ThenBy(x => x.Id)
-            .Select(x => (Guid?)x.Id)
+            .Select(x => (long?)x.Id)
             .FirstOrDefaultAsync(cancellationToken);
         return primaryAdminId == adminId;
     }
 
     private static Task<bool> HasManagementGrantAsync(
         MailDbContext db,
-        Guid adminId,
+        long adminId,
         CancellationToken cancellationToken) =>
         db.PermissionGrants.AnyAsync(
             x => x.SubjectType == PermissionSubjectType.AdminUser
@@ -745,7 +745,7 @@ public sealed class PermissionService(IDbContextFactory<MailDbContext> dbFactory
 
     private static Task<bool> HasOtherEnabledManagerAsync(
         MailDbContext db,
-        Guid adminId,
+        long adminId,
         CancellationToken cancellationToken) =>
         db.AdminUsers.AnyAsync(
             admin => admin.IsEnabled

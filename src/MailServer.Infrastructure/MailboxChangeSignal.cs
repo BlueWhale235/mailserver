@@ -1,8 +1,10 @@
 namespace MailServer.Infrastructure;
 
-/// <summary>Local commit notification; periodic IMAP polling covers other processes.</summary>
+/// <summary>Mailbox commit hint, also relayed to other local processes.</summary>
 public sealed class MailboxChangeSignal
 {
-    public event Action<Guid>? Changed;
-    public void Pulse(Guid mailboxId) => Changed?.Invoke(mailboxId);
+    public event Action<long>? Changed;
+    internal event Action<long>? Published;
+    public void Pulse(long mailboxId) { PulseLocal(mailboxId); Published?.Invoke(mailboxId); }
+    internal void PulseLocal(long mailboxId) => Changed?.Invoke(mailboxId);
 }

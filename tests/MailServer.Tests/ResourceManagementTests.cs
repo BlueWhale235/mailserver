@@ -106,7 +106,8 @@ public sealed class ResourceManagementTests
         var runtime = new ResourceRuntime("all", config);
         using var cache = Cache();
         runtime.Apply(id, cache);
-        Assert.Equal(mib * 1024L * 1024, cache.Options.SizeLimitBytes);
+        Assert.Equal(mib * 1024L * 1024 / 2, cache.Options.SizeLimitBytes);
+        Assert.Equal(mib * 1024L * 1024, runtime.Snapshot().CacheBudgetBytes);
         Assert.Equal(workers, runtime.Delivery.Limit);
         var memoryBound = (int)Math.Clamp(
             GC.GetGCMemoryInfo().TotalAvailableMemoryBytes / (512L * 1024), 8, int.MaxValue);
@@ -391,13 +392,13 @@ public sealed class ResourceManagementTests
     }
     private sealed class SqliteFixture : IAsyncDisposable
     {
-        private readonly string _path = Path.Combine(Path.GetTempPath(), $"mailserver-resources-{Guid.NewGuid():N}.db");
+        private readonly string _path = Path.Combine(Path.GetTempPath(), $"mailserver-resources-{MailServer.Domain.SnowflakeIds.NewId()}.db");
         public readonly ReadCounter Counter = new();
         public IDbContextFactory<MailDbContext> Factory { get; }
         public SqliteFixture()
         {
             SQLitePCL.raw.SetProvider(new SQLitePCL.SQLite3Provider_e_sqlite3());
-            Factory = new PooledDbContextFactory<MailDbContext>(new DbContextOptionsBuilder<MailDbContext>()
+            Factory = new TestMailDbContextFactory(new DbContextOptionsBuilder<MailDbContext>()
                 .UseSqlite($"Data Source={_path};Pooling=False").AddInterceptors(Counter).Options);
         }
         public async Task InitializeAsync()

@@ -21,9 +21,8 @@ namespace MailServer.Migrations.MySql.Migrations
 
             modelBuilder.Entity("MailServer.Domain.AdminUser", b =>
                 {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("char(36)");
+                    b.Property<long>("Id")
+                        .HasColumnType("bigint");
 
                     b.Property<DateTimeOffset>("CreatedAt")
                         .HasColumnType("datetime");
@@ -51,9 +50,8 @@ namespace MailServer.Migrations.MySql.Migrations
 
             modelBuilder.Entity("MailServer.Domain.ApiKeyRecord", b =>
                 {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("char(36)");
+                    b.Property<long>("Id")
+                        .HasColumnType("bigint");
 
                     b.Property<DateTimeOffset>("CreatedAt")
                         .HasColumnType("datetime");
@@ -97,95 +95,13 @@ namespace MailServer.Migrations.MySql.Migrations
                     b.ToTable("api_keys", (string)null);
                 });
 
-            modelBuilder.Entity("MailServer.Domain.AuditRecord", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("char(36)");
-
-                    b.Property<string>("Action")
-                        .IsRequired()
-                        .HasMaxLength(128)
-                        .HasColumnType("varchar(128)");
-
-                    b.Property<string>("Actor")
-                        .IsRequired()
-                        .HasMaxLength(256)
-                        .HasColumnType("varchar(256)");
-
-                    b.Property<string>("Category")
-                        .HasMaxLength(32)
-                        .HasColumnType("varchar(32)");
-
-                    b.Property<string>("ChangeSummaryJson")
-                        .HasMaxLength(32768)
-                        .HasColumnType("longtext");
-
-                    b.Property<DateTimeOffset>("CreatedAt")
-                        .HasColumnType("datetime");
-
-                    b.Property<string>("Detail")
-                        .HasColumnType("longtext");
-
-                    b.Property<long?>("DurationMilliseconds")
-                        .HasColumnType("bigint");
-
-                    b.Property<string>("PluginId")
-                        .HasMaxLength(128)
-                        .HasColumnType("varchar(128)");
-
-                    b.Property<string>("PluginName")
-                        .HasMaxLength(256)
-                        .HasColumnType("varchar(256)");
-
-                    b.Property<string>("RawJson")
-                        .HasMaxLength(262144)
-                        .HasColumnType("longtext");
-
-                    b.Property<string>("RelatedId")
-                        .HasMaxLength(256)
-                        .HasColumnType("varchar(256)");
-
-                    b.Property<string>("RemoteAddress")
-                        .HasMaxLength(128)
-                        .HasColumnType("varchar(128)");
-
-                    b.Property<string>("RequestId")
-                        .HasMaxLength(128)
-                        .HasColumnType("varchar(128)");
-
-                    b.Property<string>("Resource")
-                        .IsRequired()
-                        .HasMaxLength(512)
-                        .HasColumnType("varchar(512)");
-
-                    b.Property<string>("Status")
-                        .HasMaxLength(32)
-                        .HasColumnType("varchar(32)");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("Category");
-
-                    b.HasIndex("CreatedAt");
-
-                    b.HasIndex("PluginId");
-
-                    b.HasIndex("Status");
-
-                    b.HasIndex("Action", "Resource", "RequestId");
-
-                    b.ToTable("audit_records", (string)null);
-                });
-
             modelBuilder.Entity("MailServer.Domain.CleanupQueueItem", b =>
                 {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("char(36)");
+                    b.Property<long>("Id")
+                        .HasColumnType("bigint");
 
-                    b.Property<Guid?>("AccountId")
-                        .HasColumnType("char(36)");
+                    b.Property<long?>("AccountId")
+                        .HasColumnType("bigint");
 
                     b.Property<int>("Attempts")
                         .HasColumnType("int");
@@ -200,8 +116,8 @@ namespace MailServer.Migrations.MySql.Migrations
                     b.Property<DateTimeOffset>("CreatedAt")
                         .HasColumnType("datetime");
 
-                    b.Property<Guid?>("DomainId")
-                        .HasColumnType("char(36)");
+                    b.Property<long?>("DomainId")
+                        .HasColumnType("bigint");
 
                     b.Property<long>("EstimatedBytes")
                         .HasColumnType("bigint");
@@ -213,8 +129,8 @@ namespace MailServer.Migrations.MySql.Migrations
                     b.Property<DateTimeOffset>("PurgeAfter")
                         .HasColumnType("datetime");
 
-                    b.Property<Guid?>("ResourceId")
-                        .HasColumnType("char(36)");
+                    b.Property<long?>("ResourceId")
+                        .HasColumnType("bigint");
 
                     b.Property<string>("ResourceType")
                         .IsRequired()
@@ -316,88 +232,10 @@ namespace MailServer.Migrations.MySql.Migrations
                     b.ToTable("configuration_versions", (string)null);
                 });
 
-            modelBuilder.Entity("MailServer.Domain.DeliveryAttempt", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("char(36)");
-
-                    b.Property<int>("AttemptNumber")
-                        .HasColumnType("int");
-
-                    b.Property<DateTimeOffset>("CreatedAt")
-                        .HasColumnType("datetime");
-
-                    b.Property<Guid>("DeliveryJobId")
-                        .HasColumnType("char(36)");
-
-                    b.Property<long>("DurationMilliseconds")
-                        .HasColumnType("bigint");
-
-                    b.Property<string>("EnhancedStatusCode")
-                        .HasMaxLength(16)
-                        .HasColumnType("varchar(16)");
-
-                    b.Property<string>("FailureCategory")
-                        .HasMaxLength(64)
-                        .HasColumnType("varchar(64)");
-
-                    b.Property<DateTimeOffset?>("NextRetryAt")
-                        .HasColumnType("datetime");
-
-                    b.Property<bool>("PermanentFailure")
-                        .HasColumnType("tinyint(1)");
-
-                    b.Property<string>("RemoteAddress")
-                        .HasMaxLength(64)
-                        .HasColumnType("varchar(64)");
-
-                    b.Property<string>("RemoteHost")
-                        .HasMaxLength(255)
-                        .HasColumnType("varchar(255)");
-
-                    b.Property<string>("Response")
-                        .HasMaxLength(4096)
-                        .HasColumnType("varchar(4096)");
-
-                    b.Property<string>("SessionSummary")
-                        .HasMaxLength(65536)
-                        .HasColumnType("longtext");
-
-                    b.Property<string>("SmtpStatusCode")
-                        .HasMaxLength(16)
-                        .HasColumnType("varchar(16)");
-
-                    b.Property<string>("Stage")
-                        .IsRequired()
-                        .HasMaxLength(32)
-                        .HasColumnType("varchar(32)");
-
-                    b.Property<bool>("Succeeded")
-                        .HasColumnType("tinyint(1)");
-
-                    b.Property<string>("TlsCipherSuite")
-                        .HasMaxLength(128)
-                        .HasColumnType("varchar(128)");
-
-                    b.Property<string>("TlsProtocol")
-                        .HasMaxLength(32)
-                        .HasColumnType("varchar(32)");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("CreatedAt");
-
-                    b.HasIndex("DeliveryJobId");
-
-                    b.ToTable("delivery_attempts", (string)null);
-                });
-
             modelBuilder.Entity("MailServer.Domain.DeliveryJob", b =>
                 {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("char(36)");
+                    b.Property<long>("Id")
+                        .HasColumnType("bigint");
 
                     b.Property<int>("Attempts")
                         .HasColumnType("int");
@@ -418,22 +256,22 @@ namespace MailServer.Migrations.MySql.Migrations
                     b.Property<DateTimeOffset?>("LeaseUntil")
                         .HasColumnType("datetime");
 
-                    b.Property<Guid>("MessageId")
-                        .HasColumnType("char(36)");
+                    b.Property<long>("MessageId")
+                        .HasColumnType("bigint");
 
                     b.Property<DateTimeOffset>("NextAttemptAt")
                         .HasColumnType("datetime");
 
-                    b.Property<Guid?>("OriginRuleId")
-                        .HasColumnType("char(36)");
+                    b.Property<long?>("OriginRuleId")
+                        .HasColumnType("bigint");
 
                     b.Property<string>("Recipient")
                         .IsRequired()
                         .HasMaxLength(320)
                         .HasColumnType("varchar(320)");
 
-                    b.Property<Guid?>("RouteDomainId")
-                        .HasColumnType("char(36)");
+                    b.Property<long?>("RouteDomainId")
+                        .HasColumnType("bigint");
 
                     b.Property<string>("Sender")
                         .IsRequired()
@@ -467,8 +305,8 @@ namespace MailServer.Migrations.MySql.Migrations
 
             modelBuilder.Entity("MailServer.Domain.DomainCertificate", b =>
                 {
-                    b.Property<Guid>("DomainId")
-                        .HasColumnType("char(36)");
+                    b.Property<long>("DomainId")
+                        .HasColumnType("bigint");
 
                     b.Property<string>("CertificatePath")
                         .IsRequired()
@@ -521,8 +359,8 @@ namespace MailServer.Migrations.MySql.Migrations
 
             modelBuilder.Entity("MailServer.Domain.DomainDnsCheck", b =>
                 {
-                    b.Property<Guid>("DomainId")
-                        .HasColumnType("char(36)");
+                    b.Property<long>("DomainId")
+                        .HasColumnType("bigint");
 
                     b.Property<DateTimeOffset?>("CheckedAt")
                         .HasColumnType("datetime");
@@ -548,8 +386,8 @@ namespace MailServer.Migrations.MySql.Migrations
 
             modelBuilder.Entity("MailServer.Domain.DomainDnsSettings", b =>
                 {
-                    b.Property<Guid>("DomainId")
-                        .HasColumnType("char(36)");
+                    b.Property<long>("DomainId")
+                        .HasColumnType("bigint");
 
                     b.Property<bool>("DaneEnabled")
                         .HasColumnType("tinyint(1)");
@@ -660,9 +498,8 @@ namespace MailServer.Migrations.MySql.Migrations
 
             modelBuilder.Entity("MailServer.Domain.FirewallRule", b =>
                 {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("char(36)");
+                    b.Property<long>("Id")
+                        .HasColumnType("bigint");
 
                     b.Property<string>("Cidr")
                         .IsRequired()
@@ -692,9 +529,8 @@ namespace MailServer.Migrations.MySql.Migrations
 
             modelBuilder.Entity("MailServer.Domain.MailAccount", b =>
                 {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("char(36)");
+                    b.Property<long>("Id")
+                        .HasColumnType("bigint");
 
                     b.Property<DateTimeOffset>("CreatedAt")
                         .HasColumnType("datetime");
@@ -705,8 +541,8 @@ namespace MailServer.Migrations.MySql.Migrations
                     b.Property<string>("DeletedBy")
                         .HasColumnType("longtext");
 
-                    b.Property<Guid>("DomainId")
-                        .HasColumnType("char(36)");
+                    b.Property<long>("DomainId")
+                        .HasColumnType("bigint");
 
                     b.Property<bool>("IsEnabled")
                         .HasColumnType("tinyint(1)");
@@ -744,9 +580,8 @@ namespace MailServer.Migrations.MySql.Migrations
 
             modelBuilder.Entity("MailServer.Domain.MailAlias", b =>
                 {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("char(36)");
+                    b.Property<long>("Id")
+                        .HasColumnType("bigint");
 
                     b.Property<DateTimeOffset>("CreatedAt")
                         .HasColumnType("datetime");
@@ -755,8 +590,8 @@ namespace MailServer.Migrations.MySql.Migrations
                         .HasMaxLength(320)
                         .HasColumnType("varchar(320)");
 
-                    b.Property<Guid>("DomainId")
-                        .HasColumnType("char(36)");
+                    b.Property<long>("DomainId")
+                        .HasColumnType("bigint");
 
                     b.Property<bool>("IsEnabled")
                         .HasColumnType("tinyint(1)");
@@ -771,8 +606,8 @@ namespace MailServer.Migrations.MySql.Migrations
                         .HasMaxLength(128)
                         .HasColumnType("varchar(128)");
 
-                    b.Property<Guid?>("TargetAccountId")
-                        .HasColumnType("char(36)");
+                    b.Property<long?>("TargetAccountId")
+                        .HasColumnType("bigint");
 
                     b.HasKey("Id");
 
@@ -786,9 +621,8 @@ namespace MailServer.Migrations.MySql.Migrations
 
             modelBuilder.Entity("MailServer.Domain.MailDomain", b =>
                 {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("char(36)");
+                    b.Property<long>("Id")
+                        .HasColumnType("bigint");
 
                     b.Property<DateTimeOffset>("CreatedAt")
                         .HasColumnType("datetime");
@@ -864,9 +698,8 @@ namespace MailServer.Migrations.MySql.Migrations
 
             modelBuilder.Entity("MailServer.Domain.MailRule", b =>
                 {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("char(36)");
+                    b.Property<long>("Id")
+                        .HasColumnType("bigint");
 
                     b.Property<DateTimeOffset>("CreatedAt")
                         .HasColumnType("datetime");
@@ -876,8 +709,8 @@ namespace MailServer.Migrations.MySql.Migrations
                         .HasMaxLength(32)
                         .HasColumnType("varchar(32)");
 
-                    b.Property<Guid>("DomainId")
-                        .HasColumnType("char(36)");
+                    b.Property<long>("DomainId")
+                        .HasColumnType("bigint");
 
                     b.Property<bool>("IsEnabled")
                         .HasColumnType("tinyint(1)");
@@ -912,9 +745,8 @@ namespace MailServer.Migrations.MySql.Migrations
 
             modelBuilder.Entity("MailServer.Domain.MailRuleAction", b =>
                 {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("char(36)");
+                    b.Property<long>("Id")
+                        .HasColumnType("bigint");
 
                     b.Property<string>("Kind")
                         .IsRequired()
@@ -924,8 +756,8 @@ namespace MailServer.Migrations.MySql.Migrations
                     b.Property<int>("Position")
                         .HasColumnType("int");
 
-                    b.Property<Guid>("RuleId")
-                        .HasColumnType("char(36)");
+                    b.Property<long>("RuleId")
+                        .HasColumnType("bigint");
 
                     b.Property<string>("ValuesJson")
                         .IsRequired()
@@ -941,9 +773,8 @@ namespace MailServer.Migrations.MySql.Migrations
 
             modelBuilder.Entity("MailServer.Domain.MailRuleCondition", b =>
                 {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("char(36)");
+                    b.Property<long>("Id")
+                        .HasColumnType("bigint");
 
                     b.Property<string>("Field")
                         .IsRequired()
@@ -958,8 +789,8 @@ namespace MailServer.Migrations.MySql.Migrations
                     b.Property<int>("Position")
                         .HasColumnType("int");
 
-                    b.Property<Guid>("RuleId")
-                        .HasColumnType("char(36)");
+                    b.Property<long>("RuleId")
+                        .HasColumnType("bigint");
 
                     b.Property<string>("ValuesJson")
                         .IsRequired()
@@ -975,12 +806,11 @@ namespace MailServer.Migrations.MySql.Migrations
 
             modelBuilder.Entity("MailServer.Domain.Mailbox", b =>
                 {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("char(36)");
+                    b.Property<long>("Id")
+                        .HasColumnType("bigint");
 
-                    b.Property<Guid>("AccountId")
-                        .HasColumnType("char(36)");
+                    b.Property<long>("AccountId")
+                        .HasColumnType("bigint");
 
                     b.Property<DateTimeOffset>("CreatedAt")
                         .HasColumnType("datetime");
@@ -994,13 +824,18 @@ namespace MailServer.Migrations.MySql.Migrations
                     b.Property<long>("HighestModSeq")
                         .HasColumnType("bigint");
 
+                    b.Property<long>("MessageCount")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasDefaultValue(0L);
+
                     b.Property<string>("Name")
                         .IsRequired()
                         .HasMaxLength(255)
                         .HasColumnType("varchar(255)");
 
-                    b.Property<Guid?>("PendingDeletionJobId")
-                        .HasColumnType("char(36)");
+                    b.Property<long?>("PendingDeletionJobId")
+                        .HasColumnType("bigint");
 
                     b.Property<DateTimeOffset?>("PurgeAfter")
                         .HasColumnType("datetime");
@@ -1010,6 +845,11 @@ namespace MailServer.Migrations.MySql.Migrations
 
                     b.Property<long>("UidValidity")
                         .HasColumnType("bigint");
+
+                    b.Property<long>("UnseenCount")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasDefaultValue(0L);
 
                     b.HasKey("Id");
 
@@ -1025,12 +865,11 @@ namespace MailServer.Migrations.MySql.Migrations
 
             modelBuilder.Entity("MailServer.Domain.MailboxFolderDeletionJob", b =>
                 {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("char(36)");
+                    b.Property<long>("Id")
+                        .HasColumnType("bigint");
 
-                    b.Property<Guid?>("AccountId")
-                        .HasColumnType("char(36)");
+                    b.Property<long?>("AccountId")
+                        .HasColumnType("bigint");
 
                     b.Property<int>("AffectedAccountCount")
                         .HasColumnType("int");
@@ -1050,8 +889,8 @@ namespace MailServer.Migrations.MySql.Migrations
                     b.Property<DateTimeOffset>("CreatedAt")
                         .HasColumnType("datetime");
 
-                    b.Property<Guid>("DomainId")
-                        .HasColumnType("char(36)");
+                    b.Property<long>("DomainId")
+                        .HasColumnType("bigint");
 
                     b.Property<string>("FolderName")
                         .IsRequired()
@@ -1093,9 +932,8 @@ namespace MailServer.Migrations.MySql.Migrations
 
             modelBuilder.Entity("MailServer.Domain.MailboxMessage", b =>
                 {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("char(36)");
+                    b.Property<long>("Id")
+                        .HasColumnType("bigint");
 
                     b.Property<DateTimeOffset?>("DeletedAt")
                         .HasColumnType("datetime");
@@ -1111,11 +949,11 @@ namespace MailServer.Migrations.MySql.Migrations
                     b.Property<DateTimeOffset>("InternalDate")
                         .HasColumnType("datetime");
 
-                    b.Property<Guid>("MailboxId")
-                        .HasColumnType("char(36)");
+                    b.Property<long>("MailboxId")
+                        .HasColumnType("bigint");
 
-                    b.Property<Guid>("MessageId")
-                        .HasColumnType("char(36)");
+                    b.Property<long>("MessageId")
+                        .HasColumnType("bigint");
 
                     b.Property<long>("ModSeq")
                         .HasColumnType("bigint");
@@ -1148,10 +986,46 @@ namespace MailServer.Migrations.MySql.Migrations
                     b.ToTable("mailbox_messages", (string)null);
                 });
 
+            modelBuilder.Entity("MailServer.Domain.MessageFetchMetadata", b =>
+                {
+                    b.Property<long>("MessageId")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("Body")
+                        .IsRequired()
+                        .HasColumnType("longtext");
+
+                    b.Property<long>("BodyStart")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("BodyStructure")
+                        .IsRequired()
+                        .HasColumnType("longtext");
+
+                    b.Property<string>("ContentKey")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
+
+                    b.Property<string>("Envelope")
+                        .IsRequired()
+                        .HasColumnType("longtext");
+
+                    b.Property<long>("HeaderEnd")
+                        .HasColumnType("bigint");
+
+                    b.Property<int>("ParserVersion")
+                        .HasColumnType("int");
+
+                    b.HasKey("MessageId");
+
+                    b.ToTable("message_fetch_metadata", (string)null);
+                });
+
             modelBuilder.Entity("MailServer.Domain.MessageSearchRecord", b =>
                 {
-                    b.Property<Guid>("MessageId")
-                        .HasColumnType("char(36)");
+                    b.Property<long>("MessageId")
+                        .HasColumnType("bigint");
 
                     b.Property<string>("Body")
                         .IsRequired()
@@ -1234,8 +1108,8 @@ namespace MailServer.Migrations.MySql.Migrations
                         .HasMaxLength(32)
                         .HasColumnType("varchar(32)");
 
-                    b.Property<Guid>("SubjectId")
-                        .HasColumnType("char(36)");
+                    b.Property<long>("SubjectId")
+                        .HasColumnType("bigint");
 
                     b.Property<string>("PermissionCode")
                         .HasMaxLength(128)
@@ -1270,15 +1144,14 @@ namespace MailServer.Migrations.MySql.Migrations
 
             modelBuilder.Entity("MailServer.Domain.QuarantineRecord", b =>
                 {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("char(36)");
+                    b.Property<long>("Id")
+                        .HasColumnType("bigint");
 
-                    b.Property<Guid>("DomainId")
-                        .HasColumnType("char(36)");
+                    b.Property<long>("DomainId")
+                        .HasColumnType("bigint");
 
-                    b.Property<Guid>("MessageId")
-                        .HasColumnType("char(36)");
+                    b.Property<long>("MessageId")
+                        .HasColumnType("bigint");
 
                     b.Property<string>("PluginId")
                         .HasMaxLength(128)
@@ -1338,12 +1211,11 @@ namespace MailServer.Migrations.MySql.Migrations
 
             modelBuilder.Entity("MailServer.Domain.QuotaLedgerEntry", b =>
                 {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("char(36)");
+                    b.Property<long>("Id")
+                        .HasColumnType("bigint");
 
-                    b.Property<Guid>("AccountId")
-                        .HasColumnType("char(36)");
+                    b.Property<long>("AccountId")
+                        .HasColumnType("bigint");
 
                     b.Property<long>("Bytes")
                         .HasColumnType("bigint");
@@ -1351,16 +1223,16 @@ namespace MailServer.Migrations.MySql.Migrations
                     b.Property<DateTimeOffset>("CreatedAt")
                         .HasColumnType("datetime");
 
-                    b.Property<Guid>("DomainId")
-                        .HasColumnType("char(36)");
+                    b.Property<long>("DomainId")
+                        .HasColumnType("bigint");
 
                     b.Property<string>("IdempotencyKey")
                         .IsRequired()
                         .HasMaxLength(256)
                         .HasColumnType("varchar(256)");
 
-                    b.Property<Guid?>("MailboxMessageId")
-                        .HasColumnType("char(36)");
+                    b.Property<long?>("MailboxMessageId")
+                        .HasColumnType("bigint");
 
                     b.Property<string>("Operation")
                         .IsRequired()
@@ -1379,9 +1251,8 @@ namespace MailServer.Migrations.MySql.Migrations
 
             modelBuilder.Entity("MailServer.Domain.ScheduledTask", b =>
                 {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("char(36)");
+                    b.Property<long>("Id")
+                        .HasColumnType("bigint");
 
                     b.Property<int>("BatchSize")
                         .HasColumnType("int");
@@ -1439,15 +1310,14 @@ namespace MailServer.Migrations.MySql.Migrations
 
             modelBuilder.Entity("MailServer.Domain.SentCopyJob", b =>
                 {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("char(36)");
+                    b.Property<long>("Id")
+                        .HasColumnType("bigint");
 
-                    b.Property<Guid>("AccountId")
-                        .HasColumnType("char(36)");
+                    b.Property<long>("AccountId")
+                        .HasColumnType("bigint");
 
-                    b.Property<Guid?>("ClientMailboxMessageId")
-                        .HasColumnType("char(36)");
+                    b.Property<long?>("ClientMailboxMessageId")
+                        .HasColumnType("bigint");
 
                     b.Property<DateTimeOffset?>("CompletedAt")
                         .HasColumnType("datetime");
@@ -1462,17 +1332,17 @@ namespace MailServer.Migrations.MySql.Migrations
                         .HasMaxLength(64)
                         .HasColumnType("varchar(64)");
 
-                    b.Property<Guid>("MessageId")
-                        .HasColumnType("char(36)");
+                    b.Property<long>("MessageId")
+                        .HasColumnType("bigint");
 
                     b.Property<DateTimeOffset>("ReadyAt")
                         .HasColumnType("datetime");
 
-                    b.Property<Guid?>("RuleId")
-                        .HasColumnType("char(36)");
+                    b.Property<long?>("RuleId")
+                        .HasColumnType("bigint");
 
-                    b.Property<Guid?>("ServerMailboxMessageId")
-                        .HasColumnType("char(36)");
+                    b.Property<long?>("ServerMailboxMessageId")
+                        .HasColumnType("bigint");
 
                     b.Property<string>("State")
                         .IsRequired()
@@ -1506,8 +1376,8 @@ namespace MailServer.Migrations.MySql.Migrations
                     b.Property<DateTimeOffset>("CreatedAt")
                         .HasColumnType("datetime");
 
-                    b.Property<Guid>("DomainId")
-                        .HasColumnType("char(36)");
+                    b.Property<long>("DomainId")
+                        .HasColumnType("bigint");
 
                     b.Property<DateTimeOffset>("ExpiresAt")
                         .HasColumnType("datetime");
@@ -1531,12 +1401,11 @@ namespace MailServer.Migrations.MySql.Migrations
 
             modelBuilder.Entity("MailServer.Domain.StoredMessage", b =>
                 {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("char(36)");
+                    b.Property<long>("Id")
+                        .HasColumnType("bigint");
 
-                    b.Property<Guid?>("AuthenticatedAccountId")
-                        .HasColumnType("char(36)");
+                    b.Property<long?>("AuthenticatedAccountId")
+                        .HasColumnType("bigint");
 
                     b.Property<string>("AuthenticatedAccountName")
                         .HasMaxLength(320)
@@ -1591,17 +1460,16 @@ namespace MailServer.Migrations.MySql.Migrations
 
             modelBuilder.Entity("MailServer.Domain.StoredMessageRecipient", b =>
                 {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("char(36)");
+                    b.Property<long>("Id")
+                        .HasColumnType("bigint");
 
                     b.Property<string>("Address")
                         .IsRequired()
                         .HasMaxLength(320)
                         .HasColumnType("varchar(320)");
 
-                    b.Property<Guid>("MessageId")
-                        .HasColumnType("char(36)");
+                    b.Property<long>("MessageId")
+                        .HasColumnType("bigint");
 
                     b.HasKey("Id");
 
@@ -1628,51 +1496,10 @@ namespace MailServer.Migrations.MySql.Migrations
                     b.ToTable("system_settings", (string)null);
                 });
 
-            modelBuilder.Entity("MailServer.Domain.TaskExecution", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("char(36)");
-
-                    b.Property<int>("Attempt")
-                        .HasColumnType("int");
-
-                    b.Property<DateTimeOffset?>("CompletedAt")
-                        .HasColumnType("datetime");
-
-                    b.Property<string>("Error")
-                        .HasMaxLength(4096)
-                        .HasColumnType("varchar(4096)");
-
-                    b.Property<int>("ProcessedCount")
-                        .HasColumnType("int");
-
-                    b.Property<long>("ReleasedBytes")
-                        .HasColumnType("bigint");
-
-                    b.Property<Guid>("ScheduledTaskId")
-                        .HasColumnType("char(36)");
-
-                    b.Property<DateTimeOffset>("StartedAt")
-                        .HasColumnType("datetime");
-
-                    b.Property<string>("Status")
-                        .IsRequired()
-                        .HasMaxLength(32)
-                        .HasColumnType("varchar(32)");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("ScheduledTaskId", "StartedAt");
-
-                    b.ToTable("task_executions", (string)null);
-                });
-
             modelBuilder.Entity("MailServer.Domain.TaskLease", b =>
                 {
-                    b.Property<Guid>("ScheduledTaskId")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("char(36)");
+                    b.Property<long>("ScheduledTaskId")
+                        .HasColumnType("bigint");
 
                     b.Property<DateTimeOffset>("ExpiresAt")
                         .HasColumnType("datetime");
@@ -1689,9 +1516,8 @@ namespace MailServer.Migrations.MySql.Migrations
 
             modelBuilder.Entity("MailServer.Domain.TlsDeliveryEvent", b =>
                 {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("char(36)");
+                    b.Property<long>("Id")
+                        .HasColumnType("bigint");
 
                     b.Property<string>("FailureReason")
                         .IsRequired()
@@ -1748,9 +1574,8 @@ namespace MailServer.Migrations.MySql.Migrations
 
             modelBuilder.Entity("MailServer.Domain.TlsReportDelivery", b =>
                 {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("char(36)");
+                    b.Property<long>("Id")
+                        .HasColumnType("bigint");
 
                     b.Property<int>("Attempts")
                         .HasColumnType("int");
@@ -1804,229 +1629,6 @@ namespace MailServer.Migrations.MySql.Migrations
                     b.HasIndex("CompletedAt", "NextAttemptAt");
 
                     b.ToTable("tls_report_deliveries", (string)null);
-                });
-
-            modelBuilder.Entity("MailServer.Infrastructure.PerformanceMinute", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("char(36)");
-
-                    b.Property<long>("Count")
-                        .HasColumnType("bigint");
-
-                    b.Property<long>("Errors")
-                        .HasColumnType("bigint");
-
-                    b.Property<string>("HistogramJson")
-                        .IsRequired()
-                        .HasColumnType("longtext");
-
-                    b.Property<string>("Kind")
-                        .IsRequired()
-                        .HasMaxLength(16)
-                        .HasColumnType("varchar(16)");
-
-                    b.Property<double>("MaximumMilliseconds")
-                        .HasColumnType("double");
-
-                    b.Property<DateTimeOffset>("Minute")
-                        .HasColumnType("datetime");
-
-                    b.Property<string>("Module")
-                        .IsRequired()
-                        .HasMaxLength(32)
-                        .HasColumnType("varchar(32)");
-
-                    b.Property<string>("Name")
-                        .IsRequired()
-                        .HasMaxLength(128)
-                        .HasColumnType("varchar(128)");
-
-                    b.Property<string>("ProcessId")
-                        .IsRequired()
-                        .HasMaxLength(128)
-                        .HasColumnType("varchar(128)");
-
-                    b.Property<long>("Slow")
-                        .HasColumnType("bigint");
-
-                    b.Property<double>("TotalMilliseconds")
-                        .HasColumnType("double");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("Minute", "Kind");
-
-                    b.HasIndex("ProcessId", "Minute", "Kind", "Module", "Name")
-                        .IsUnique();
-
-                    b.ToTable("performance_minutes", (string)null);
-                });
-
-            modelBuilder.Entity("MailServer.Infrastructure.PerformanceOperation", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("char(36)");
-
-                    b.Property<int?>("Attempt")
-                        .HasColumnType("int");
-
-                    b.Property<bool>("ClockAnomaly")
-                        .HasColumnType("tinyint(1)");
-
-                    b.Property<Guid?>("DeliveryJobId")
-                        .HasColumnType("char(36)");
-
-                    b.Property<int>("DetailBytes")
-                        .HasColumnType("int");
-
-                    b.Property<string>("DetailsJson")
-                        .IsRequired()
-                        .HasColumnType("longtext");
-
-                    b.Property<double>("DurationMilliseconds")
-                        .HasColumnType("double");
-
-                    b.Property<Guid?>("MessageId")
-                        .HasColumnType("char(36)");
-
-                    b.Property<string>("Module")
-                        .IsRequired()
-                        .HasMaxLength(32)
-                        .HasColumnType("varchar(32)");
-
-                    b.Property<string>("Name")
-                        .IsRequired()
-                        .HasMaxLength(128)
-                        .HasColumnType("varchar(128)");
-
-                    b.Property<string>("ProcessId")
-                        .IsRequired()
-                        .HasMaxLength(128)
-                        .HasColumnType("varchar(128)");
-
-                    b.Property<double>("ProcessingMilliseconds")
-                        .HasColumnType("double");
-
-                    b.Property<double?>("QueueWaitMilliseconds")
-                        .HasColumnType("double");
-
-                    b.Property<double?>("RetryBackoffMilliseconds")
-                        .HasColumnType("double");
-
-                    b.Property<bool>("Slow")
-                        .HasColumnType("tinyint(1)");
-
-                    b.Property<string>("SourceTraceId")
-                        .HasMaxLength(32)
-                        .HasColumnType("varchar(32)");
-
-                    b.Property<int>("SqlCount")
-                        .HasColumnType("int");
-
-                    b.Property<double>("SqlMilliseconds")
-                        .HasColumnType("double");
-
-                    b.Property<DateTimeOffset>("StartedAt")
-                        .HasColumnType("datetime");
-
-                    b.Property<string>("Status")
-                        .IsRequired()
-                        .HasMaxLength(16)
-                        .HasColumnType("varchar(16)");
-
-                    b.Property<string>("TraceId")
-                        .IsRequired()
-                        .HasMaxLength(32)
-                        .HasColumnType("varchar(32)");
-
-                    b.Property<bool>("Truncated")
-                        .HasColumnType("tinyint(1)");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("DeliveryJobId");
-
-                    b.HasIndex("MessageId");
-
-                    b.HasIndex("SourceTraceId");
-
-                    b.HasIndex("TraceId");
-
-                    b.HasIndex("StartedAt", "Id");
-
-                    b.ToTable("performance_operations", (string)null);
-                });
-
-            modelBuilder.Entity("MailServer.Infrastructure.PerformanceProcess", b =>
-                {
-                    b.Property<string>("ProcessId")
-                        .HasMaxLength(128)
-                        .HasColumnType("varchar(128)");
-
-                    b.Property<long>("BudgetBytes")
-                        .HasColumnType("bigint");
-
-                    b.Property<long>("BufferBytes")
-                        .HasColumnType("bigint");
-
-                    b.Property<long>("DroppedAggregates")
-                        .HasColumnType("bigint");
-
-                    b.Property<long>("DroppedOperations")
-                        .HasColumnType("bigint");
-
-                    b.Property<DateTimeOffset>("LastSeenAt")
-                        .HasColumnType("datetime");
-
-                    b.Property<bool>("StorageUnavailable")
-                        .HasColumnType("tinyint(1)");
-
-                    b.Property<long>("TruncatedOperations")
-                        .HasColumnType("bigint");
-
-                    b.HasKey("ProcessId");
-
-                    b.ToTable("performance_processes", (string)null);
-                });
-
-            modelBuilder.Entity("MailServer.Infrastructure.PerformanceSql", b =>
-                {
-                    b.Property<string>("Fingerprint")
-                        .HasMaxLength(64)
-                        .HasColumnType("varchar(64)");
-
-                    b.Property<DateTimeOffset>("LastSeenAt")
-                        .HasColumnType("datetime");
-
-                    b.Property<string>("Provider")
-                        .IsRequired()
-                        .HasMaxLength(16)
-                        .HasColumnType("varchar(16)");
-
-                    b.Property<string>("Template")
-                        .IsRequired()
-                        .HasMaxLength(2048)
-                        .HasColumnType("varchar(2048)");
-
-                    b.HasKey("Fingerprint");
-
-                    b.HasIndex("LastSeenAt");
-
-                    b.ToTable("performance_sql", (string)null);
-                });
-
-            modelBuilder.Entity("MailServer.Domain.DeliveryAttempt", b =>
-                {
-                    b.HasOne("MailServer.Domain.DeliveryJob", "DeliveryJob")
-                        .WithMany()
-                        .HasForeignKey("DeliveryJobId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("DeliveryJob");
                 });
 
             modelBuilder.Entity("MailServer.Domain.DeliveryJob", b =>
@@ -2184,6 +1786,17 @@ namespace MailServer.Migrations.MySql.Migrations
                     b.Navigation("Message");
                 });
 
+            modelBuilder.Entity("MailServer.Domain.MessageFetchMetadata", b =>
+                {
+                    b.HasOne("MailServer.Domain.StoredMessage", "Message")
+                        .WithOne()
+                        .HasForeignKey("MailServer.Domain.MessageFetchMetadata", "MessageId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Message");
+                });
+
             modelBuilder.Entity("MailServer.Domain.MessageSearchRecord", b =>
                 {
                     b.HasOne("MailServer.Domain.StoredMessage", "Message")
@@ -2260,17 +1873,6 @@ namespace MailServer.Migrations.MySql.Migrations
                         .IsRequired();
 
                     b.Navigation("Message");
-                });
-
-            modelBuilder.Entity("MailServer.Domain.TaskExecution", b =>
-                {
-                    b.HasOne("MailServer.Domain.ScheduledTask", "ScheduledTask")
-                        .WithMany()
-                        .HasForeignKey("ScheduledTaskId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("ScheduledTask");
                 });
 
             modelBuilder.Entity("MailServer.Domain.MailDomain", b =>

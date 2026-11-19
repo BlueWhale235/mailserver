@@ -6,8 +6,8 @@ public static class BoundedKeyQuery
 {
     // The MySQL provider does not reliably map collections of converted GUIDs.
     // Bounded equality parameters retain the property mapping on both providers.
-    internal static IQueryable<T> WhereGuidIn<T>(this IQueryable<T> query,
-        Expression<Func<T, Guid>> key, IEnumerable<Guid> ids) => WhereKeyIn(query, key, ids);
+    internal static IQueryable<T> WhereIdIn<T>(this IQueryable<T> query,
+        Expression<Func<T, long>> key, IEnumerable<long> ids) => WhereKeyIn(query, key, ids);
 
     public static IQueryable<T> WhereStringIn<T>(this IQueryable<T> query,
         Expression<Func<T, string>> key, IEnumerable<string> values) => WhereKeyIn(query, key, values);

@@ -1,4 +1,4 @@
-﻿using MailServer.PluginSdk.Auditing;
+using MailServer.PluginSdk.Auditing;
 using MailServer.PluginSdk.Delivery;
 using MailServer.PluginSdk.Imap;
 using MailServer.PluginSdk.Security;
@@ -58,14 +58,14 @@ public sealed record PluginMailSendRequest(
 /// <summary>
 /// 插件投递请求被宿主接受后的结果，包含本地投递数和进入外发队列的数量。
 /// </summary>
-public sealed record PluginMailSendResult(Guid MessageId, string ContentKey, int LocalDeliveries, int QueuedDeliveries);
+public sealed record PluginMailSendResult(long MessageId, string ContentKey, int LocalDeliveries, int QueuedDeliveries);
 
 /// <summary>
 /// 插件可见的队列任务摘要，避免直接暴露 EF 实体和内部状态机。
 /// </summary>
 public sealed record PluginDeliveryJobInfo(
-    Guid JobId,
-    Guid MessageId,
+    long JobId,
+    long MessageId,
     string Sender,
     string Recipient,
     string Status,
@@ -77,7 +77,7 @@ public sealed record PluginDeliveryJobInfo(
 /// 插件可见的域名信息，供策略插件按域名状态、外发模式或配额做判断。
 /// </summary>
 public sealed record PluginDomainInfo(
-    Guid DomainId,
+    long DomainId,
     string Name,
     bool IsActive,
     long QuotaBytes);
@@ -86,8 +86,8 @@ public sealed record PluginDomainInfo(
 /// 插件可见的账号信息，通常用于权限、自动归档或外部目录同步。
 /// </summary>
 public sealed record PluginAccountInfo(
-    Guid AccountId,
-    Guid DomainId,
+    long AccountId,
+    long DomainId,
     string Address,
     bool IsEnabled,
     long QuotaBytes);
@@ -98,14 +98,14 @@ public sealed record PluginAccountInfo(
 public sealed record PluginRecipientResolution(
     string Address,
     bool IsLocal,
-    Guid? AccountId,
-    Guid? DomainId);
+    long? AccountId,
+    long? DomainId);
 
 /// <summary>
 /// 已保存邮件的元数据视图。正文需要通过 IPluginMessageStore.OpenReadAsync 单独读取。
 /// </summary>
 public sealed record PluginStoredMessageInfo(
-    Guid MessageId,
+    long MessageId,
     string ContentKey,
     string EnvelopeFrom,
     string? InternetMessageId,
@@ -116,7 +116,7 @@ public sealed record PluginStoredMessageInfo(
 /// 插件可见的邮箱摘要，字段含义遵循 IMAP 的 UIDVALIDITY、UIDNEXT 和 MODSEQ 语义。
 /// </summary>
 public sealed record PluginMailboxInfo(
-    Guid MailboxId,
+    long MailboxId,
     string Name,
     long Exists,
     long Unseen,
@@ -128,9 +128,9 @@ public sealed record PluginMailboxInfo(
 /// 插件可见的邮箱邮件摘要，用于移动、复制、标记等批量操作后的结果回传。
 /// </summary>
 public sealed record PluginMailboxMessageInfo(
-    Guid MailboxMessageId,
-    Guid MessageId,
-    Guid MailboxId,
+    long MailboxMessageId,
+    long MessageId,
+    long MailboxId,
     string MailboxName,
     long Uid,
     IReadOnlyList<string> Flags,
@@ -143,19 +143,19 @@ public sealed record PluginMailboxMessageInfo(
 /// 插件邮箱操作结果。Move/Copy/Flag 操作会返回源 UID、目标 UID 和涉及的消息 ID，便于外部系统对账。
 /// </summary>
 public sealed record PluginMailboxOperationResult(
-    Guid MailboxId,
+    long MailboxId,
     string MailboxName,
     long UidValidity,
     IReadOnlyList<long> SourceUids,
     IReadOnlyList<long> TargetUids,
-    IReadOnlyList<Guid> MessageIds);
+    IReadOnlyList<long> MessageIds);
 
 /// <summary>
 /// 插件选择邮箱邮件的条件。调用方至少应提供 Uids 或 MailboxMessageIds 中的一种。
 /// </summary>
 public sealed record PluginMailboxMessageSelector(
     IReadOnlyList<long>? Uids = null,
-    IReadOnlyList<Guid>? MailboxMessageIds = null);
+    IReadOnlyList<long>? MailboxMessageIds = null);
 
 /// <summary>
 /// 插件对 IMAP 标志的修改模式，对应替换、追加和移除三种语义。
@@ -191,9 +191,9 @@ public sealed record PluginQuarantineCreateRequest(
 /// 插件可见的隔离记录摘要，隐藏审核人等管理端细节。
 /// </summary>
 public sealed record PluginQuarantineRecord(
-    Guid Id,
-    Guid DomainId,
-    Guid MessageId,
+    long Id,
+    long DomainId,
+    long MessageId,
     string Sender,
     IReadOnlyList<string> Recipients,
     string RemoteAddress,
@@ -332,12 +332,12 @@ public interface IPluginMailSender
 /// </summary>
 public interface IPluginDeliveryQueue
 {
-    Task<PluginDeliveryJobInfo?> GetAsync(Guid jobId, CancellationToken cancellationToken);
-    Task RetryAsync(Guid jobId, CancellationToken cancellationToken);
-    Task DeferAsync(Guid jobId, TimeSpan delay, string reason, CancellationToken cancellationToken);
-    Task FailPermanentAsync(Guid jobId, string reason, CancellationToken cancellationToken);
-    Task CancelAsync(Guid jobId, string reason, CancellationToken cancellationToken);
-    Task AddNoteAsync(Guid jobId, string note, CancellationToken cancellationToken);
+    Task<PluginDeliveryJobInfo?> GetAsync(long jobId, CancellationToken cancellationToken);
+    Task RetryAsync(long jobId, CancellationToken cancellationToken);
+    Task DeferAsync(long jobId, TimeSpan delay, string reason, CancellationToken cancellationToken);
+    Task FailPermanentAsync(long jobId, string reason, CancellationToken cancellationToken);
+    Task CancelAsync(long jobId, string reason, CancellationToken cancellationToken);
+    Task AddNoteAsync(long jobId, string note, CancellationToken cancellationToken);
 }
 
 /// <summary>
@@ -355,11 +355,11 @@ public interface IPluginDirectory
 /// </summary>
 public interface IPluginMessageStore
 {
-    Task<PluginStoredMessageInfo?> GetAsync(Guid messageId, CancellationToken cancellationToken);
-    Task<Stream> OpenReadAsync(Guid messageId, CancellationToken cancellationToken);
-    Task<IReadOnlyList<PluginMessageHeader>> ReadHeadersAsync(Guid messageId, CancellationToken cancellationToken);
-    Task ReplaceContentAsync(Guid messageId, Stream content, CancellationToken cancellationToken);
-    Task UpsertHeadersAsync(Guid messageId, IReadOnlyList<PluginMessageHeaderUpdate> headers, CancellationToken cancellationToken);
+    Task<PluginStoredMessageInfo?> GetAsync(long messageId, CancellationToken cancellationToken);
+    Task<Stream> OpenReadAsync(long messageId, CancellationToken cancellationToken);
+    Task<IReadOnlyList<PluginMessageHeader>> ReadHeadersAsync(long messageId, CancellationToken cancellationToken);
+    Task ReplaceContentAsync(long messageId, Stream content, CancellationToken cancellationToken);
+    Task UpsertHeadersAsync(long messageId, IReadOnlyList<PluginMessageHeaderUpdate> headers, CancellationToken cancellationToken);
 }
 
 /// <summary>
@@ -367,19 +367,19 @@ public interface IPluginMessageStore
 /// </summary>
 public interface IPluginMailboxStore
 {
-    Task<IReadOnlyList<PluginMailboxInfo>> ListMailboxesAsync(Guid accountId, CancellationToken cancellationToken);
+    Task<IReadOnlyList<PluginMailboxInfo>> ListMailboxesAsync(long accountId, CancellationToken cancellationToken);
     Task<IReadOnlyList<PluginMailboxInfo>> ListMailboxesAsync(string accountAddress, CancellationToken cancellationToken);
-    Task<PluginMailboxInfo> CreateMailboxAsync(Guid accountId, string mailboxName, CancellationToken cancellationToken);
+    Task<PluginMailboxInfo> CreateMailboxAsync(long accountId, string mailboxName, CancellationToken cancellationToken);
     Task<PluginMailboxInfo> CreateMailboxAsync(string accountAddress, string mailboxName, CancellationToken cancellationToken);
-    Task<IReadOnlyList<PluginMailboxMessageInfo>> ListMessagesAsync(Guid accountId, string mailboxName, CancellationToken cancellationToken);
+    Task<IReadOnlyList<PluginMailboxMessageInfo>> ListMessagesAsync(long accountId, string mailboxName, CancellationToken cancellationToken);
     Task<IReadOnlyList<PluginMailboxMessageInfo>> ListMessagesAsync(string accountAddress, string mailboxName, CancellationToken cancellationToken);
-    Task<PluginMailboxOperationResult> MoveAsync(Guid accountId, string sourceMailboxName, PluginMailboxMessageSelector selector, string destinationMailboxName, CancellationToken cancellationToken);
-    Task<PluginMailboxOperationResult> CopyAsync(Guid accountId, string sourceMailboxName, PluginMailboxMessageSelector selector, string destinationMailboxName, CancellationToken cancellationToken);
-    Task<PluginMailboxOperationResult> SetFlagsAsync(Guid accountId, string mailboxName, PluginMailboxMessageSelector selector, IReadOnlyCollection<string> flags, CancellationToken cancellationToken);
-    Task<PluginMailboxOperationResult> AddFlagsAsync(Guid accountId, string mailboxName, PluginMailboxMessageSelector selector, IReadOnlyCollection<string> flags, CancellationToken cancellationToken);
-    Task<PluginMailboxOperationResult> RemoveFlagsAsync(Guid accountId, string mailboxName, PluginMailboxMessageSelector selector, IReadOnlyCollection<string> flags, CancellationToken cancellationToken);
-    Task<PluginMailboxOperationResult> MarkReadAsync(Guid accountId, string mailboxName, PluginMailboxMessageSelector selector, CancellationToken cancellationToken);
-    Task<PluginMailboxOperationResult> MarkUnreadAsync(Guid accountId, string mailboxName, PluginMailboxMessageSelector selector, CancellationToken cancellationToken);
+    Task<PluginMailboxOperationResult> MoveAsync(long accountId, string sourceMailboxName, PluginMailboxMessageSelector selector, string destinationMailboxName, CancellationToken cancellationToken);
+    Task<PluginMailboxOperationResult> CopyAsync(long accountId, string sourceMailboxName, PluginMailboxMessageSelector selector, string destinationMailboxName, CancellationToken cancellationToken);
+    Task<PluginMailboxOperationResult> SetFlagsAsync(long accountId, string mailboxName, PluginMailboxMessageSelector selector, IReadOnlyCollection<string> flags, CancellationToken cancellationToken);
+    Task<PluginMailboxOperationResult> AddFlagsAsync(long accountId, string mailboxName, PluginMailboxMessageSelector selector, IReadOnlyCollection<string> flags, CancellationToken cancellationToken);
+    Task<PluginMailboxOperationResult> RemoveFlagsAsync(long accountId, string mailboxName, PluginMailboxMessageSelector selector, IReadOnlyCollection<string> flags, CancellationToken cancellationToken);
+    Task<PluginMailboxOperationResult> MarkReadAsync(long accountId, string mailboxName, PluginMailboxMessageSelector selector, CancellationToken cancellationToken);
+    Task<PluginMailboxOperationResult> MarkUnreadAsync(long accountId, string mailboxName, PluginMailboxMessageSelector selector, CancellationToken cancellationToken);
 }
 
 /// <summary>
@@ -413,8 +413,8 @@ public interface IPluginQuarantineStore
         string pluginId,
         string? domainName,
         CancellationToken cancellationToken);
-    Task ReleaseAsync(string pluginId, Guid quarantineId, string? note, CancellationToken cancellationToken);
-    Task DeleteAsync(string pluginId, Guid quarantineId, string? note, CancellationToken cancellationToken);
+    Task ReleaseAsync(string pluginId, long quarantineId, string? note, CancellationToken cancellationToken);
+    Task DeleteAsync(string pluginId, long quarantineId, string? note, CancellationToken cancellationToken);
 }
 
 /// <summary>

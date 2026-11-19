@@ -23,13 +23,13 @@ public sealed class EfficiencyBenchmarks(ITestOutputHelper output)
     {
         if (Environment.GetEnvironmentVariable("MAILSERVER_EFFICIENCY_BENCHMARK") != "1") return;
         SQLitePCL.raw.SetProvider(new SQLitePCL.SQLite3Provider_e_sqlite3());
-        var path = Path.Combine(Path.GetTempPath(), $"mailserver-efficiency-bench-{Guid.NewGuid():N}.db");
+        var path = Path.Combine(Path.GetTempPath(), $"mailserver-efficiency-bench-{MailServer.Domain.SnowflakeIds.NewId()}.db");
         var counter = new Counter();
-        var factory = new PooledDbContextFactory<MailDbContext>(new DbContextOptionsBuilder<MailDbContext>()
+        var factory = new TestMailDbContextFactory(new DbContextOptionsBuilder<MailDbContext>()
             .UseSqlite($"Data Source={path};Pooling=False").AddInterceptors(counter).Options);
         try
         {
-            Guid accountId;
+            long accountId;
             await using (var db = await factory.CreateDbContextAsync())
             {
                 await db.Database.EnsureCreatedAsync();
@@ -44,7 +44,7 @@ public sealed class EfficiencyBenchmarks(ITestOutputHelper output)
                 await db.Database.ExecuteSqlInterpolatedAsync($"""
                     WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < {mailboxSize})
                     INSERT INTO mailbox_messages (Id, MailboxId, MessageId, Uid, Flags, ModSeq, InternalDate)
-                    SELECT lower(hex(randomblob(16))), {mailbox.Id}, {stored.Id}, n,
+                    SELECT n, {mailbox.Id}, {stored.Id}, n,
                     CASE WHEN n % 2 = 0 THEN '\Seen' ELSE '' END, 1, {ticks} FROM seq
                     """);
             }

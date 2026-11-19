@@ -60,6 +60,8 @@ public sealed class ConnectionProtection(IConfiguration configuration, ILogger<C
     private sealed class SourceState
     {
         public DateTimeOffset LastSeen;
+        public string Key = string.Empty;
+        public LinkedListNode<SourceState>? IdleNode;
         public readonly QuotaState[] Quotas = [new(), new(), new()];
         public readonly LoginState[] Logins = [new(), new()];
         public bool Active => Quotas.Any(x => x.Active > 0);
@@ -69,6 +71,7 @@ public sealed class ConnectionProtection(IConfiguration configuration, ILogger<C
     private sealed class LoginState { public int Failures; public DateTimeOffset WindowUntil; public DateTimeOffset BlockedUntil; }
     private readonly object _sync = new();
     private readonly Dictionary<string, SourceState> _sources = new(StringComparer.Ordinal);
+    private readonly LinkedList<SourceState> _idle = new();
     private ConnectionProtectionSettings _settings = Initial(configuration);
     private DateTimeOffset _nextCleanup;
     private DateTimeOffset _nextPressureCleanup;
@@ -108,9 +111,9 @@ public sealed class ConnectionProtection(IConfiguration configuration, ILogger<C
             }
             login.Failures++;
             state.LastSeen = now;
-            if (login.Failures < policy.MaximumFailures) return false;
-            login.BlockedUntil = now.AddMinutes(policy.BlockMinutes);
-            return true;
+            if (login.Failures >= policy.MaximumFailures) login.BlockedUntil = now.AddMinutes(policy.BlockMinutes);
+            UpdateIdle(state, now);
+            return login.Failures >= policy.MaximumFailures;
         }
     }
 
@@ -141,6 +144,7 @@ public sealed class ConnectionProtection(IConfiguration configuration, ILogger<C
             }
             quota.Tokens -= 1;
             quota.Active++;
+            UpdateIdle(state, now);
             permit = new Permit(this, state, group);
             return true;
         }
@@ -151,7 +155,7 @@ public sealed class ConnectionProtection(IConfiguration configuration, ILogger<C
         settings.Validate();
         lock (_sync)
         {
-            if (!settings.Enabled) _sources.Clear();
+            if (!settings.Enabled) { _sources.Clear(); _idle.Clear(); }
             _settings = settings;
             Cleanup(DateTimeOffset.UtcNow, force: true, forAdmission: false);
         }
@@ -159,7 +163,18 @@ public sealed class ConnectionProtection(IConfiguration configuration, ILogger<C
 
     private SourceState? GetOrCreate(string key, DateTimeOffset now)
     {
-        if (_sources.TryGetValue(key, out var existing)) return existing;
+        if (_sources.TryGetValue(key, out var existing))
+        {
+            existing.LastSeen = now;
+            UpdateIdle(existing, now);
+            return existing;
+        }
+        if (_sources.Count >= _settings.MaximumTrackedSources && _idle.First is { } oldest)
+        {
+            _idle.RemoveFirst();
+            oldest.Value.IdleNode = null;
+            _sources.Remove(oldest.Value.Key);
+        }
         if (_sources.Count >= _settings.MaximumTrackedSources)
         {
             // Source churn must not turn every rejected connection into a full dictionary scan.
@@ -169,8 +184,9 @@ public sealed class ConnectionProtection(IConfiguration configuration, ILogger<C
         }
         else Cleanup(now, force: false, forAdmission: true);
         if (_sources.Count >= _settings.MaximumTrackedSources) return null;
-        var created = new SourceState { LastSeen = now };
+        var created = new SourceState { LastSeen = now, Key = key };
         _sources.Add(key, created);
+        UpdateIdle(created, now);
         return created;
     }
 
@@ -178,14 +194,24 @@ public sealed class ConnectionProtection(IConfiguration configuration, ILogger<C
     {
         if (!force && now < _nextCleanup) return;
         _nextCleanup = now.AddSeconds(30);
-        foreach (var key in _sources.Where(x => !x.Value.Active && !x.Value.Protected(now)
-                     && now - x.Value.LastSeen > TimeSpan.FromMinutes(2)).Select(x => x.Key).ToArray())
-            _sources.Remove(key);
-        var excess = _sources.Count - _settings.MaximumTrackedSources + (forAdmission ? 1 : 0);
-        if (excess <= 0) return;
-        foreach (var item in _sources.Where(x => !x.Value.Active && !x.Value.Protected(now))
-                     .OrderBy(x => x.Value.LastSeen).Take(excess).ToArray())
-            _sources.Remove(item.Key);
+        // Periodically promote sources whose authentication protection has expired.
+        // Admission evicts directly from this list instead of sorting the source table.
+        foreach (var source in _sources.Values)
+            if (source.IdleNode is null && !source.Active && !source.Protected(now)) UpdateIdle(source, now);
+        while (_idle.First is { } node)
+        {
+            var excess = _sources.Count - _settings.MaximumTrackedSources + (forAdmission ? 1 : 0);
+            if (excess <= 0 && now - node.Value.LastSeen <= TimeSpan.FromMinutes(2)) break;
+            _idle.RemoveFirst();
+            node.Value.IdleNode = null;
+            _sources.Remove(node.Value.Key);
+        }
+    }
+
+    private void UpdateIdle(SourceState state, DateTimeOffset now)
+    {
+        if (state.IdleNode is not null) { _idle.Remove(state.IdleNode); state.IdleNode = null; }
+        if (!state.Active && !state.Protected(now)) state.IdleNode = _idle.AddLast(state);
     }
 
     // The log volume is independent of the number of refused connections.
@@ -205,7 +231,12 @@ public sealed class ConnectionProtection(IConfiguration configuration, ILogger<C
         public void Dispose()
         {
             if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
-            lock (owner._sync) state.Quotas[(int)group].Active--;
+            lock (owner._sync)
+            {
+                state.Quotas[(int)group].Active--;
+                if (owner._sources.TryGetValue(state.Key, out var current) && ReferenceEquals(current, state))
+                    owner.UpdateIdle(state, state.LastSeen);
+            }
         }
     }
     private sealed class NoopPermit : IDisposable

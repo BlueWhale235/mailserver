@@ -61,6 +61,7 @@ internal static class MailServerCli
                 "admin" => await AdminAsync(parsed),
                 "domain" => await DomainAsync(parsed),
                 "account" => await AccountAsync(parsed),
+                "demo" => await DemoAsync(parsed),
                 "relay" => await RelayAsync(parsed),
                 "run" => await RunHostAsync(parsed),
                 _ => Fail($"Unknown command '{command}'.")
@@ -84,6 +85,8 @@ internal static class MailServerCli
             ?? Prompt(interactive, "Database provider (Sqlite/MySql)", "Sqlite");
         if (!Enum.TryParse<DatabaseProvider>(providerText, true, out var provider))
             return Fail("Database provider must be Sqlite or MySql.");
+        if (args.HasFlag("seed-demo") && provider != DatabaseProvider.Sqlite)
+            return Fail("Demo data can only be seeded into a SQLite instance.");
         var connection = args.Get("connection")
             ?? Prompt(interactive, "Database connection string", DefaultConnection(provider));
         var bind = args.Get("bind") ?? Prompt(interactive, "Admin bind address", "127.0.0.1");
@@ -118,6 +121,8 @@ internal static class MailServerCli
         await ApplyMigrationsAsync(services);
         var administration = services.GetRequiredService<AdminApplicationService>();
         await administration.CreateAdminAsync(adminName, adminPassword, CancellationToken.None);
+        if (args.HasFlag("seed-demo"))
+            await DemoData.SeedAsync(services, CancellationToken.None);
 
         Console.WriteLine($"Configuration created: {path}");
         Console.WriteLine($"Administrator: {adminName}");
@@ -242,7 +247,7 @@ internal static class MailServerCli
             var factory = services.GetRequiredService<IDbContextFactory<MailDbContext>>();
             await using var db = await factory.CreateDbContextAsync();
             var id = await db.AdminUsers.Where(x => x.UserName == userName.ToLowerInvariant())
-                .Select(x => (Guid?)x.Id).SingleOrDefaultAsync()
+                .Select(x => (long?)x.Id).SingleOrDefaultAsync()
                 ?? throw new KeyNotFoundException("Administrator not found.");
             await administration.ChangeAdminPasswordAsync(
                 id,
@@ -304,6 +309,21 @@ internal static class MailServerCli
                 return Fail("Usage: mailserver account create|password|enable|disable <address>");
         }
         Console.WriteLine($"Account updated: {address}");
+        return 0;
+    }
+
+    private static async Task<int> DemoAsync(CliArguments args)
+    {
+        if (args.Positionals.Count != 2 || !string.Equals(args.Positionals[1], "seed", StringComparison.OrdinalIgnoreCase))
+            return Fail("Usage: mailserver demo seed [--config path]");
+
+        var configuration = LoadConfiguration(GetExistingConfigPath(args));
+        if (!string.Equals(configuration["Database:Provider"], "Sqlite", StringComparison.OrdinalIgnoreCase))
+            return Fail("Demo data can only be seeded into a SQLite instance.");
+
+        await using var services = BuildServices(configuration);
+        await services.VerifyMailDatabaseAsync();
+        await DemoData.SeedAsync(services, CancellationToken.None);
         return 0;
     }
 
@@ -422,14 +442,23 @@ internal static class MailServerCli
             logging.AddMailServerLogging(configuration);
         });
         services.AddMailServerInfrastructure(configuration);
-        return services.BuildServiceProvider();
+        services.AddSingleton(_ => SnowflakeProcess.Acquire(configuration, "cli"));
+        var provider = services.BuildServiceProvider();
+        provider.GetRequiredService<MailServer.Domain.SnowflakeGenerator>();
+        return provider;
     }
 
     private static async Task ApplyMigrationsAsync(IServiceProvider services)
     {
         var factory = services.GetRequiredService<IDbContextFactory<MailDbContext>>();
         await using var db = await factory.CreateDbContextAsync();
-        var isNewInstallation = !(await db.Database.GetAppliedMigrationsAsync()).Any();
+        var applied = (await db.Database.GetAppliedMigrationsAsync()).ToArray();
+        var known = db.Database.GetMigrations().ToHashSet(StringComparer.Ordinal);
+        if (applied.Length > 0 &&
+            (!applied.Any(x => x.EndsWith("_InitialSnowflakeMailServer", StringComparison.Ordinal)) ||
+             applied.Any(x => !known.Contains(x))))
+            throw new InvalidOperationException("This release requires an empty business database. Keep the GUID database intact and configure a new database.");
+        var isNewInstallation = applied.Length == 0;
         await db.Database.MigrateAsync();
         if (isNewInstallation)
             await services.GetRequiredService<ResourceSettingsService>().InitializeNewInstallationAsync(CancellationToken.None);
@@ -572,8 +601,11 @@ internal static class MailServerCli
         string jwtKey) =>
         new()
         {
-            ["Database"] = new { Provider = provider },
+            ["Database"] = new { Provider = provider, ContextPoolSize = 32 },
+            ["BackgroundServices"] = new { ProcessWakeEnabled = true },
             ["ConnectionStrings"] = new { MailDatabase = connection },
+            ["LocalLogs"] = new { Path = "data/logs.db", RetentionDays = 30 },
+            ["Snowflake"] = new { MachineId = 0, StateDirectory = "data/snowflake" },
             ["Storage"] = new { RootPath = "data/messages", MaximumMessageBytes = 52_428_800 },
             ["SecurityAssets"] = new { RootPath = "security-assets" },
             ["MailboxDefaults"] = new { Folders = new[] { "INBOX", "Sent", "Drafts", "Trash", "Junk", "Archives" } },
@@ -737,13 +769,14 @@ internal static class MailServerCli
             MailServer portable CLI
 
               mailserver --version
-              mailserver init [--provider Sqlite|MySql] [--config path]
+              mailserver init [--provider Sqlite|MySql] [--config path] [--seed-demo]
               mailserver doctor [--config path] [--domain example.com] [--selector dkim-selector]
               mailserver config validate
               mailserver db status|update
               mailserver admin create|password <name> --password <value>
               mailserver domain add <domain>
               mailserver account create|password|enable|disable <address> [--password <value>]
+              mailserver demo seed [--config path]
               mailserver run all|api|smtp|imap|worker
               mailserver relay pair --host ROOT --port 18444 --id ID --fingerprint SHA256 [--config relay.json]
               mailserver relay run [--port 18443] [--smtp-port 25] [--config relay.json]

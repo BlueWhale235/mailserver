@@ -68,14 +68,14 @@ public sealed class FirstRoundBenchmarks(ITestOutputHelper output)
     [InlineData(100_000)]
     public async Task UidFetchSingleLastMessage(int mailboxSize)
     {
-        var path = Path.Combine(Path.GetTempPath(), $"mailserver-fetch-bench-{Guid.NewGuid():N}.db");
+        var path = Path.Combine(Path.GetTempPath(), $"mailserver-fetch-bench-{MailServer.Domain.SnowflakeIds.NewId()}.db");
         var counter = new QueryCounter();
         SQLitePCL.raw.SetProvider(new SQLitePCL.SQLite3Provider_e_sqlite3());
-        var factory = new PooledDbContextFactory<MailDbContext>(new DbContextOptionsBuilder<MailDbContext>()
+        var factory = new TestMailDbContextFactory(new DbContextOptionsBuilder<MailDbContext>()
             .UseSqlite($"Data Source={path};Pooling=False").AddInterceptors(counter).Options);
         try
         {
-            Guid mailboxId;
+            long mailboxId;
             await using (var db = await factory.CreateDbContextAsync())
             {
                 await db.Database.EnsureCreatedAsync();
@@ -90,7 +90,7 @@ public sealed class FirstRoundBenchmarks(ITestOutputHelper output)
                 await db.Database.ExecuteSqlInterpolatedAsync($"""
                     WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < {mailboxSize})
                     INSERT INTO mailbox_messages (Id, MailboxId, MessageId, Uid, Flags, ModSeq, InternalDate)
-                    SELECT lower(hex(randomblob(16))), {mailbox.Id}, {stored.Id}, n, '', 1, {ticks} FROM seq
+                    SELECT n, {mailbox.Id}, {stored.Id}, n, '', 1, {ticks} FROM seq
                     """);
                 await db.Database.ExecuteSqlInterpolatedAsync($"""
                     UPDATE mailbox_messages SET DeletedAt = {ticks} WHERE MailboxId = {mailbox.Id} AND Uid = {mailboxSize / 2}
@@ -136,10 +136,10 @@ public sealed class FirstRoundBenchmarks(ITestOutputHelper output)
     [InlineData(7)]
     public async Task OverviewTrafficQueries(int days)
     {
-        var path = Path.Combine(Path.GetTempPath(), $"mailserver-traffic-bench-{Guid.NewGuid():N}.db");
+        var path = Path.Combine(Path.GetTempPath(), $"mailserver-traffic-bench-{MailServer.Domain.SnowflakeIds.NewId()}.db");
         var counter = new QueryCounter();
         SQLitePCL.raw.SetProvider(new SQLitePCL.SQLite3Provider_e_sqlite3());
-        var factory = new PooledDbContextFactory<MailDbContext>(new DbContextOptionsBuilder<MailDbContext>()
+        var factory = new TestMailDbContextFactory(new DbContextOptionsBuilder<MailDbContext>()
             .UseSqlite($"Data Source={path};Pooling=False").AddInterceptors(counter).Options);
         try
         {

@@ -28,7 +28,7 @@ public sealed class InboundMessageService(
     SearchBackfillWakeSignal? searchWake = null) : IInboundMessageService
 {
     private readonly ForwardingOptions _forwardingOptions = forwardingOptions.Value;
-    private sealed record RecipientRoute(bool IsLocal);
+    private sealed record RecipientRoute(long? AccountId) { public bool IsLocal => AccountId is not null; }
 
     public InboundMessageService(
         IDbContextFactory<MailDbContext> dbFactory,
@@ -59,29 +59,25 @@ public sealed class InboundMessageService(
             await using var srsDb = await dbFactory.CreateDbContextAsync(cancellationToken);
             if (await srs.TryDecodeAsync(srsDb, address, cancellationToken) is not null) return true;
         }
+        return (await ResolveRouteAsync(localPart, domainName, cancellationToken)).IsLocal;
+    }
+
+    private async Task<RecipientRoute> ResolveRouteAsync(string localPart, string domainName, CancellationToken cancellationToken)
+    {
         async Task<(RecipientRoute Value, long Size)> LoadAsync(CancellationToken token)
         {
             await using var db = await dbFactory.CreateDbContextAsync(token);
-            var isLocal = await db.Accounts.AnyAsync(
-                    x => x.LocalPart == localPart && x.Domain.Name == domainName && x.IsEnabled && x.Domain.IsActive,
-                    token)
-                || await db.Aliases.AnyAsync(
-                    x => x.SourceLocalPart == localPart
-                        && x.Domain.Name == domainName
-                        && x.Domain.IsActive
-                        && x.IsEnabled
-                        && x.Mode != MailAliasMode.Disabled
-                        && x.TargetAccountId != null
-                        && x.TargetAccount!.IsEnabled
-                        && x.TargetAccount.Domain.IsActive, token);
-            return (new RecipientRoute(isLocal), 64 + address.Length * 2L);
+            var id = await db.Accounts.Where(x => x.LocalPart == localPart && x.Domain.Name == domainName
+                && x.IsEnabled && x.Domain.IsActive).Select(x => (long?)x.Id).SingleOrDefaultAsync(token);
+            id ??= await db.Aliases.Where(x => x.SourceLocalPart == localPart && x.Domain.Name == domainName
+                && x.Domain.IsActive && x.IsEnabled && x.Mode != MailAliasMode.Disabled
+                && x.TargetAccountId != null && x.TargetAccount!.IsEnabled && x.TargetAccount.Domain.IsActive)
+                .Select(x => x.TargetAccountId).SingleOrDefaultAsync(token);
+            return (new RecipientRoute(id), 128 + (localPart.Length + domainName.Length) * 2L);
         }
-        if (configurationCache is null || localPart.StartsWith("srs0=", StringComparison.OrdinalIgnoreCase))
-            return (await LoadAsync(cancellationToken)).Value.IsLocal;
-        var route = await configurationCache.GetAsync(
-            $"routing:{localPart.ToLowerInvariant()}@{domainName.ToLowerInvariant()}",
-            ConfigurationScopes.Routing, LoadAsync, cancellationToken, TimeSpan.FromSeconds(10));
-        return route.IsLocal;
+        return configurationCache is null ? (await LoadAsync(cancellationToken)).Value
+            : await configurationCache.GetAsync($"routing:{localPart}@{domainName}", ConfigurationScopes.Routing,
+                LoadAsync, cancellationToken, TimeSpan.FromSeconds(10));
     }
 
     public async Task<InboundAcceptance> AcceptAsync(
@@ -147,7 +143,7 @@ public sealed class InboundMessageService(
                             decodedEnvelopeSender?.ForwardDepth ?? 0,
                             forwardingTraces.Select(trace => trace.ForwardDepth).DefaultIfEmpty(0).Max()),
                         forwardingTraces.Select(trace => trace.RuleId).ToHashSet(),
-                        new HashSet<Guid>(),
+                        new HashSet<long>(),
                         new HashSet<string>(StringComparer.OrdinalIgnoreCase));
                     var counters = new DeliveryCounters();
                     // 收件人先展开成账号或外部地址，再按账号/地址分组，避免同一封信经多个别名重复投递。
@@ -175,17 +171,17 @@ public sealed class InboundMessageService(
                     }
 
                     // Cold rule loading and recipient expansion stay outside the write transaction.
-                    // Recheck their versions under Serializable isolation before using the results.
+                    // Recheck versions after acquiring mailbox locks before using the results.
                     var writeDomains = await CollectWriteDomainsAsync(db, expandedRecipients, mimeMessage,
                         envelope, descriptor.Size, receivedAt, forwarding.Depth, cancellationToken);
                     forwarding.LockedDomains.UnionWith(writeDomains);
-                    await using var transaction = await MailboxWriteCoordinator.BeginAsync(db, writeDomains, cancellationToken);
+                    await using var transaction = await MailboxWriteCoordinator.BeginForAccountsAsync(db,
+                        db.ChangeTracker.Entries<MailAccount>().Select(x => x.Entity.Id).ToArray(), cancellationToken);
                     if (configurationVersions != await ReadDeliveryVersionsAsync(db, cancellationToken))
                         throw new DeliveryConfigurationChangedException();
                     var accounts = db.ChangeTracker.Entries<MailAccount>().Select(x => x.Entity)
                         .Where(x => writeDomains.Contains(x.DomainId)).DistinctBy(x => x.Id).ToArray();
-                    if (db.Database.ProviderName?.Contains("MySql", StringComparison.OrdinalIgnoreCase) != true)
-                        foreach (var domain in accounts.Select(x => x.Domain).DistinctBy(x => x.Id).OrderBy(x => x.Id))
+                    foreach (var domain in accounts.Select(x => x.Domain).DistinctBy(x => x.Id).OrderBy(x => x.Id))
                             await db.Entry(domain).ReloadAsync(cancellationToken);
                     foreach (var account in accounts.OrderBy(x => x.Id))
                     {
@@ -331,12 +327,12 @@ public sealed class InboundMessageService(
             versions.GetValueOrDefault(ConfigurationScopes.Rules));
     }
 
-    private async Task<HashSet<Guid>> CollectWriteDomainsAsync(
+    private async Task<HashSet<long>> CollectWriteDomainsAsync(
         MailDbContext db, IReadOnlyList<ExpandedRecipient> recipients, MimeMessage message,
         InboundEnvelope envelope, long size, DateTimeOffset at, int depth, CancellationToken token)
     {
-        var domains = new HashSet<Guid>();
-        var visited = new HashSet<(Guid Account, string Originals)>();
+        var domains = new HashSet<long>();
+        var visited = new HashSet<(long Account, string Originals)>();
         var queue = new Queue<(MailAccount Account, string[] Originals, int Depth)>();
         foreach (var group in recipients.Where(x => x.Account is not null).GroupBy(x => x.Account!.Id))
             queue.Enqueue((group.First().Account!, group.Select(x => x.OriginalAddress).ToArray(), depth));
@@ -466,7 +462,7 @@ public sealed class InboundMessageService(
         MailboxWriteAccounting.ApplyQuotaDelta(account, descriptor.Size);
         db.QuotaLedger.Add(new QuotaLedgerEntry
         {
-            IdempotencyKey = $"mailbox-message:add:{item.Id:N}",
+            IdempotencyKey = $"mailbox-message:add:{item.Id}",
             AccountId = account.Id,
             DomainId = account.DomainId,
             MailboxMessageId = item.Id,
@@ -618,20 +614,20 @@ public sealed class InboundMessageService(
         }
     }
 
-    private static async Task<Guid?> ResolveOutboundRouteDomainIdAsync(
+    private static async Task<long?> ResolveOutboundRouteDomainIdAsync(
         MailDbContext db,
         string sender,
         CancellationToken cancellationToken)
     {
         if (!AddressParser.TrySplit(sender, out _, out var domain)) return null;
         return await db.Domains.Where(x => x.Name == domain)
-            .Select(x => (Guid?)x.Id)
+            .Select(x => (long?)x.Id)
             .SingleOrDefaultAsync(cancellationToken);
     }
 
     private async Task<MailRuleMatch?> QueueSentCopyAsync(
         MailDbContext db,
-        Guid authenticatedAccountId,
+        long authenticatedAccountId,
         StoredMessage storedMessage,
         MimeMessage mimeMessage,
         InboundEnvelope envelope,
@@ -688,29 +684,16 @@ public sealed class InboundMessageService(
         return result;
     }
 
-    private static async Task<MailAccount?> ResolveLocalAccountAsync(
-        MailDbContext db,
-        string address,
-        CancellationToken cancellationToken)
+    private async Task<MailAccount?> ResolveLocalAccountAsync(
+        MailDbContext db, string address, CancellationToken cancellationToken)
     {
         if (!AddressParser.TrySplit(address, out var localPart, out var domain)) return null;
-        var account = await db.Accounts.Include(x => x.Domain)
-            .SingleOrDefaultAsync(
-                x => x.LocalPart == localPart && x.Domain.Name == domain && x.IsEnabled && x.Domain.IsActive,
-                cancellationToken);
-        if (account is not null) return account;
-        var alias = await db.Aliases.Include(x => x.TargetAccount).ThenInclude(x => x!.Domain)
-            .SingleOrDefaultAsync(
-                x => x.SourceLocalPart == localPart
-                     && x.Domain.Name == domain
-                     && x.Domain.IsActive
-                     && x.IsEnabled
-                     && x.Mode != MailAliasMode.Disabled
-                     && x.TargetAccountId != null
-                     && x.TargetAccount!.IsEnabled
-                     && x.TargetAccount.Domain.IsActive,
-                cancellationToken);
-        return alias?.TargetAccount;
+        var route = await ResolveRouteAsync(localPart, domain, cancellationToken);
+        if (route.AccountId is not { } id) return null;
+        var local = db.Accounts.Local.FirstOrDefault(x => x.Id == id);
+        if (local is not null) return local;
+        return await db.Accounts.Include(x => x.Domain).SingleOrDefaultAsync(
+            x => x.Id == id && x.IsEnabled && x.Domain.IsActive, cancellationToken);
     }
 
     private sealed record ExpandedRecipient(
@@ -718,16 +701,16 @@ public sealed class InboundMessageService(
         string Address,
         MailAccount? Account,
         bool AuthorizedRelay,
-        Guid? RelayDomainId);
+        long? RelayDomainId);
 
     private sealed record ForwardContext(
         string OriginalSender,
         int Depth,
-        HashSet<Guid> ExecutedRules,
-        HashSet<Guid> DeliveredAccounts,
+        HashSet<long> ExecutedRules,
+        HashSet<long> DeliveredAccounts,
         HashSet<string> ForwardedTargets)
     {
-        public HashSet<Guid> LockedDomains { get; } = [];
+        public HashSet<long> LockedDomains { get; } = [];
     }
 
     private sealed class DeliveryCounters
@@ -749,11 +732,11 @@ public sealed class InboundMessageService(
 
     private static async Task<OutboundRoute> ResolveOutboundRouteAsync(
         MailDbContext db,
-        Guid domainId,
+        long domainId,
         CancellationToken cancellationToken) =>
         await db.Domains.Where(x => x.Id == domainId)
             .Select(x => new OutboundRoute(x.Id))
             .SingleOrDefaultAsync(cancellationToken) ?? new OutboundRoute(null);
 
-    private sealed record OutboundRoute(Guid? DomainId);
+    private sealed record OutboundRoute(long? DomainId);
 }

@@ -12,19 +12,19 @@ public sealed record OperationsMailQuery(string? MessageId, string? Sender, stri
     string? AuthenticatedAccount, DateTimeOffset? From, DateTimeOffset? To,
     DeliveryStatus? DeliveryStatus, bool? Recycled, int Page = 1, int PageSize = 50);
 
-public sealed record OperationsMailRow(Guid Id, string? InternetMessageId, string EnvelopeFrom,
+public sealed record OperationsMailRow(long Id, string? InternetMessageId, string EnvelopeFrom,
     DateTimeOffset ReceivedAt, long Size, string? SourceType, string? AuthenticatedAccountName,
     string? SourceIp, int MailboxCopies, int RecycledCopies, int DeliveryJobs, int QuarantinedCopies);
 
 public sealed record OperationsMailPage(IReadOnlyList<OperationsMailRow> Items, int TotalCount, int Page, int PageSize);
-public sealed record OperationsMailboxCopy(Guid Id, Guid MailboxId, string MailboxName, string AccountAddress,
+public sealed record OperationsMailboxCopy(long Id, long MailboxId, string MailboxName, string AccountAddress,
     long Uid, DateTimeOffset? DeletedAt);
 public sealed record OperationsMailDetail(OperationsMailRow Message, IReadOnlyList<string> OriginalRecipients,
     IReadOnlyList<OperationsMailboxCopy> MailboxCopies, IReadOnlyList<string> DeliveryRecipients,
     IReadOnlyList<string> QuarantineRecipients, int OriginalRecipientCount, int MailboxCopyCount,
     int DeliveryRecipientCount, int QuarantineRecipientCount);
 public sealed record OperationsRelatedPage<T>(IReadOnlyList<T> Items, int TotalCount, int Page, int PageSize);
-public sealed record OperationsDeliveryRow(Guid Id, string Recipient, DeliveryStatus Status, int Attempts,
+public sealed record OperationsDeliveryRow(long Id, string Recipient, DeliveryStatus Status, int Attempts,
     string? LastError, DateTimeOffset CreatedAt);
 public sealed record OperationsDeliveryPage(IReadOnlyList<OperationsDeliveryRow> Items, int TotalCount);
 public sealed record OperationsAttemptRow(int AttemptNumber, bool Succeeded, bool PermanentFailure,
@@ -90,7 +90,7 @@ public sealed class OperationsMailService(IDbContextFactory<MailDbContext> facto
         return new(rows, total, page, pageSize);
     }
 
-    public async Task<OperationsMailDetail?> GetAsync(Guid id, CancellationToken token)
+    public async Task<OperationsMailDetail?> GetAsync(long id, CancellationToken token)
     {
         await using var db = await factory.CreateDbContextAsync(token);
         var message = await db.Messages.AsNoTracking().Where(x => x.Id == id)
@@ -110,7 +110,7 @@ public sealed class OperationsMailService(IDbContextFactory<MailDbContext> facto
             originals.TotalCount, copies.TotalCount, delivery.TotalCount, quarantine.TotalCount);
     }
 
-    public async Task<OperationsRelatedPage<string>?> GetRecipientsAsync(Guid id, string kind, int page, int pageSize, CancellationToken token)
+    public async Task<OperationsRelatedPage<string>?> GetRecipientsAsync(long id, string kind, int page, int pageSize, CancellationToken token)
     {
         if (kind is not ("original" or "delivery" or "quarantine")) return null;
         page = Math.Clamp(page, 1, 100_000);
@@ -136,7 +136,7 @@ public sealed class OperationsMailService(IDbContextFactory<MailDbContext> facto
         return new(rows, count, page, pageSize);
     }
 
-    public async Task<OperationsRelatedPage<OperationsMailboxCopy>?> GetCopiesAsync(Guid id, int page, int pageSize, CancellationToken token)
+    public async Task<OperationsRelatedPage<OperationsMailboxCopy>?> GetCopiesAsync(long id, int page, int pageSize, CancellationToken token)
     {
         page = Math.Clamp(page, 1, 100_000);
         pageSize = Math.Clamp(pageSize, 1, 100);
@@ -151,7 +151,7 @@ public sealed class OperationsMailService(IDbContextFactory<MailDbContext> facto
         return new(rows, count, page, pageSize);
     }
 
-    public async Task<OperationsDeliveryPage?> GetDeliveriesAsync(Guid id, int page, int pageSize, CancellationToken token)
+    public async Task<OperationsDeliveryPage?> GetDeliveriesAsync(long id, int page, int pageSize, CancellationToken token)
     {
         await using var db = await factory.CreateDbContextAsync(token);
         if (!await db.Messages.AnyAsync(x => x.Id == id, token)) return null;
@@ -165,7 +165,7 @@ public sealed class OperationsMailService(IDbContextFactory<MailDbContext> facto
         return new(rows, count);
     }
 
-    public async Task<OperationsAttemptPage?> GetAttemptsAsync(Guid id, Guid jobId, int page, int pageSize, CancellationToken token)
+    public async Task<OperationsAttemptPage?> GetAttemptsAsync(long id, long jobId, int page, int pageSize, CancellationToken token)
     {
         await using var db = await factory.CreateDbContextAsync(token);
         if (!await db.DeliveryJobs.AnyAsync(x => x.Id == jobId && x.MessageId == id, token)) return null;
@@ -181,7 +181,7 @@ public sealed class OperationsMailService(IDbContextFactory<MailDbContext> facto
         return new(rows, count);
     }
 
-    public async Task<OperationsMailContent?> GetContentAsync(Guid id, string actor, string action, CancellationToken token)
+    public async Task<OperationsMailContent?> GetContentAsync(long id, string actor, string action, CancellationToken token)
     {
         await using var stream = await OpenAuditedAsync(id, actor, action, token);
         if (stream is null) return null;
@@ -205,7 +205,7 @@ public sealed class OperationsMailService(IDbContextFactory<MailDbContext> facto
         finally { MimeGate.Release(); }
     }
 
-    public async Task<Stream?> OpenAuditedAsync(Guid id, string actor, string action, CancellationToken token)
+    public async Task<Stream?> OpenAuditedAsync(long id, string actor, string action, CancellationToken token)
     {
         await using var db = await factory.CreateDbContextAsync(token);
         var key = await db.Messages.AsNoTracking().Where(x => x.Id == id)

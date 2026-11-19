@@ -99,8 +99,11 @@ public sealed class PerformanceAnalysisTests(ITestOutputHelper output)
         await using var connection = new SqliteConnection("Data Source=:memory:");
         await connection.OpenAsync();
         using var collector = new PerformanceCollector { Settings = new() { SampleRate = 0 } };
-        var factory = new PooledDbContextFactory<MailDbContext>(new DbContextOptionsBuilder<MailDbContext>()
-            .UseSqlite(connection).AddInterceptors(new PerformanceSqlInterceptor(collector), new PerformanceConnectionInterceptor(), new PerformanceTransactionInterceptor()).Options);
+        await using var logConnection = new SqliteConnection("Data Source=:memory:");
+        await logConnection.OpenAsync();
+        var logDatabase = new LocalLogDatabase(new DbContextOptionsBuilder<LocalLogDbContext>().UseSqlite(logConnection).Options);
+        var factory = new TestMailDbContextFactory(new DbContextOptionsBuilder<MailDbContext>()
+            .UseSqlite(connection).AddInterceptors(new PerformanceSqlInterceptor(collector), new PerformanceConnectionInterceptor(), new PerformanceTransactionInterceptor()).Options, logDatabase);
         await using var db = await factory.CreateDbContextAsync();
         await db.Database.EnsureCreatedAsync();
         using (collector.Start("imap", "FETCH"))
@@ -134,7 +137,7 @@ public sealed class PerformanceAnalysisTests(ITestOutputHelper output)
         collector.ReleaseOperations(1, false);
         Assert.Equal(0, collector.ProcessStatus().BufferBytes);
         // Missing diagnostic tables must only drop diagnostic records.
-        await db.Database.ExecuteSqlRawAsync("DROP TABLE performance_operations");
+        await db.Logs.Database.ExecuteSqlRawAsync("DROP TABLE performance_operations");
         using (collector.Start("api", "lost")) { }
         await storage.FlushAsync(CancellationToken.None);
         Assert.True(collector.StorageUnavailable);

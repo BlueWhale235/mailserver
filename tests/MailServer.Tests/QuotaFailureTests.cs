@@ -96,7 +96,11 @@ public sealed class QuotaFailureTests
             var failure = await Assert.ThrowsAsync<MailboxQuotaExceededException>(() => env.Inbound.AcceptAsync(Envelope(), content, CancellationToken.None));
             Assert.Equal("alice@example.test", failure.Address);
             await env.AssertOriginalRolledBackAsync();
-            Assert.Empty(Directory.GetFiles(Path.Combine(env.Root, "messages"), "*.eml", SearchOption.AllDirectories));
+            // Rejected content remains briefly to protect another writer of the same hash.
+            var path = Assert.Single(Directory.GetFiles(Path.Combine(env.Root, "messages"), "*.eml", SearchOption.AllDirectories));
+            File.SetLastWriteTimeUtc(path, DateTime.UtcNow.AddMinutes(-6));
+            await env.Services.GetRequiredService<IMessageContentStore>().DeleteIfUnreferencedAsync(Path.GetFileNameWithoutExtension(path), CancellationToken.None);
+            Assert.False(File.Exists(path));
         }
     }
 
@@ -124,8 +128,8 @@ public sealed class QuotaFailureTests
         await using var env = await Environment.CreateAsync();
         // Original recipient is bob; the failed forwarding target is alice.
         await env.SetQuotaAsync(1, false);
-        Guid ruleDomainId;
-        Guid senderId;
+        long ruleDomainId;
+        long senderId;
         await using (var db = await env.Factory.CreateDbContextAsync())
         {
             ruleDomainId = (await db.Domains.SingleAsync(x => x.Name == (direction == MailRuleDirection.Incoming ? "example.test" : "origin.test"))).Id;
@@ -407,7 +411,7 @@ public sealed class QuotaFailureTests
         public static async Task<Environment> CreateAsync(bool concurrencyFailure = false,
             Action<IServiceCollection>? configure = null)
         {
-            var root = Path.Combine(Path.GetTempPath(), $"mailserver-quota-{Guid.NewGuid():N}");
+            var root = Path.Combine(Path.GetTempPath(), $"mailserver-quota-{MailServer.Domain.SnowflakeIds.NewId()}");
             Directory.CreateDirectory(root);
             var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
             {

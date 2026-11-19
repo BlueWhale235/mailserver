@@ -1,4 +1,4 @@
-﻿using System.Data;
+using System.Data;
 using System.Diagnostics;
 using System.Text.Json;
 using System.Net.Http.Json;
@@ -23,7 +23,7 @@ public sealed class MaintenanceOptions
 
 public sealed class QuotaLedgerService(IDbContextFactory<MailDbContext> factory) : IQuotaLedgerService
 {
-    public async Task ApplyAsync(Guid accountId, Guid domainId, Guid? mailboxMessageId, long bytes,
+    public async Task ApplyAsync(long accountId, long domainId, long? mailboxMessageId, long bytes,
         QuotaLedgerOperation operation, string idempotencyKey, CancellationToken cancellationToken)
     {
         await using var db = await factory.CreateDbContextAsync(cancellationToken);
@@ -147,7 +147,7 @@ public sealed class CleanupQueueService(
         if (!string.IsNullOrWhiteSpace(search))
         {
             var term = search.Trim();
-            var isId = Guid.TryParse(term, out var parsedId);
+            var isId = long.TryParse(term, out var parsedId);
             query = query.Where(x =>
                 (isId && (x.Id == parsedId || x.ResourceId == parsedId))
                 || (x.ContentKey != null && x.ContentKey.Contains(term))
@@ -197,8 +197,8 @@ public sealed class CleanupQueueService(
                 .Where(x => resourceIds.Contains(x.Id))
                 .ToListAsync(cancellationToken))
             .ToDictionary(x => x.Id);
-        var subjects = new Dictionary<Guid, string>();
-        var senders = new Dictionary<Guid, string>();
+        var subjects = new Dictionary<long, string>();
+        var senders = new Dictionary<long, string>();
         foreach (var message in messageDetails.Values)
         {
             var envelopeSender = CleanLabel(message.Message.EnvelopeFrom, "（未知发件人）", 120);
@@ -249,7 +249,7 @@ public sealed class CleanupQueueService(
         return cleaned.Length <= limit ? cleaned : cleaned[..limit] + "…";
     }
 
-    public async Task RestoreAsync(Guid queueId, string actor, CancellationToken cancellationToken)
+    public async Task RestoreAsync(long queueId, string actor, CancellationToken cancellationToken)
     {
         await using var db = await factory.CreateDbContextAsync(cancellationToken);
         var writeDomains = await db.Domains.IgnoreQueryFilters().AsNoTracking().Select(x => x.Id).ToListAsync(cancellationToken);
@@ -289,7 +289,7 @@ public sealed class CleanupQueueService(
                         mailboxMessage.QuotaReleased = false;
                         db.QuotaLedger.Add(new QuotaLedgerEntry
                         {
-                            IdempotencyKey = $"mailbox-message:restore:{queueId:N}:{mailboxMessage.Id:N}",
+                            IdempotencyKey = $"mailbox-message:restore:{queueId}:{mailboxMessage.Id}",
                             AccountId = mailboxAccounts[mailboxMessage.MailboxId],
                             DomainId = domain.Id,
                             MailboxMessageId = mailboxMessage.Id,
@@ -322,7 +322,7 @@ public sealed class CleanupQueueService(
                         accountMailboxMessage.QuotaReleased = false;
                         db.QuotaLedger.Add(new QuotaLedgerEntry
                         {
-                            IdempotencyKey = $"mailbox-message:restore:{queueId:N}:{accountMailboxMessage.Id:N}",
+                            IdempotencyKey = $"mailbox-message:restore:{queueId}:{accountMailboxMessage.Id}",
                             AccountId = restoredAccount.Id,
                             DomainId = restoredDomain.Id,
                             MailboxMessageId = accountMailboxMessage.Id,
@@ -378,7 +378,7 @@ public sealed class CleanupQueueService(
                     message.QuotaReleased = false;
                     db.QuotaLedger.Add(new QuotaLedgerEntry
                     {
-                        IdempotencyKey = $"mailbox-message:restore:{queueId:N}",
+                        IdempotencyKey = $"mailbox-message:restore:{queueId}",
                         AccountId = account.Id,
                         DomainId = account.DomainId,
                         MailboxMessageId = message.Id,
@@ -407,7 +407,7 @@ public sealed class CleanupQueueService(
             await db.NotifyRoutingCommittedAsync(cancellationToken);
     }
 
-    public async Task PurgeAsync(Guid queueId, string actor, CancellationToken cancellationToken) =>
+    public async Task PurgeAsync(long queueId, string actor, CancellationToken cancellationToken) =>
         await PurgeOneAsync(queueId, force: true, cancellationToken, actor);
 
     public async Task<ScheduledTaskRunResult> PurgeDueAsync(int batchSize, CancellationToken cancellationToken)
@@ -423,7 +423,7 @@ public sealed class CleanupQueueService(
         return new ScheduledTaskRunResult(ids.Count, released);
     }
 
-    private async Task<long> PurgeOneAsync(Guid queueId, bool force, CancellationToken cancellationToken, string? actor = null)
+    private async Task<long> PurgeOneAsync(long queueId, bool force, CancellationToken cancellationToken, string? actor = null)
     {
         var contentKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         long released = 0;
@@ -464,7 +464,7 @@ public sealed class CleanupQueueService(
                                 db.MailboxMessages.Remove(mm);
                                 if (released > 0) db.QuotaLedger.Add(new QuotaLedgerEntry
                                 {
-                                    IdempotencyKey = $"cleanup:{item.Id:N}:{mm.Id:N}",
+                                    IdempotencyKey = $"cleanup:{item.Id}:{mm.Id}",
                                     AccountId = mm.Mailbox.AccountId,
                                     DomainId = mm.Mailbox.Account.DomainId,
                                     MailboxMessageId = mm.Id,
@@ -590,17 +590,10 @@ public sealed class CacheCleanupTaskHandler(
         db.MtaStsPolicyCaches.RemoveRange(expired);
         var srs = await db.SrsAddressMappings.Where(x => x.ExpiresAt < clock.UtcNow).ToListAsync(cancellationToken);
         db.SrsAddressMappings.RemoveRange(srs);
-        var attemptCutoff = clock.UtcNow.AddDays(-30);
-        var expiredAttempts = await db.DeliveryAttempts
-            .Where(x => x.CreatedAt < attemptCutoff)
-            .OrderBy(x => x.CreatedAt)
-            .Take(task.BatchSize)
-            .ToListAsync(cancellationToken);
-        db.DeliveryAttempts.RemoveRange(expiredAttempts);
         await db.SaveChangesAsync(cancellationToken);
         var removed = 0;
         var temporary = Path.Combine(Path.GetFullPath(storage.Value.RootPath), ".tmp");
-        if (Directory.Exists(temporary))
+        if (storage.Value.Provider.Equals("File", StringComparison.OrdinalIgnoreCase) && Directory.Exists(temporary))
         {
             var cutoff = clock.UtcNow.AddHours(-Math.Max(1, maintenance.Value.TemporaryFileRetentionHours)).UtcDateTime;
             foreach (var file in Directory.EnumerateFiles(temporary))
@@ -617,36 +610,39 @@ public sealed class OrphanStorageTaskHandler(
     IDbContextFactory<MailDbContext> factory,
     IOptions<StorageOptions> storage,
     IOptions<MaintenanceOptions> maintenance,
-    IClock clock) : IScheduledTaskHandler
+    IClock clock,
+    IMessageStorageMaintenance? backend = null) : IScheduledTaskHandler
 {
     public string Type => "storage.orphan-scan";
     public async Task<ScheduledTaskRunResult> RunAsync(ScheduledTask task, CancellationToken cancellationToken)
     {
-        var root = Path.GetFullPath(storage.Value.RootPath);
-        if (!Directory.Exists(root)) return new ScheduledTaskRunResult(0, 0);
+        var store = backend ?? new FileMessageContentStore(storage, factory);
         await using var db = await factory.CreateDbContextAsync(cancellationToken);
-        var referenced = (await db.Messages.AsNoTracking().Select(x => x.ContentKey).Distinct().ToListAsync(cancellationToken))
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var cutoff = clock.UtcNow.AddDays(-Math.Max(1, maintenance.Value.OrphanFileRetentionDays)).UtcDateTime;
+        var scheduled = await db.ScheduledTasks.SingleOrDefaultAsync(x => x.Id == task.Id, cancellationToken);
+        var cursor = JsonSerializer.Deserialize<StorageScanCursor>((scheduled ?? task).SettingsJson) ?? new(null);
+        var page = await store.ListAsync(cursor.ContinuationToken, Math.Clamp(task.BatchSize, 1, 1000), cancellationToken);
+        var cutoff = clock.UtcNow.AddDays(-Math.Max(1, maintenance.Value.OrphanFileRetentionDays));
         var count = 0;
         long released = 0;
-        foreach (var path in Directory.EnumerateFiles(root, "*.eml", SearchOption.AllDirectories))
+        foreach (var item in page.Items)
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            var key = Path.GetFileNameWithoutExtension(path);
-            if (referenced.Contains(key) || File.GetLastWriteTimeUtc(path) > cutoff) continue;
-            released += new FileInfo(path).Length;
-            File.Delete(path);
-            count++;
-            if (count >= Math.Clamp(task.BatchSize, 1, 1000)) break;
+            if (item.LastModified <= cutoff && await store.TryDeleteUnreferencedAsync(item.Key, cutoff, cancellationToken))
+            { count++; released += item.Size; }
+        }
+        if (scheduled is not null)
+        {
+            scheduled.SettingsJson = JsonSerializer.Serialize(new StorageScanCursor(page.ContinuationToken));
+            await db.SaveChangesAsync(cancellationToken);
         }
         return new ScheduledTaskRunResult(count, released);
     }
+    private sealed record StorageScanCursor(string? ContinuationToken);
 }
 
 public sealed class StorageIntegrityTaskHandler(
     IDbContextFactory<MailDbContext> factory,
-    IOptions<StorageOptions> storage) : IScheduledTaskHandler
+    IOptions<StorageOptions> storage,
+    IMessageStorageMaintenance? backend = null) : IScheduledTaskHandler
 {
     private sealed record ScanProgress(string? LastKey = null, long Scanned = 0,
         long CompletedCycles = 0, DateTimeOffset? LastCompletedAt = null);
@@ -654,7 +650,7 @@ public sealed class StorageIntegrityTaskHandler(
     public async Task<ScheduledTaskRunResult> RunAsync(ScheduledTask task, CancellationToken cancellationToken)
     {
         await using var db = await factory.CreateDbContextAsync(cancellationToken);
-        var root = Path.GetFullPath(storage.Value.RootPath);
+        var store = backend ?? new FileMessageContentStore(storage, factory);
         var scheduled = await db.ScheduledTasks.SingleAsync(x => x.Id == task.Id, cancellationToken);
         var progress = JsonSerializer.Deserialize<ScanProgress>(scheduled.SettingsJson) ?? new ScanProgress();
         var batchSize = Math.Clamp(task.BatchSize, 1, 10000);
@@ -663,8 +659,10 @@ public sealed class StorageIntegrityTaskHandler(
             WHERE ContentKey > {progress.LastKey ?? string.Empty}
             ORDER BY ContentKey LIMIT {batchSize}
             """).ToListAsync(cancellationToken);
-        var missing = keys.Where(key => !File.Exists(Path.Combine(root, key[..2], key[2..4], $"{key}.eml"))).ToArray();
-        if (missing.Length > 0)
+        var missing = new List<string>();
+        foreach (var key in keys)
+            if (!await store.ExistsAsync(key, cancellationToken)) missing.Add(key);
+        if (missing.Count > 0)
             db.AuditRecords.Add(new AuditRecord
             {
                 Actor = "system", Action = "storage.integrity.missing-content", Resource = "storage:messages",
@@ -677,7 +675,7 @@ public sealed class StorageIntegrityTaskHandler(
         scheduled.SettingsJson = JsonSerializer.Serialize(next);
         await db.SaveChangesAsync(cancellationToken);
         return new ScheduledTaskRunResult(keys.Count, 0,
-            $"Scanned {keys.Count} content keys; missing {missing.Length}; "
+            $"Scanned {keys.Count} content keys; missing {missing.Count}; "
             + (finished ? $"cycle {next.CompletedCycles} complete." : $"cycle progress {next.Scanned}."));
     }
 }
@@ -728,10 +726,10 @@ public sealed class TaskExecutionService(
         }
     }
 
-    public async Task<Guid> RunNowAsync(Guid taskId, CancellationToken cancellationToken)
+    public async Task<long> RunNowAsync(long taskId, CancellationToken cancellationToken)
         => await RunNowAsync(taskId, cancellationToken, null);
 
-    public async Task<Guid> RunNowAsync(Guid taskId, CancellationToken cancellationToken, string? actor)
+    public async Task<long> RunNowAsync(long taskId, CancellationToken cancellationToken, string? actor)
     {
         await using var db = await factory.CreateDbContextAsync(cancellationToken);
         var writeDomains = await db.Domains.IgnoreQueryFilters().AsNoTracking().Select(x => x.Id).ToListAsync(cancellationToken);
@@ -744,7 +742,7 @@ public sealed class TaskExecutionService(
         if (lease is null) { lease = new TaskLease { ScheduledTaskId = taskId, Owner = Owner, ExpiresAt = clock.UtcNow }; db.TaskLeases.Add(lease); }
         lease.Owner = Owner; lease.ExpiresAt = clock.UtcNow.AddSeconds(Math.Clamp(task.TimeoutSeconds, 10, 86400));
         task.Status = ScheduledTaskStatus.Running; task.LastRunAt = clock.UtcNow;
-        var execution = new TaskExecution { ScheduledTaskId = taskId };
+        var execution = new TaskExecution { ScheduledTaskId = taskId, TaskName = task.Name, TaskType = task.Type };
         db.TaskExecutions.Add(execution);
         AuditRecord? manualAudit = null;
         if (actor is not null)
@@ -799,12 +797,12 @@ public sealed class TaskExecutionService(
     public async Task<IReadOnlyList<TaskExecution>> ListExecutionsAsync(int take, CancellationToken cancellationToken)
     {
         await using var db = await factory.CreateDbContextAsync(cancellationToken);
-        return await db.TaskExecutions.AsNoTracking().Include(x => x.ScheduledTask)
+        return await db.TaskExecutions.AsNoTracking()
             .OrderByDescending(x => x.StartedAt).Take(Math.Clamp(take, 1, 500)).ToListAsync(cancellationToken);
     }
 
     public async Task<(IReadOnlyList<TaskExecution> Items, int TotalCount)> SearchExecutionsAsync(
-        Guid? taskId, TaskExecutionStatus? status, DateTimeOffset? from, DateTimeOffset? to,
+        long? taskId, TaskExecutionStatus? status, DateTimeOffset? from, DateTimeOffset? to,
         int page, int pageSize, CancellationToken cancellationToken)
     {
         await using var db = await factory.CreateDbContextAsync(cancellationToken);
@@ -820,13 +818,13 @@ public sealed class TaskExecutionService(
         return (items, totalCount);
     }
 
-    public async Task<TaskExecution?> GetExecutionAsync(Guid id, CancellationToken cancellationToken)
+    public async Task<TaskExecution?> GetExecutionAsync(long id, CancellationToken cancellationToken)
     {
         await using var db = await factory.CreateDbContextAsync(cancellationToken);
         return await db.TaskExecutions.AsNoTracking().SingleOrDefaultAsync(x => x.Id == id, cancellationToken);
     }
 
-    public async Task UpdateAsync(Guid taskId, bool enabled, int intervalMinutes, int timeoutSeconds, int batchSize,
+    public async Task UpdateAsync(long taskId, bool enabled, int intervalMinutes, int timeoutSeconds, int batchSize,
         CancellationToken cancellationToken, string? actor = null)
     {
         await using var db = await factory.CreateDbContextAsync(cancellationToken);

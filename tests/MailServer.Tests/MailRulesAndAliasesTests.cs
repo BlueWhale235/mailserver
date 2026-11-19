@@ -42,7 +42,7 @@ public sealed class MailRulesAndAliasesTests
         await using var environment = await TestEnvironment.CreateAsync();
         var factory = environment.Services.GetRequiredService<IDbContextFactory<MailDbContext>>();
         var rules = environment.Services.GetRequiredService<MailRuleService>();
-        Guid domainId;
+        long domainId;
         await using (var db = await factory.CreateDbContextAsync())
         {
             var domain = new MailDomain { Name = "example.com" };
@@ -95,7 +95,7 @@ public sealed class MailRulesAndAliasesTests
     {
         await using var environment = await TestEnvironment.CreateAsync();
         var factory = environment.Services.GetRequiredService<IDbContextFactory<MailDbContext>>();
-        Guid domainId;
+        long domainId;
         await using (var db = await factory.CreateDbContextAsync())
         {
             var domain = new MailDomain { Name = "candidate.test" };
@@ -164,7 +164,7 @@ public sealed class MailRulesAndAliasesTests
         await using var environment = await TestEnvironment.CreateAsync();
         var factory = environment.Services.GetRequiredService<IDbContextFactory<MailDbContext>>();
         var rules = environment.Services.GetRequiredService<MailRuleService>();
-        Guid domainId;
+        long domainId;
         await using (var db = await factory.CreateDbContextAsync())
         {
             var domain = new MailDomain { Name = "time-condition.test" };
@@ -192,7 +192,7 @@ public sealed class MailRulesAndAliasesTests
         await using var environment = await TestEnvironment.CreateAsync();
         var factory = environment.Services.GetRequiredService<IDbContextFactory<MailDbContext>>();
         var rules = environment.Services.GetRequiredService<MailRuleService>();
-        Guid domainId;
+        long domainId;
         await using (var db = await factory.CreateDbContextAsync())
         {
             var domain = new MailDomain { Name = "cc-condition.test" };
@@ -221,7 +221,7 @@ public sealed class MailRulesAndAliasesTests
         await using var environment = await TestEnvironment.CreateAsync();
         var factory = environment.Services.GetRequiredService<IDbContextFactory<MailDbContext>>();
         var rules = environment.Services.GetRequiredService<MailRuleService>();
-        Guid domainId;
+        long domainId;
         await using (var db = await factory.CreateDbContextAsync())
         {
             var domain = new MailDomain { Name = "lazy.test" };
@@ -251,7 +251,7 @@ public sealed class MailRulesAndAliasesTests
         await using var environment = await TestEnvironment.CreateAsync();
         var factory = environment.Services.GetRequiredService<IDbContextFactory<MailDbContext>>();
         var rules = environment.Services.GetRequiredService<MailRuleService>();
-        Guid domainId;
+        long domainId;
         await using (var db = await factory.CreateDbContextAsync())
         {
             var domain = new MailDomain { Name = "scope.test" };
@@ -281,7 +281,7 @@ public sealed class MailRulesAndAliasesTests
             { MaximumEntryBytes = 1024, SizeLimitBytes = 4096 }), NullLogger<ConfigurationSnapshotCache>.Instance);
         var rules = new MailRuleService(factory, NullLogger<MailRuleService>.Instance, cache,
             environment.Services.GetRequiredService<ConfigurationVersionService>());
-        Guid domainId;
+        long domainId;
         await using (var db = await factory.CreateDbContextAsync())
         {
             var domain = new MailDomain { Name = "oversized.test" };
@@ -321,7 +321,7 @@ public sealed class MailRulesAndAliasesTests
             await db.SaveChangesAsync();
         }
 
-        var ids = new List<Guid>();
+        var ids = new List<long>();
         for (var page = 1; page <= 3; page++)
         {
             var result = await administration.SearchFirewallRulesAsync(null, null, page, 20, CancellationToken.None);
@@ -364,7 +364,7 @@ public sealed class MailRulesAndAliasesTests
         await using var environment = await TestEnvironment.CreateAsync();
         var factory = environment.Services.GetRequiredService<IDbContextFactory<MailDbContext>>();
         var administration = environment.Services.GetRequiredService<AdminApplicationService>();
-        Guid domainId;
+        long domainId;
         await using (var db = await factory.CreateDbContextAsync())
         {
             var domain = new MailDomain { Name = "search.test" };
@@ -388,8 +388,8 @@ public sealed class MailRulesAndAliasesTests
         Assert.Equal("alias44@search.test", Assert.Single(targetResult.Items).Source);
         Assert.Empty((await administration.SearchDomainAccountsAsync(domainId, "user44@other.test", null, 1, 20, CancellationToken.None)).Items);
 
-        var accountIds = new List<Guid>();
-        var aliasIds = new List<Guid>();
+        var accountIds = new List<long>();
+        var aliasIds = new List<long>();
         for (var page = 1; page <= 3; page++)
         {
             var accounts = await administration.SearchDomainAccountsAsync(domainId, null, null, page, 20, CancellationToken.None);
@@ -409,14 +409,14 @@ public sealed class MailRulesAndAliasesTests
     public async Task DisablingRuleDoesNotTriggerMultipleCollectionQueryWarning()
     {
         SqliteNative.Initialize();
-        var path = Path.Combine(Path.GetTempPath(), $"mailserver-rule-warning-{Guid.NewGuid():N}.db");
+        var path = Path.Combine(Path.GetTempPath(), $"mailserver-rule-warning-{MailServer.Domain.SnowflakeIds.NewId()}.db");
         try
         {
             var options = new DbContextOptionsBuilder<MailDbContext>()
                 .UseSqlite($"Data Source={path}")
                 .ConfigureWarnings(warnings => warnings.Throw(RelationalEventId.MultipleCollectionIncludeWarning))
                 .Options;
-            var factory = new PooledDbContextFactory<MailDbContext>(options);
+            var factory = new TestMailDbContextFactory(options);
             await using (var db = await factory.CreateDbContextAsync())
             {
                 await db.Database.EnsureCreatedAsync();
@@ -427,7 +427,7 @@ public sealed class MailRulesAndAliasesTests
             var service = new MailRuleService(
                 factory,
                 Microsoft.Extensions.Logging.Abstractions.NullLogger<MailRuleService>.Instance);
-            Guid domainId;
+            long domainId;
             await using (var db = await factory.CreateDbContextAsync())
                 domainId = await db.Domains.Select(x => x.Id).SingleAsync();
             var input = new MailRuleInput(
@@ -462,9 +462,9 @@ public sealed class MailRulesAndAliasesTests
         await using var environment = await TestEnvironment.CreateAsync();
         var factory = environment.Services.GetRequiredService<IDbContextFactory<MailDbContext>>();
         var administration = environment.Services.GetRequiredService<AdminApplicationService>();
-        Guid domainId;
-        Guid otherDomainId;
-        Guid aliceId;
+        long domainId;
+        long otherDomainId;
+        long aliceId;
         await using (var db = await factory.CreateDbContextAsync())
         {
             var domain = new MailDomain { Name = "example.com" };
@@ -530,8 +530,8 @@ public sealed class MailRulesAndAliasesTests
         await using var environment = await TestEnvironment.CreateAsync();
         var factory = environment.Services.GetRequiredService<IDbContextFactory<MailDbContext>>();
         var administration = environment.Services.GetRequiredService<AdminApplicationService>();
-        Guid domainId;
-        Guid accountId;
+        long domainId;
+        long accountId;
         await using (var db = await factory.CreateDbContextAsync())
         {
             var domain = new MailDomain { Name = "example.com" };
@@ -580,7 +580,7 @@ public sealed class MailRulesAndAliasesTests
     {
         await using var environment = await TestEnvironment.CreateAsync();
         var factory = environment.Services.GetRequiredService<IDbContextFactory<MailDbContext>>();
-        Guid domainId;
+        long domainId;
         await using (var db = await factory.CreateDbContextAsync())
         {
             var domain = new MailDomain { Name = "example.com" };
@@ -654,8 +654,8 @@ public sealed class MailRulesAndAliasesTests
         var factory = environment.Services.GetRequiredService<IDbContextFactory<MailDbContext>>();
         var administration = environment.Services.GetRequiredService<AdminApplicationService>();
         var ruleService = environment.Services.GetRequiredService<MailRuleService>();
-        Guid domainId;
-        Guid aliceId;
+        long domainId;
+        long aliceId;
         await using (var db = await factory.CreateDbContextAsync())
         {
             var domain = new MailDomain { Name = "example.com" };
@@ -710,7 +710,7 @@ public sealed class MailRulesAndAliasesTests
         await using var environment = await TestEnvironment.CreateAsync();
         var factory = environment.Services.GetRequiredService<IDbContextFactory<MailDbContext>>();
         var rules = environment.Services.GetRequiredService<MailRuleService>();
-        Guid domainId;
+        long domainId;
         await using (var db = await factory.CreateDbContextAsync())
         {
             var domain = new MailDomain { Name = "example.com" };
@@ -776,7 +776,7 @@ public sealed class MailRulesAndAliasesTests
         await using var environment = await TestEnvironment.CreateAsync();
         var factory = environment.Services.GetRequiredService<IDbContextFactory<MailDbContext>>();
         var rules = environment.Services.GetRequiredService<MailRuleService>();
-        Guid domainId;
+        long domainId;
         await using (var db = await factory.CreateDbContextAsync())
         {
             var domain = new MailDomain { Name = "example.com" };
@@ -817,8 +817,8 @@ public sealed class MailRulesAndAliasesTests
         await using var environment = await TestEnvironment.CreateAsync();
         var factory = environment.Services.GetRequiredService<IDbContextFactory<MailDbContext>>();
         var rules = environment.Services.GetRequiredService<MailRuleService>();
-        Guid domainId;
-        Guid accountId;
+        long domainId;
+        long accountId;
         await using (var db = await factory.CreateDbContextAsync())
         {
             var domain = new MailDomain { Name = "example.com" };
@@ -894,7 +894,7 @@ public sealed class MailRulesAndAliasesTests
         await using var environment = await TestEnvironment.CreateAsync();
         var factory = environment.Services.GetRequiredService<IDbContextFactory<MailDbContext>>();
         var rules = environment.Services.GetRequiredService<MailRuleService>();
-        Guid domainId;
+        long domainId;
         await using (var db = await factory.CreateDbContextAsync())
         {
             var domain = new MailDomain { Name = "actions.test" };
@@ -978,7 +978,7 @@ public sealed class MailRulesAndAliasesTests
         var factory = environment.Services.GetRequiredService<IDbContextFactory<MailDbContext>>();
         var rules = environment.Services.GetRequiredService<MailRuleService>();
         var srs = environment.Services.GetRequiredService<SrsService>();
-        Guid domainId;
+        long domainId;
         await using (var db = await factory.CreateDbContextAsync())
         {
             var domain = new MailDomain { Name = "example.com" };
@@ -1086,8 +1086,8 @@ public sealed class MailRulesAndAliasesTests
         await using var environment = await TestEnvironment.CreateAsync();
         var factory = environment.Services.GetRequiredService<IDbContextFactory<MailDbContext>>();
         var ruleService = environment.Services.GetRequiredService<MailRuleService>();
-        Guid domainId;
-        Guid accountId;
+        long domainId;
+        long accountId;
         await using (var db = await factory.CreateDbContextAsync())
         {
             var domain = new MailDomain { Name = "example.com" };
@@ -1168,8 +1168,8 @@ public sealed class MailRulesAndAliasesTests
         await using var environment = await TestEnvironment.CreateAsync();
         var factory = environment.Services.GetRequiredService<IDbContextFactory<MailDbContext>>();
         var folders = environment.Services.GetRequiredService<MailboxFolderManagementService>();
-        Guid domainId;
-        Guid inboxId;
+        long domainId;
+        long inboxId;
         var firstDate = DateTimeOffset.UtcNow.AddDays(-2);
         await using (var db = await factory.CreateDbContextAsync())
         {
@@ -1219,7 +1219,7 @@ public sealed class MailRulesAndAliasesTests
                 });
             db.SystemSettings.Add(new SystemSetting
             {
-                Key = $"mailbox-defaults:{domain.Id:N}:folders",
+                Key = $"mailbox-defaults:{domain.Id}:folders",
                 Value = "[\"INBOX\",\"Sent\",\"Drafts\",\"Trash\",\"Junk\",\"Archives\",\"Projects\",\"Projects/2026\",\"Keep\"]"
             });
             await db.SaveChangesAsync();
@@ -1242,7 +1242,7 @@ public sealed class MailRulesAndAliasesTests
             var rule = await pending.MailRules.Include(x => x.Actions).SingleAsync(x => x.DomainId == domainId);
             Assert.Equal("INBOX", rule.TargetMailboxName);
             Assert.Equal("[\"INBOX\",\"Keep\"]", rule.Actions.Single().ValuesJson);
-            var configuration = await pending.SystemSettings.SingleAsync(x => x.Key == $"mailbox-defaults:{domainId:N}:folders");
+            var configuration = await pending.SystemSettings.SingleAsync(x => x.Key == $"mailbox-defaults:{domainId}:folders");
             Assert.DoesNotContain("Projects", configuration.Value);
         }
 
@@ -1280,8 +1280,8 @@ public sealed class MailRulesAndAliasesTests
         var contentStore = environment.Services.GetRequiredService<IMessageContentStore>();
         await using var raw = new MemoryStream(Encoding.UTF8.GetBytes(RawMessage("shared", "Shared", "body")));
         var content = await contentStore.SaveAsync(raw, CancellationToken.None);
-        Guid firstDomainId;
-        Guid secondDomainId;
+        long firstDomainId;
+        long secondDomainId;
         await using (var db = await factory.CreateDbContextAsync())
         {
             var first = new MailDomain { Name = "alpha.test" };
@@ -1398,11 +1398,11 @@ public sealed class MailRulesAndAliasesTests
     [Fact]
     public async Task RecipientRoutingCachesPositiveAndNegativeResultsAndInvalidatesOnCommit()
     {
-        await using var environment = await TestEnvironment.CreateAsync();
+        await using var environment = await TestEnvironment.CreateAsync(role: "smtp");
         var factory = environment.Services.GetRequiredService<IDbContextFactory<MailDbContext>>();
         var inbound = environment.Services.GetRequiredService<IInboundMessageService>();
         var cache = environment.Services.GetRequiredService<ConfigurationSnapshotCache>();
-        cache.Options.Enabled = true; // Exercise the SMTP runtime path; API-only hosts deliberately disable caching.
+        Assert.True(cache.Options.Enabled);
         Assert.False(await inbound.IsLocalRecipientAsync("alice@example.com", CancellationToken.None));
         var misses = cache.Misses;
         Assert.False(await inbound.IsLocalRecipientAsync("alice@example.com", CancellationToken.None));
@@ -1446,10 +1446,9 @@ public sealed class MailRulesAndAliasesTests
     [Fact]
     public async Task RecipientRoutingTracksAliasCreateTransferAndDisable()
     {
-        await using var environment = await TestEnvironment.CreateAsync();
+        await using var environment = await TestEnvironment.CreateAsync(role: "smtp");
         var factory = environment.Services.GetRequiredService<IDbContextFactory<MailDbContext>>();
         var inbound = environment.Services.GetRequiredService<IInboundMessageService>();
-        environment.Services.GetRequiredService<ConfigurationSnapshotCache>().Options.Enabled = true;
         MailAccount first;
         MailAccount second;
         await using (var db = await factory.CreateDbContextAsync())
@@ -1497,10 +1496,9 @@ public sealed class MailRulesAndAliasesTests
     [Fact]
     public async Task StaleRecipientRouteCannotDeliverToDisabledAccount()
     {
-        await using var environment = await TestEnvironment.CreateAsync();
+        await using var environment = await TestEnvironment.CreateAsync(role: "smtp");
         var factory = environment.Services.GetRequiredService<IDbContextFactory<MailDbContext>>();
         var inbound = environment.Services.GetRequiredService<IInboundMessageService>();
-        environment.Services.GetRequiredService<ConfigurationSnapshotCache>().Options.Enabled = true;
         await using (var db = await factory.CreateDbContextAsync())
         {
             var domain = new MailDomain { Name = "example.com" };
@@ -1528,9 +1526,10 @@ public sealed class MailRulesAndAliasesTests
 
         public static async Task<TestEnvironment> CreateAsync(
             bool migrate = true,
-            string? srsSecret = "0123456789abcdef0123456789abcdef")
+            string? srsSecret = "0123456789abcdef0123456789abcdef",
+            string role = "api")
         {
-            var root = Path.Combine(Path.GetTempPath(), $"mailserver-rules-{Guid.NewGuid():N}");
+            var root = Path.Combine(Path.GetTempPath(), $"mailserver-rules-{MailServer.Domain.SnowflakeIds.NewId()}");
             Directory.CreateDirectory(root);
             var settings = new Dictionary<string, string?>
             {
@@ -1552,7 +1551,7 @@ public sealed class MailRulesAndAliasesTests
             var collection = new ServiceCollection();
             collection.AddLogging();
             collection.AddSingleton<IConfiguration>(configuration);
-            collection.AddMailServerInfrastructure(configuration);
+            collection.AddMailServerInfrastructure(configuration, role);
             var services = collection.BuildServiceProvider();
             if (migrate)
             {

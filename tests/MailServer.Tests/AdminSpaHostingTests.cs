@@ -100,7 +100,7 @@ public sealed class AdminSpaHostingTests
 
         public static AdminBundle Create(bool includeAssets)
         {
-            var webRoot = Path.Combine(Path.GetTempPath(), $"mailserver-admin-bundle-{Guid.NewGuid():N}", "wwwroot");
+            var webRoot = Path.Combine(Path.GetTempPath(), $"mailserver-admin-bundle-{MailServer.Domain.SnowflakeIds.NewId()}", "wwwroot");
             var adminRoot = Path.Combine(webRoot, "admin");
             var assetsRoot = Path.Combine(adminRoot, "assets");
             Directory.CreateDirectory(assetsRoot);

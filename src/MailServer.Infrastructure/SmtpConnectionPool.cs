@@ -7,7 +7,8 @@ namespace MailServer.Infrastructure;
 public sealed class SmtpConnectionPool(IOptions<SmtpConnectionReuseOptions> options) : IDisposable
 {
     private readonly object _gate = new();
-    private readonly List<Entry> _idle = [];
+    private readonly Dictionary<string, Queue<Entry>> _idle = new(StringComparer.Ordinal);
+    private int _idleCount;
     private Timer? _expiryTimer;
     private bool _disposed;
 
@@ -25,40 +26,41 @@ public sealed class SmtpConnectionPool(IOptions<SmtpConnectionReuseOptions> opti
 
     internal Lease Rent(string key, bool allowReuse)
     {
+        Sweep();
         lock (_gate)
         {
-            _expiryTimer ??= CreateTimer();
-            SweepLocked();
+            if (!_disposed) _expiryTimer ??= CreateTimer();
             if (!_disposed && allowReuse && options.Value.Enabled)
             {
-                var index = _idle.FindIndex(entry => entry.Key == key);
-                if (index >= 0)
+                if (_idle.TryGetValue(key, out var queue) && queue.TryDequeue(out var entry))
                 {
-                    var entry = _idle[index];
-                    _idle.RemoveAt(index);
+                    _idleCount--;
+                    if (queue.Count == 0) _idle.Remove(key);
                     return new Lease(this, entry, true);
                 }
             }
             return new Lease(allowReuse && options.Value.Enabled && !_disposed ? this : null,
-                new Entry(key, new SmtpClient(), _time.GetUtcNow()), false);
+                new Entry(key, new RecipientSmtpClient(), _time.GetUtcNow()), false);
         }
     }
 
     private void Return(Entry entry)
     {
+        Sweep();
         lock (_gate)
         {
-            SweepLocked();
-            if (_disposed || !options.Value.Enabled || !Usable(entry)
-                || _idle.Count >= Math.Clamp(options.Value.MaximumIdleConnections, 0, 16)
-                || _idle.Any(x => x.Key == entry.Key))
+            if (!_disposed && options.Value.Enabled && Usable(entry)
+                && _idleCount < Math.Clamp(options.Value.MaximumIdleConnections, 0, 4096)
+                && (!_idle.TryGetValue(entry.Key, out var existing) || existing.Count < Math.Clamp(options.Value.MaximumIdleConnectionsPerKey, 1, 64)))
             {
-                entry.Client.Dispose();
+                entry.LastUsed = _time.GetUtcNow();
+                if (!_idle.TryGetValue(entry.Key, out var queue)) _idle.Add(entry.Key, queue = new());
+                queue.Enqueue(entry);
+                _idleCount++;
                 return;
             }
-            entry.LastUsed = _time.GetUtcNow();
-            _idle.Add(entry);
         }
+        entry.Client.Dispose();
     }
 
     private bool Usable(Entry entry) => entry.Client.IsConnected
@@ -67,30 +69,41 @@ public sealed class SmtpConnectionPool(IOptions<SmtpConnectionReuseOptions> opti
 
     private void Sweep()
     {
-        lock (_gate) SweepLocked();
+        List<Entry> expired;
+        lock (_gate) expired = SweepLocked();
+        foreach (var entry in expired) entry.Client.Dispose();
     }
 
-    private void SweepLocked()
+    private List<Entry> SweepLocked()
     {
-        for (var index = _idle.Count - 1; index >= 0; index--)
+        List<Entry> expired = [];
+        foreach (var pair in _idle.ToArray())
         {
-            var entry = _idle[index];
-            if (Usable(entry) && _time.GetUtcNow() - entry.LastUsed
-                < TimeSpan.FromSeconds(Math.Clamp(options.Value.IdleSeconds, 1, 30))) continue;
-            _idle.RemoveAt(index);
-            entry.Client.Dispose();
+            var count = pair.Value.Count;
+            for (var index = 0; index < count; index++)
+            {
+                var entry = pair.Value.Dequeue();
+                if (Usable(entry) && _time.GetUtcNow() - entry.LastUsed
+                    < TimeSpan.FromSeconds(Math.Clamp(options.Value.IdleSeconds, 1, 30))) pair.Value.Enqueue(entry);
+                else { expired.Add(entry); _idleCount--; }
+            }
+            if (pair.Value.Count == 0) _idle.Remove(pair.Key);
         }
+        return expired;
     }
 
     public void Dispose()
     {
+        Entry[] idle;
         lock (_gate)
         {
             _disposed = true;
             _expiryTimer?.Dispose();
-            foreach (var entry in _idle) entry.Client.Dispose();
+            idle = _idle.Values.SelectMany(x => x).ToArray();
             _idle.Clear();
+            _idleCount = 0;
         }
+        foreach (var entry in idle) entry.Client.Dispose();
     }
 
     internal sealed class Entry(string key, SmtpClient client, DateTimeOffset created)

@@ -433,7 +433,7 @@ public sealed class RelayNodeService
         var result = await RelayWire.ReadAsync<RelayPairResult>(tls, token);
         if (!result.Accepted) throw new AuthenticationException("Pairing password was rejected or expired.");
         Directory.CreateDirectory(Path.GetDirectoryName(_bindingPath)!);
-        var temp = _bindingPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        var temp = _bindingPath + "." + System.Guid.NewGuid().ToString() + ".tmp";
         await File.WriteAllTextAsync(temp, JsonSerializer.Serialize(new RelayNodeBinding(fingerprint, host, port)), token);
         SecurityAssetFiles.RestrictFile(temp);
         File.Move(temp, _bindingPath, overwrite: true);

@@ -14,7 +14,7 @@ public static class AdminPrincipalValidation
         IServiceProvider services,
         CancellationToken cancellationToken)
     {
-        if (!Guid.TryParse(principal?.FindFirstValue(ClaimTypes.NameIdentifier), out var adminId))
+        if (!long.TryParse(principal?.FindFirstValue(ClaimTypes.NameIdentifier), out var adminId))
             return false;
         var factory = services.GetRequiredService<IDbContextFactory<MailDbContext>>();
         await using var db = await factory.CreateDbContextAsync(cancellationToken);

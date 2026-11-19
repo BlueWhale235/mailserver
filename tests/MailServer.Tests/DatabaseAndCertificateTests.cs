@@ -24,7 +24,7 @@ public sealed class DatabaseAndCertificateTests
     [Fact]
     public async Task RecycleBinRestoresMovedAndExpungedMailOnSqlite()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-recycle-mail-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-recycle-mail-{MailServer.Domain.SnowflakeIds.NewId()}");
         Directory.CreateDirectory(root);
         try
         {
@@ -41,9 +41,9 @@ public sealed class DatabaseAndCertificateTests
             collection.AddMailServerInfrastructure(configuration);
             await using var services = collection.BuildServiceProvider();
             var factory = services.GetRequiredService<IDbContextFactory<MailDbContext>>();
-            Guid inboxId;
-            Guid trashId;
-            Guid accountId;
+            long inboxId;
+            long trashId;
+            long accountId;
             await using (var db = await factory.CreateDbContextAsync())
             {
                 await db.Database.MigrateAsync();
@@ -174,8 +174,8 @@ public sealed class DatabaseAndCertificateTests
                 Assert.Equal(24, (await db.Domains.SingleAsync()).UsedBytes);
             }
 
-            Guid legacyQueueId;
-            Guid legacyMessageId;
+            long legacyQueueId;
+            long legacyMessageId;
             await using (var db = await factory.CreateDbContextAsync())
             {
                 var now = DateTimeOffset.UtcNow;
@@ -231,7 +231,7 @@ public sealed class DatabaseAndCertificateTests
     [Fact]
     public async Task RecycleBinSearchPagesAndFiltersDeletedRecordsOnSqlite()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-recycle-search-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-recycle-search-{MailServer.Domain.SnowflakeIds.NewId()}");
         Directory.CreateDirectory(root);
         try
         {
@@ -249,10 +249,10 @@ public sealed class DatabaseAndCertificateTests
             await using var services = collection.BuildServiceProvider();
             var factory = services.GetRequiredService<IDbContextFactory<MailDbContext>>();
             var now = DateTimeOffset.UtcNow;
-            Guid expiredQueueId;
-            Guid accountQueueId;
-            Guid processingQueueId;
-            Guid manualPurgeQueueId;
+            long expiredQueueId;
+            long accountQueueId;
+            long processingQueueId;
+            long manualPurgeQueueId;
             await using (var db = await factory.CreateDbContextAsync())
             {
                 await db.Database.MigrateAsync();
@@ -303,11 +303,12 @@ public sealed class DatabaseAndCertificateTests
             await Assert.ThrowsAsync<RecycleBinConflictException>(() => recycle.RestoreAsync(expiredQueueId, "tester", CancellationToken.None));
             await Assert.ThrowsAsync<RecycleBinConflictException>(() => recycle.RestoreAsync(accountQueueId, "tester", CancellationToken.None));
             await Assert.ThrowsAsync<RecycleBinConflictException>(() => recycle.PurgeAsync(processingQueueId, "tester", CancellationToken.None));
-            await Assert.ThrowsAsync<KeyNotFoundException>(() => recycle.RestoreAsync(Guid.NewGuid(), "tester", CancellationToken.None));
+            await Assert.ThrowsAsync<KeyNotFoundException>(() => recycle.RestoreAsync(MailServer.Domain.SnowflakeIds.NewId(), "tester", CancellationToken.None));
             var contentDirectory = Path.Combine(root, "messages", "aa", "aa");
             Directory.CreateDirectory(contentDirectory);
             var contentPath = Path.Combine(contentDirectory, $"{new string('a', 64)}.eml");
             await File.WriteAllTextAsync(contentPath, "isolated test content");
+            File.SetLastWriteTimeUtc(contentPath, DateTime.UtcNow.AddMinutes(-6));
             await recycle.PurgeAsync(manualPurgeQueueId, "tester", CancellationToken.None);
             Assert.False(File.Exists(contentPath));
             await using (var db = await factory.CreateDbContextAsync())
@@ -327,7 +328,7 @@ public sealed class DatabaseAndCertificateTests
     [Fact]
     public async Task TaskExecutionSearchPagesFiltersAndRejectsActiveLease()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-task-search-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-task-search-{MailServer.Domain.SnowflakeIds.NewId()}");
         Directory.CreateDirectory(root);
         try
         {
@@ -347,7 +348,7 @@ public sealed class DatabaseAndCertificateTests
             var now = DateTimeOffset.UtcNow;
             var first = new ScheduledTask { Type = "test.first", Name = "First" };
             var second = new ScheduledTask { Type = "test.second", Name = "Second" };
-            Guid detailId;
+            long detailId;
             await using (var db = await factory.CreateDbContextAsync())
             {
                 await db.Database.MigrateAsync();
@@ -377,7 +378,7 @@ public sealed class DatabaseAndCertificateTests
             var secondOnly = await tasks.SearchExecutionsAsync(second.Id, null, now.AddHours(-1), now, 1, 20, CancellationToken.None);
             Assert.Equal(5, secondOnly.TotalCount);
             Assert.NotNull(await tasks.GetExecutionAsync(detailId, CancellationToken.None));
-            Assert.Null(await tasks.GetExecutionAsync(Guid.NewGuid(), CancellationToken.None));
+            Assert.Null(await tasks.GetExecutionAsync(MailServer.Domain.SnowflakeIds.NewId(), CancellationToken.None));
             await Assert.ThrowsAsync<TaskBusyException>(() => tasks.UpdateAsync(first.Id, true, 60, 600, 100, CancellationToken.None));
             await Assert.ThrowsAsync<TaskBusyException>(() => tasks.RunNowAsync(first.Id, CancellationToken.None));
             await tasks.UpdateAsync(second.Id, true, 45, 300, 20, CancellationToken.None, "qa-admin");
@@ -401,7 +402,7 @@ public sealed class DatabaseAndCertificateTests
     [Fact]
     public async Task OverviewTrafficUsesStoredMessagesAndDeliveryAttempts()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-overview-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-overview-{MailServer.Domain.SnowflakeIds.NewId()}");
         Directory.CreateDirectory(root);
         try
         {
@@ -476,7 +477,7 @@ public sealed class DatabaseAndCertificateTests
     [Fact]
     public async Task PermissionDelegationCannotExceedActorCapabilitiesOrDomainScope()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-delegation-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-delegation-{MailServer.Domain.SnowflakeIds.NewId()}");
         Directory.CreateDirectory(root);
         try
         {
@@ -561,7 +562,7 @@ public sealed class DatabaseAndCertificateTests
     [Fact]
     public async Task PermissionDomainOptionsPageBeyondOneHundredAndRespectScope()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-permission-domains-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-permission-domains-{MailServer.Domain.SnowflakeIds.NewId()}");
         Directory.CreateDirectory(root);
         try
         {
@@ -577,8 +578,8 @@ public sealed class DatabaseAndCertificateTests
             collection.AddMailServerInfrastructure(configuration);
             await using var services = collection.BuildServiceProvider();
             var factory = services.GetRequiredService<IDbContextFactory<MailDbContext>>();
-            Guid hiddenId;
-            Guid allowedId;
+            long hiddenId;
+            long allowedId;
             await using (var db = await factory.CreateDbContextAsync())
             {
                 await db.Database.MigrateAsync();
@@ -591,7 +592,7 @@ public sealed class DatabaseAndCertificateTests
             }
 
             var administration = services.GetRequiredService<AdminApplicationService>();
-            var all = new PermittedDomainScope(true, new HashSet<Guid>());
+            var all = new PermittedDomainScope(true, new HashSet<long>());
             var last = await administration.SearchPermissionDomainsAsync(null, 7, 20, all, CancellationToken.None);
             Assert.Equal(125, last.TotalCount);
             Assert.Equal(5, last.Items.Count);
@@ -599,7 +600,7 @@ public sealed class DatabaseAndCertificateTests
             Assert.Equal(1, (await administration.SearchPermissionDomainsAsync(
                 "DOMAIN-125", 1, 20, all, CancellationToken.None)).TotalCount);
 
-            var restricted = new PermittedDomainScope(false, new HashSet<Guid> { allowedId });
+            var restricted = new PermittedDomainScope(false, new HashSet<long> { allowedId });
             var visible = await administration.SearchPermissionDomainsAsync(null, 1, 20, restricted, CancellationToken.None);
             Assert.Single(visible.Items);
             Assert.Equal(allowedId, visible.Items[0].Id);
@@ -618,7 +619,7 @@ public sealed class DatabaseAndCertificateTests
     [Fact]
     public async Task ApiKeySearchPaginatesAndFiltersPersistedKeys()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-api-keys-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-api-keys-{MailServer.Domain.SnowflakeIds.NewId()}");
         Directory.CreateDirectory(root);
         try
         {
@@ -675,7 +676,7 @@ public sealed class DatabaseAndCertificateTests
     [Fact]
     public async Task ReadinessReflectsStorageAndPendingMigrationsWithoutExposingPaths()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-readiness-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-readiness-{MailServer.Domain.SnowflakeIds.NewId()}");
         Directory.CreateDirectory(root);
         try
         {
@@ -746,7 +747,7 @@ public sealed class DatabaseAndCertificateTests
     [Fact]
     public async Task SqliteMigrationsAndQueueLeaseWorkEndToEnd()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-sqlite-tests-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-sqlite-tests-{MailServer.Domain.SnowflakeIds.NewId()}");
         Directory.CreateDirectory(root);
         try
         {
@@ -793,7 +794,7 @@ public sealed class DatabaseAndCertificateTests
             await Assert.ThrowsAsync<DeliveryStateConflictException>(() =>
                 queue.DeleteAsync(leased[0].Id, CancellationToken.None));
 
-            Guid failedId;
+            long failedId;
             await using (var db = await factory.CreateDbContextAsync())
             {
                 var failed = new DeliveryJob
@@ -810,12 +811,12 @@ public sealed class DatabaseAndCertificateTests
             var administration = services.GetRequiredService<AdminApplicationService>();
             var retry = await administration.BatchRetryDeliveriesAsync(
                 [failedId, leased[0].Id], "test", CancellationToken.None,
-                expectedAttempts: new Dictionary<Guid, int> { [failedId] = 0, [leased[0].Id] = 1 });
+                expectedAttempts: new Dictionary<long, int> { [failedId] = 0, [leased[0].Id] = 1 });
             Assert.Equal(1, retry.Succeeded);
             Assert.Equal("Conflict", retry.Items[1].Status);
             var repeated = await administration.BatchRetryDeliveriesAsync(
                 [failedId], "test", CancellationToken.None,
-                expectedAttempts: new Dictionary<Guid, int> { [failedId] = 0 });
+                expectedAttempts: new Dictionary<long, int> { [failedId] = 0 });
             Assert.Equal("Conflict", repeated.Items[0].Status);
             var retriedLease = await queue.LeaseAsync("test-retry", 1, TimeSpan.FromMinutes(1), CancellationToken.None);
             var failedLease = Assert.Single(retriedLease);
@@ -823,15 +824,15 @@ public sealed class DatabaseAndCertificateTests
             await queue.CompleteAsync(failedLease, DeliveryResult.Permanent("550 rejected"), CancellationToken.None);
             var staleAfterWorker = await administration.BatchRetryDeliveriesAsync(
                 [failedId], "test", CancellationToken.None,
-                expectedAttempts: new Dictionary<Guid, int> { [failedId] = 0 });
+                expectedAttempts: new Dictionary<long, int> { [failedId] = 0 });
             Assert.Equal("Conflict", staleAfterWorker.Items[0].Status);
             var freshAfterWorker = await administration.BatchRetryDeliveriesAsync(
                 [failedId], "test", CancellationToken.None,
-                expectedAttempts: new Dictionary<Guid, int> { [failedId] = 1 });
+                expectedAttempts: new Dictionary<long, int> { [failedId] = 1 });
             Assert.Equal("Succeeded", freshAfterWorker.Items[0].Status);
             await Assert.ThrowsAsync<ArgumentException>(() => administration.BatchRetryDeliveriesAsync(
                 [failedId], "test", CancellationToken.None,
-                expectedAttempts: new Dictionary<Guid, int>()));
+                expectedAttempts: new Dictionary<long, int>()));
             var deletion = await administration.BatchDeleteDeliveriesAsync(
                 [failedId, leased[0].Id], "test", CancellationToken.None);
             Assert.Equal("Succeeded", deletion.Items[0].Status);
@@ -842,8 +843,8 @@ public sealed class DatabaseAndCertificateTests
                 Assert.False(await db.DeliveryJobs.AnyAsync(x => x.Id == failedId));
                 Assert.Contains(await db.AuditRecords.ToListAsync(), x => x.Action == "queue.batch-delete");
             }
-            Guid unreferencedJobId;
-            Guid unreferencedMessageId;
+            long unreferencedJobId;
+            long unreferencedMessageId;
             await using (var db = await factory.CreateDbContextAsync())
             {
                 var message = new StoredMessage
@@ -915,10 +916,10 @@ public sealed class DatabaseAndCertificateTests
                 db.TlsReportDeliveries.Add(report);
                 await db.SaveChangesAsync();
             }
-            var retryKey = Guid.NewGuid().ToString();
+            var retryKey = System.Guid.NewGuid().ToString("N");
             Assert.True((await administration.RetryTlsReportDeliveryAsync(report.Id, retryKey, "test", CancellationToken.None)).Scheduled);
             Assert.True((await administration.RetryTlsReportDeliveryAsync(report.Id, retryKey, "test", CancellationToken.None)).Replayed);
-            Assert.False((await administration.RetryTlsReportDeliveryAsync(report.Id, Guid.NewGuid().ToString(), "test", CancellationToken.None)).Scheduled);
+            Assert.False((await administration.RetryTlsReportDeliveryAsync(report.Id, System.Guid.NewGuid().ToString("N"), "test", CancellationToken.None)).Scheduled);
             await Assert.ThrowsAsync<FormatException>(() => administration.RetryTlsReportDeliveryAsync(report.Id, "invalid", "test", CancellationToken.None));
             await using (var db = await factory.CreateDbContextAsync())
             {
@@ -931,7 +932,7 @@ public sealed class DatabaseAndCertificateTests
                 saved.LeaseUntil = DateTimeOffset.UtcNow.AddMinutes(5);
                 await db.SaveChangesAsync();
             }
-            await Assert.ThrowsAsync<InvalidOperationException>(() => administration.RetryTlsReportDeliveryAsync(report.Id, Guid.NewGuid().ToString(), "test", CancellationToken.None));
+            await Assert.ThrowsAsync<InvalidOperationException>(() => administration.RetryTlsReportDeliveryAsync(report.Id, System.Guid.NewGuid().ToString("N"), "test", CancellationToken.None));
             await using (var db = await factory.CreateDbContextAsync())
             {
                 var saved = await db.TlsReportDeliveries.SingleAsync(x => x.Id == report.Id);
@@ -980,7 +981,7 @@ public sealed class DatabaseAndCertificateTests
             AcceptCount++;
             Entered.TrySetResult();
             await Release.Task.WaitAsync(cancellationToken);
-            return new InboundAcceptance(Guid.NewGuid(), new string('a', 64), 0, 1);
+            return new InboundAcceptance(MailServer.Domain.SnowflakeIds.NewId(), new string('a', 64), 0, 1);
         }
     }
 
@@ -1076,7 +1077,7 @@ public sealed class DatabaseAndCertificateTests
     [Fact]
     public async Task DomainCertificateUploadPersistsMetadataAndSupportsSniSelection()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-domain-cert-tests-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-domain-cert-tests-{MailServer.Domain.SnowflakeIds.NewId()}");
         var certificateRoot = CreateCertificateFiles(encrypted: true, mismatched: false, expired: false);
         Directory.CreateDirectory(root);
         try
@@ -1096,7 +1097,7 @@ public sealed class DatabaseAndCertificateTests
             services.AddMailServerInfrastructure(configuration);
             await using var provider = services.BuildServiceProvider();
             var factory = provider.GetRequiredService<IDbContextFactory<MailDbContext>>();
-            Guid domainId;
+            long domainId;
             await using (var db = await factory.CreateDbContextAsync())
             {
                 await db.Database.MigrateAsync();
@@ -1189,7 +1190,7 @@ public sealed class DatabaseAndCertificateTests
     [Fact]
     public async Task GeneratedDkimKeySignsOutboundMessage()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-dkim-tests-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-dkim-tests-{MailServer.Domain.SnowflakeIds.NewId()}");
         Directory.CreateDirectory(root);
         try
         {
@@ -1207,7 +1208,7 @@ public sealed class DatabaseAndCertificateTests
             services.AddMailServerInfrastructure(configuration);
             await using var provider = services.BuildServiceProvider();
             var factory = provider.GetRequiredService<IDbContextFactory<MailDbContext>>();
-            Guid domainId;
+            long domainId;
             await using (var db = await factory.CreateDbContextAsync())
             {
                 await db.Database.MigrateAsync();
@@ -1267,7 +1268,7 @@ public sealed class DatabaseAndCertificateTests
 
     private static string CreateCertificateFiles(bool encrypted, bool mismatched, bool expired)
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-pem-tests-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-pem-tests-{MailServer.Domain.SnowflakeIds.NewId()}");
         Directory.CreateDirectory(root);
         using var issuerKey = RSA.Create(2048);
         var issuerRequest = new CertificateRequest(

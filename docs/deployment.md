@@ -1,5 +1,7 @@
 # 部署与上线
 
+本版本的雪花 ID 结构仅支持全新业务数据库；日志使用本机独立 SQLite。配置和兼容性说明见 [本机日志与雪花 ID](local-logs-and-snowflake-ids.md)。
+
 [返回文档索引](README.md)
 
 ## Docker
@@ -24,6 +26,8 @@ docker compose up --build -d api smtp imap worker
 上线前用 `/api/v1/health/ready` 检查数据库、迁移、邮件存储及安全资产状态，再验证 `/admin` 深层路由、登录与 CSRF、SMTP／IMAP 连接和所选投递路线。使用 Direct MX 时检查本机出站 TCP/25；使用中继时检查中继的双向 TCP/25、主服务器到中继的自定义端口，以及 MX、SPF、PTR。正式运行前还需完成清单中的 MySQL 实库并发验证和独立进程监控验收。
 
 数据库类型、连接字符串、后台端口、邮件端口和 PEM 路径均可用环境变量覆盖。
+
+后台任务按角色分配：完整 Compose 部署由 Worker 处理已发送副本，SMTP / IMAP 不再重复轮询。若部署中没有 Worker，需要在一个协议进程设置 `BackgroundServices__SentCopiesEnabled=true`，否则待处理副本会留在队列中。该覆盖应只设在选中的进程，不应写入所有服务共用的配置。`run all` 默认包含副本和维护任务；如果确定没有其他共享邮件数据的进程，可设置 `BackgroundServices__ProcessWakeEnabled=false` 关闭跨进程通知。对象池和缓存预算详见[后台任务与对象池](configuration.md#后台任务与对象池)。
 
 ## GitHub Actions 构建 Linux 单文件
 
@@ -65,6 +69,8 @@ Vue 管理后台的 HTML、JS、CSS 和字体已经嵌入二进制，不需要�
 Linux 自包含发布不需要预装 .NET，但仍使用系统的 glibc、OpenSSL 和 ICU。Ubuntu 26.04 WSL2 实测需安装 `libicu78`；其它发行版安装对应的 ICU 运行库。配置、证书、邮件内容和数据库不会嵌入二进制，需要按环境独立保存并备份。
 
 ## 上线前
+
+SMTP、IMAP、API 分机、共享目录、S3 后端和节点资源预算配置见[分机部署](distributed-deployment.md)。
 
 - 完成 MX、A/AAAA、PTR、SPF、DKIM、DMARC 配置。
 - 使用受信任插件或隔离服务增加反垃圾与病毒扫描。

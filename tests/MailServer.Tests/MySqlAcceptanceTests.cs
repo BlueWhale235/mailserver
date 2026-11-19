@@ -10,32 +10,22 @@ namespace MailServer.Tests;
 public sealed class MySqlAcceptanceTests
 {
     [Fact]
-    public void DomainAuditResourceSubqueryHasMySqlTypeMappings()
+    public void DomainAuditResourcesUseBusinessSqlAndLogsUseIndependentSqliteQuery()
     {
         var options = new DbContextOptionsBuilder<MailDbContext>()
-            .UseMySQL("Server=localhost;Database=mailserver_model_test;User ID=unused;Password=unused")
-            .Options;
+            .UseMySQL("Server=localhost;Database=mailserver_model_test;User ID=unused;Password=unused").Options;
         using var db = new MailDbContext(options);
-        var domainId = Guid.NewGuid();
-        var resources = AdminApplicationService.GetDomainAuditResources(db, domainId);
-
-        var healthSql = db.AuditRecords.AsNoTracking()
-            .Where(x => resources.Contains(x.Resource))
-            .OrderByDescending(x => x.CreatedAt)
-            .Select(x => (DateTimeOffset?)x.CreatedAt)
-            .Take(1)
-            .ToQueryString();
-        var auditSql = db.AuditRecords.AsNoTracking()
-            .Where(x => x.Resource == "settings:mailboxes" || resources.Contains(x.Resource))
-            .OrderByDescending(x => x.CreatedAt)
-            .Take(100)
-            .ToQueryString();
-
-        Assert.Contains("mail_domains", healthSql, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("mail_accounts", healthSql, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("mail_aliases", healthSql, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("mail_rules", healthSql, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("settings:mailboxes", auditSql, StringComparison.Ordinal);
+        var resourcesSql = AdminApplicationService.GetDomainAuditResources(db, 123).ToQueryString();
+        Assert.Contains("mail_domains", resourcesSql, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("mail_accounts", resourcesSql, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("mail_aliases", resourcesSql, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("mail_rules", resourcesSql, StringComparison.OrdinalIgnoreCase);
+        using var local = new LocalLogDbContext(new DbContextOptionsBuilder<LocalLogDbContext>().UseSqlite("Data Source=:memory:").Options);
+        var resources = new[] { "domain:123", "account:456" };
+        var sql = local.AuditRecords.Where(x => x.Resource == "settings:mailboxes" || resources.Contains(x.Resource)).ToQueryString();
+        Assert.Contains("audit_records", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("mail_domains", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(typeof(long), db.Model.FindEntityType(typeof(StoredMessage))!.FindProperty("Id")!.ClrType);
     }
 
     [Fact]
@@ -44,7 +34,7 @@ public sealed class MySqlAcceptanceTests
         var options = new DbContextOptionsBuilder<MailDbContext>()
             .UseMySQL("Server=localhost;Database=mailserver_model_test;User ID=unused;Password=unused")
             .Options;
-        using var db = new MailDbContext(options);
+        using var db = new MailDbContext(options, TestLocalLogs.Create());
         var entity = db.Model.FindEntityType(typeof(DomainDnsSettings));
         Assert.NotNull(entity);
         foreach (var propertyName in new[]
@@ -69,7 +59,7 @@ public sealed class MySqlAcceptanceTests
         if (string.IsNullOrWhiteSpace(connection)) return; // Opt-in: the wrapper script requires this value.
         if (!connection.Contains("mailserver_acceptance", StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("MySQL acceptance tests require an isolated mailserver_acceptance database.");
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-mysql-acceptance-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-mysql-acceptance-{MailServer.Domain.SnowflakeIds.NewId()}");
         var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
         {
             ["Database:Provider"] = "MySql",
@@ -121,7 +111,7 @@ public sealed class MySqlAcceptanceTests
         {
             Assert.Equal(before + 8, await db.ConfigurationVersions.Where(x => x.Scope == ConfigurationScopes.Rules)
                 .Select(x => x.Version).SingleAsync());
-            var message = new StoredMessage { ContentKey = Guid.NewGuid().ToString("N"), EnvelopeFrom = "sender@example.test" };
+            var message = new StoredMessage { ContentKey = MailServer.Domain.SnowflakeIds.NewId().ToString(), EnvelopeFrom = "sender@example.test" };
             db.Messages.Add(message);
             for (var index = 0; index < 4; index++)
                 db.DeliveryJobs.Add(new DeliveryJob
@@ -147,10 +137,10 @@ public sealed class MySqlAcceptanceTests
         Assert.Equal(4, leased.Length);
         Assert.Equal(4, leased.Select(x => x.Id).Distinct().Count());
 
-        Guid mailboxId;
+        long mailboxId;
         await using (var db = await factory.CreateDbContextAsync())
         {
-            var domain = new MailDomain { Name = $"search-{Guid.NewGuid():N}.example.test" };
+            var domain = new MailDomain { Name = $"search-{MailServer.Domain.SnowflakeIds.NewId()}.example.test" };
             var account = new MailAccount { Domain = domain, LocalPart = "alice", PasswordHash = "unused" };
             var mailbox = new Mailbox { Account = account, Name = "INBOX" };
             db.AddRange(domain, account, mailbox);
@@ -158,7 +148,7 @@ public sealed class MySqlAcceptanceTests
                 db.MailboxMessages.Add(new MailboxMessage
                 {
                     Mailbox = mailbox,
-                    Message = new StoredMessage { ContentKey = Guid.NewGuid().ToString("N"), EnvelopeFrom = "sender@example.test" },
+                    Message = new StoredMessage { ContentKey = MailServer.Domain.SnowflakeIds.NewId().ToString(), EnvelopeFrom = "sender@example.test" },
                     Uid = uid,
                     Flags = uid switch { 1 => "\\SeenOther", 2 => "\\Seen", _ => "" }
                 });
@@ -171,7 +161,7 @@ public sealed class MySqlAcceptanceTests
             db.ChangeTracker.AutoDetectChangesEnabled = false;
             mailbox.Account.UsedBytes += 123;
             db.AuditRecords.Add(new AuditRecord { Actor = "acceptance", Action = "save-graph", Resource = "mailbox" });
-            var message = new StoredMessage { ContentKey = Guid.NewGuid().ToString("N"), EnvelopeFrom = "sender@example.test" };
+            var message = new StoredMessage { ContentKey = MailServer.Domain.SnowflakeIds.NewId().ToString(), EnvelopeFrom = "sender@example.test" };
             db.MessageRecipients.Add(new StoredMessageRecipient { Message = message, Address = "alice@example.test" });
             await db.SaveChangesAsync();
             Assert.False(db.ChangeTracker.AutoDetectChangesEnabled);
@@ -182,7 +172,7 @@ public sealed class MySqlAcceptanceTests
         var mailboxService = new MailboxService(factory, null!, null!, null!);
         Assert.Equal([2], await mailboxService.SearchAsync(mailboxId, "SEEN", false, CancellationToken.None));
         Assert.Equal([1, 3], await mailboxService.SearchAsync(mailboxId, "UNSEEN", true, CancellationToken.None));
-        Guid accountId;
+        long accountId;
         await using (var db = await factory.CreateDbContextAsync())
         {
             accountId = await db.Mailboxes.Where(x => x.Id == mailboxId).Select(x => x.AccountId).SingleAsync();
@@ -209,7 +199,7 @@ public sealed class MySqlAcceptanceTests
         await using (var db = await factory.CreateDbContextAsync())
         {
             var ids = await db.MailboxMessages.Where(x => x.MailboxId == mailboxId).Select(x => x.MessageId).ToArrayAsync();
-            foreach (var record in await db.MessageSearchRecords.WhereGuidIn(x => x.MessageId, ids).ToListAsync())
+            foreach (var record in await db.MessageSearchRecords.WhereIdIn(x => x.MessageId, ids).ToListAsync())
             {
                 record.Status = "HeadersReady";
                 record.Complete = false;
@@ -250,8 +240,8 @@ public sealed class MySqlAcceptanceTests
         services.AddMailServerInfrastructure(configuration, "worker");
         await using var provider = services.BuildServiceProvider();
         var factory = provider.GetRequiredService<IDbContextFactory<MailDbContext>>();
-        var domains = new[] { new MailDomain { Name = Guid.NewGuid().ToString("N") + ".test", QuotaBytes = 100000 },
-            new MailDomain { Name = Guid.NewGuid().ToString("N") + ".test", QuotaBytes = 100000 } };
+        var domains = new[] { new MailDomain { Name = MailServer.Domain.SnowflakeIds.NewId().ToString() + ".test", QuotaBytes = 100000 },
+            new MailDomain { Name = MailServer.Domain.SnowflakeIds.NewId().ToString() + ".test", QuotaBytes = 100000 } };
         var accounts = domains.Select(domain => new MailAccount { Domain = domain, LocalPart = "quota", PasswordHash = "unused", QuotaBytes = 100000 }).ToArray();
         await using (var db = await factory.CreateDbContextAsync())
         { await db.Database.MigrateAsync(); db.Accounts.AddRange(accounts); await db.SaveChangesAsync(); }
@@ -282,7 +272,7 @@ public sealed class MySqlAcceptanceTests
         if (string.IsNullOrWhiteSpace(connection)) return;
         if (!connection.Contains("mailserver_acceptance", StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("An isolated acceptance database is required.");
-        var storage = Path.Combine(Path.GetTempPath(), "mailserver-mysql-writes-" + Guid.NewGuid().ToString("N"));
+        var storage = Path.Combine(Path.GetTempPath(), "mailserver-mysql-writes-" + MailServer.Domain.SnowflakeIds.NewId().ToString());
         try
         {
             var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
@@ -293,7 +283,7 @@ public sealed class MySqlAcceptanceTests
             await using var provider = services.BuildServiceProvider();
             var factory = provider.GetRequiredService<IDbContextFactory<MailDbContext>>();
             provider.GetRequiredService<ResourceRuntime>().LargeMime.Resize(2);
-            var domain = new MailDomain { Name = Guid.NewGuid().ToString("N") + ".test", QuotaBytes = 1000000 };
+            var domain = new MailDomain { Name = MailServer.Domain.SnowflakeIds.NewId().ToString() + ".test", QuotaBytes = 1000000 };
             var accounts = new[] { "alice", "bob" }.Select(name => new MailAccount
                 { Domain = domain, LocalPart = name, PasswordHash = "unused", QuotaBytes = 1000000 }).ToArray();
             var inboxes = accounts.Select(account => new Mailbox { Account = account, Name = "INBOX" }).ToArray();
@@ -303,7 +293,7 @@ public sealed class MySqlAcceptanceTests
             var sent = provider.GetRequiredService<SentCopyService>();
             var sizes = await Task.WhenAll(Enumerable.Range(0, 8).Select(async index =>
             {
-                var raw = System.Text.Encoding.UTF8.GetBytes($"Message-ID: <{Guid.NewGuid()}@test.invalid>\r\nSubject: 中文\r\n\r\nbody\r\n");
+                var raw = System.Text.Encoding.UTF8.GetBytes($"Message-ID: <{MailServer.Domain.SnowflakeIds.NewId()}@test.invalid>\r\nSubject: 中文\r\n\r\nbody\r\n");
                 await using var content = new MemoryStream(raw);
                 await sent.AppendAsync(accounts[index % 2].Id, "INBOX", content, [], null, CancellationToken.None);
                 return raw.Length;
@@ -341,7 +331,7 @@ public sealed class MySqlAcceptanceTests
         if (string.IsNullOrWhiteSpace(connection)) return;
         if (!connection.Contains("mailserver_acceptance", StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("An isolated acceptance database is required.");
-        var storage = Path.Combine(Path.GetTempPath(), "mailserver-mysql-expunge-" + Guid.NewGuid().ToString("N"));
+        var storage = Path.Combine(Path.GetTempPath(), "mailserver-mysql-expunge-" + MailServer.Domain.SnowflakeIds.NewId().ToString());
         try
         {
             var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
@@ -351,7 +341,7 @@ public sealed class MySqlAcceptanceTests
             services.AddMailServerInfrastructure(configuration, "worker");
             await using var provider = services.BuildServiceProvider();
             var factory = provider.GetRequiredService<IDbContextFactory<MailDbContext>>();
-            var domain = new MailDomain { Name = Guid.NewGuid().ToString("N") + ".test", QuotaBytes = 1000000 };
+            var domain = new MailDomain { Name = MailServer.Domain.SnowflakeIds.NewId().ToString() + ".test", QuotaBytes = 1000000 };
             var account = new MailAccount { Domain = domain, LocalPart = "inbox", PasswordHash = "unused", QuotaBytes = 1000000 };
             var inbox = new Mailbox { Account = account, Name = "INBOX" };
             await using (var db = await factory.CreateDbContextAsync())
@@ -360,12 +350,12 @@ public sealed class MySqlAcceptanceTests
             var sizes = new List<int>();
             for (var i = 0; i < 2; i++)
             {
-                var raw = System.Text.Encoding.UTF8.GetBytes($"Message-ID: <{Guid.NewGuid()}@test.invalid>\r\nSubject: 中文 {i}\r\n\r\nbody {i}\r\n");
+                var raw = System.Text.Encoding.UTF8.GetBytes($"Message-ID: <{MailServer.Domain.SnowflakeIds.NewId()}@test.invalid>\r\nSubject: 中文 {i}\r\n\r\nbody {i}\r\n");
                 sizes.Add(raw.Length);
                 await using var content = new MemoryStream(raw);
                 await sent.AppendAsync(account.Id, "INBOX", content, [], null, CancellationToken.None);
             }
-            Guid deletedId;
+            long deletedId;
             long beforeModSeq;
             var existingCleanup = new CleanupQueueItem { ResourceType = CleanupResourceType.MailboxMessage,
                 Status = CleanupQueueStatus.Failed, AccountId = account.Id, PurgeAfter = DateTimeOffset.UtcNow.AddDays(1) };
@@ -414,20 +404,20 @@ public sealed class MySqlAcceptanceTests
         if (provider == "MySql" && string.IsNullOrWhiteSpace(connection)) return;
         if (provider == "MySql" && !connection!.Contains("mailserver_acceptance", StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("An isolated acceptance database is required.");
-        var path = Path.Combine(Path.GetTempPath(), "mailserver-bounded-copy-" + Guid.NewGuid().ToString("N") + ".db");
+        var path = Path.Combine(Path.GetTempPath(), "mailserver-bounded-copy-" + MailServer.Domain.SnowflakeIds.NewId().ToString() + ".db");
         var tracker = new CopyTrackingInterceptor();
         var options = new DbContextOptionsBuilder<MailDbContext>().AddInterceptors(tracker);
         if (provider == "MySql") options.UseMySQL(connection!, mysql => mysql.MigrationsAssembly("MailServer.Migrations.MySql"));
         else { SQLitePCL.raw.SetProvider(new SQLitePCL.SQLite3Provider_e_sqlite3()); options.UseSqlite("Data Source=" + path + ";Pooling=False"); }
-        var factory = new Microsoft.EntityFrameworkCore.Infrastructure.PooledDbContextFactory<MailDbContext>(options.Options);
+        var factory = new TestMailDbContextFactory(options.Options);
         try
         {
-            var domain = new MailDomain { Name = Guid.NewGuid().ToString("N") + ".test", QuotaBytes = 1000000, UsedBytes = 2048 };
+            var domain = new MailDomain { Name = MailServer.Domain.SnowflakeIds.NewId().ToString() + ".test", QuotaBytes = 1000000, UsedBytes = 2048 };
             var account = new MailAccount { Domain = domain, LocalPart = "inbox", PasswordHash = "unused", QuotaBytes = 1000000, UsedBytes = 2048 };
             var source = new Mailbox { Account = account, Name = "INBOX", UidNext = 2049, HighestModSeq = 2049 };
             var target = new Mailbox { Account = account, Name = "Target" };
             var rollback = new Mailbox { Account = account, Name = "Rollback" };
-            var message = new StoredMessage { ContentKey = Guid.NewGuid().ToString("N"), EnvelopeFrom = "sender@test.invalid", Size = 1 };
+            var message = new StoredMessage { ContentKey = MailServer.Domain.SnowflakeIds.NewId().ToString(), EnvelopeFrom = "sender@test.invalid", Size = 1 };
             await using (var db = await factory.CreateDbContextAsync())
             {
                 if (provider == "MySql") await db.Database.MigrateAsync(); else await db.Database.EnsureCreatedAsync();

@@ -16,7 +16,7 @@ public sealed record AuditSearchRequest(
     DateTimeOffset? To);
 
 public sealed record AuditListItemView(
-    Guid Id,
+    long Id,
     string Number,
     string Content,
     AuditCategory Category,
@@ -30,7 +30,7 @@ public sealed record AuditListItemView(
 public sealed record AuditFieldChangeView(string Field, string? OldValue, string? NewValue);
 
 public sealed record AuditDetailView(
-    Guid Id,
+    long Id,
     string Number,
     string Content,
     AuditCategory Category,
@@ -49,15 +49,18 @@ public sealed record AuditDetailView(
     IReadOnlyList<AuditFieldChangeView> Changes,
     string RawJson);
 
-public sealed record AuditExportRequest(Guid[] Ids);
+public sealed record AuditExportRequest(long[] Ids);
 
 public sealed class AuditLogService(
     IDbContextFactory<MailDbContext> dbFactory)
 {
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
+    private static readonly JsonSerializerOptions JsonOptions = CreateJsonOptions();
+    private static JsonSerializerOptions CreateJsonOptions()
     {
-        WriteIndented = true
-    };
+        var options = new JsonSerializerOptions(JsonSerializerDefaults.Web) { WriteIndented = true };
+        SnowflakeJson.Configure(options);
+        return options;
+    }
 
     private static readonly string[] SensitiveKeys =
     [
@@ -89,7 +92,7 @@ public sealed class AuditLogService(
             total);
     }
 
-    public async Task<AuditDetailView> GetAsync(Guid id, CancellationToken cancellationToken)
+    public async Task<AuditDetailView> GetAsync(long id, CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         var record = await db.AuditRecords.AsNoTracking().SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
@@ -97,7 +100,7 @@ public sealed class AuditLogService(
         return ToDetail(record);
     }
 
-    public async Task<byte[]> ExportAsync(IReadOnlyCollection<Guid> ids, CancellationToken cancellationToken)
+    public async Task<byte[]> ExportAsync(IReadOnlyCollection<long> ids, CancellationToken cancellationToken)
     {
         if (ids.Count == 0) return JsonSerializer.SerializeToUtf8Bytes(Array.Empty<AuditDetailView>(), JsonOptions);
         if (ids.Count > 1000) throw new InvalidOperationException("A single export can include at most 1000 audit records.");
@@ -518,7 +521,7 @@ public sealed class AuditLogService(
             : value;
     }
 
-    private static string ShortId(Guid id) => id.ToString("N")[..8];
+    private static string ShortId(long id) => id.ToString()[..8];
 }
 
 public sealed record PluginAuditEvent(

@@ -1,5 +1,6 @@
 using System.Data.Common;
 using MailServer.Infrastructure;
+using MailServer.Domain;
 using Microsoft.EntityFrameworkCore;
 
 namespace MailServer.Api;
@@ -15,13 +16,24 @@ public static class MailServerReadiness
     public static async Task<ReadinessSnapshot> CheckAsync(
         IDbContextFactory<MailDbContext> dbFactory,
         IConfiguration configuration,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        IMessageStorageMaintenance? storageBackend = null)
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromSeconds(5));
         var database = await CheckDatabaseAsync(dbFactory, timeout.Token);
-        var storage = await CheckDirectoryAsync(
-            configuration["Storage:RootPath"] ?? "data/messages", timeout.Token);
+        var storage = "unavailable";
+        try
+        {
+            if (storageBackend is null)
+            {
+                if (!string.Equals(configuration["Storage:Provider"], "S3", StringComparison.OrdinalIgnoreCase))
+                    storageBackend = new FileMessageContentStore(Microsoft.Extensions.Options.Options.Create(
+                        configuration.GetSection("Storage").Get<StorageOptions>() ?? new()), dbFactory);
+            }
+            if (storageBackend is not null) { await storageBackend.CheckHealthAsync(timeout.Token); storage = "ready"; }
+        }
+        catch (Exception) when (!cancellationToken.IsCancellationRequested) { storage = "unavailable"; }
         var security = await CheckDirectoryAsync(
             configuration["SecurityAssets:RootPath"] ?? "security-assets", timeout.Token);
         return new ReadinessSnapshot(
@@ -55,7 +67,7 @@ public static class MailServerReadiness
             var root = Path.GetFullPath(configuredPath);
             Directory.CreateDirectory(root);
             _ = Directory.EnumerateFileSystemEntries(root).Take(1).ToArray();
-            probe = Path.Combine(root, $".mailserver-ready-{Guid.NewGuid():N}");
+            probe = Path.Combine(root, $".mailserver-ready-{System.Guid.NewGuid()}");
             await using (var stream = new FileStream(probe, FileMode.CreateNew, FileAccess.Write,
                 FileShare.None, 1, FileOptions.Asynchronous | FileOptions.DeleteOnClose))
             {

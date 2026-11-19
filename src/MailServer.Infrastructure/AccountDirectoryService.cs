@@ -3,22 +3,22 @@ using Microsoft.EntityFrameworkCore;
 
 namespace MailServer.Infrastructure;
 
-public sealed record DirectoryAccount(Guid Id, string Address, bool? IsEnabled, long? QuotaBytes,
+public sealed record DirectoryAccount(long Id, string Address, bool? IsEnabled, long? QuotaBytes,
     long? UsedBytes, int? AliasCount, string? MatchedAlias, int MatchedAliasCount);
-public sealed record DirectoryAlias(Guid Id, string Source, Guid? TargetAccountId, string? TargetAddress,
+public sealed record DirectoryAlias(long Id, string Source, long? TargetAccountId, string? TargetAddress,
     MailAliasMode Mode, bool CanReceive, bool CanSend, string? UnavailableReason);
 
 public sealed class AccountDirectoryService(IDbContextFactory<MailDbContext> factory)
 {
-    public async Task<string> DomainNameAsync(Guid domainId, CancellationToken ct)
+    public async Task<string> DomainNameAsync(long domainId, CancellationToken ct)
     {
         await using var db = await factory.CreateDbContextAsync(ct);
         return await db.Domains.Where(x => x.Id == domainId).Select(x => x.Name).SingleOrDefaultAsync(ct)
             ?? throw new KeyNotFoundException("邮件域不存在。");
     }
 
-    public async Task<PagedResult<DirectoryAccount>> SearchAsync(Guid domainId, string? query,
-        bool? enabled, int page, int pageSize, bool readAccounts, bool readAliases, Guid? accountId, CancellationToken ct)
+    public async Task<PagedResult<DirectoryAccount>> SearchAsync(long domainId, string? query,
+        bool? enabled, int page, int pageSize, bool readAccounts, bool readAliases, long? accountId, CancellationToken ct)
     {
         var name = await DomainNameAsync(domainId, ct);
         await using var db = await factory.CreateDbContextAsync(ct);
@@ -43,7 +43,7 @@ public sealed class AccountDirectoryService(IDbContextFactory<MailDbContext> fac
         return new PagedResult<DirectoryAccount>(rows, page, pageSize, total);
     }
 
-    public async Task<PagedResult<DirectoryAlias>> AliasesAsync(Guid domainId, Guid? accountId,
+    public async Task<PagedResult<DirectoryAlias>> AliasesAsync(long domainId, long? accountId,
         bool pending, string? query, int page, int pageSize, CancellationToken ct)
     {
         var name = await DomainNameAsync(domainId, ct);

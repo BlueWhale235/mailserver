@@ -24,14 +24,15 @@ public sealed record DomainCertificateInspection(
 public sealed class DomainCertificateService(
     IDbContextFactory<MailDbContext> dbFactory,
     IOptions<SecurityAssetsOptions> securityAssets,
-    DomainCertificateProvider certificateProvider)
+    DomainCertificateProvider certificateProvider,
+    ConfigurationSnapshotCache? cache = null)
 {
     public const int MaximumCertificateBytes = 1024 * 1024;
     public const int MaximumPrivateKeyBytes = 256 * 1024;
     private readonly string _securityRoot = Path.GetFullPath(securityAssets.Value.RootPath);
 
     public async Task<DomainCertificateInspection> InspectUploadAsync(
-        Guid domainId,
+        long domainId,
         byte[] certificatePem,
         byte[] privateKeyPem,
         string? password,
@@ -48,7 +49,7 @@ public sealed class DomainCertificateService(
     }
 
     public async Task<DomainCertificateInspection> InspectExternalAsync(
-        Guid domainId,
+        long domainId,
         string certificatePath,
         string privateKeyPath,
         CancellationToken cancellationToken)
@@ -62,7 +63,7 @@ public sealed class DomainCertificateService(
     }
 
     public async Task<DomainCertificate> SaveUploadAsync(
-        Guid domainId,
+        long domainId,
         byte[] certificatePem,
         byte[] privateKeyPem,
         string? password,
@@ -94,8 +95,8 @@ public sealed class DomainCertificateService(
 
                 var certificatePath = Path.Combine(directory, "tls-chain.pem");
                 var privateKeyPath = Path.Combine(directory, "tls-key.pem");
-                var certificateTemporary = certificatePath + $".{Guid.NewGuid():N}.tmp";
-                var keyTemporary = privateKeyPath + $".{Guid.NewGuid():N}.tmp";
+                var certificateTemporary = certificatePath + $".{System.Guid.NewGuid()}.tmp";
+                var keyTemporary = privateKeyPath + $".{System.Guid.NewGuid()}.tmp";
                 await File.WriteAllTextAsync(
                     certificateTemporary,
                     ExportChain(loaded),
@@ -123,7 +124,7 @@ public sealed class DomainCertificateService(
     }
 
     public async Task<DomainCertificate> BindExternalAsync(
-        Guid domainId,
+        long domainId,
         string certificatePath,
         string privateKeyPath,
         string actor,
@@ -148,14 +149,18 @@ public sealed class DomainCertificateService(
             cancellationToken);
     }
 
-    public async Task DeleteAsync(Guid domainId, string actor, CancellationToken cancellationToken)
+    public async Task DeleteAsync(long domainId, string actor, CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         var certificate = await db.DomainCertificates.SingleOrDefaultAsync(x => x.DomainId == domainId, cancellationToken);
         if (certificate is null) return;
         db.DomainCertificates.Remove(certificate);
         AddAudit(db, actor, "domain.certificate.delete", $"domain:{domainId}");
+        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+        var version = await ConfigurationVersionService.BumpAsync(db, ConfigurationScopes.Settings, cancellationToken);
         await db.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+        cache?.ObserveCommittedVersion(ConfigurationScopes.Settings, version);
         if (certificate.Source == CertificateSource.ManagedUpload)
         {
             SecurityAssetFiles.DeleteManagedFile(_securityRoot, certificate.CertificatePath);
@@ -165,7 +170,7 @@ public sealed class DomainCertificateService(
     }
 
     private async Task<DomainCertificate> SaveRecordAsync(
-        Guid domainId,
+        long domainId,
         CertificateSource source,
         string certificatePath,
         string privateKeyPath,
@@ -191,7 +196,11 @@ public sealed class DomainCertificateService(
         record.UpdatedAt = DateTimeOffset.UtcNow;
         if (existing is null) db.DomainCertificates.Add(record);
         AddAudit(db, actor, "domain.certificate.update", $"domain:{domainId}");
+        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+        var version = await ConfigurationVersionService.BumpAsync(db, ConfigurationScopes.Settings, cancellationToken);
         await db.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+        cache?.ObserveCommittedVersion(ConfigurationScopes.Settings, version);
         if (oldSource == CertificateSource.ManagedUpload)
         {
             SecurityAssetFiles.DeleteManagedFile(_securityRoot, oldCertificatePath, certificatePath);
@@ -201,7 +210,7 @@ public sealed class DomainCertificateService(
         return record;
     }
 
-    private async Task<MailDomain> GetDomainAsync(Guid domainId, CancellationToken cancellationToken)
+    private async Task<MailDomain> GetDomainAsync(long domainId, CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         var domain = await db.Domains.AsNoTracking()
@@ -300,7 +309,7 @@ public sealed class DomainCertificateService(
         string? password,
         Func<string, string, Task<T>> action)
     {
-        var directory = Path.Combine(Path.GetTempPath(), $"mailserver-certificate-{Guid.NewGuid():N}");
+        var directory = Path.Combine(Path.GetTempPath(), $"mailserver-certificate-{System.Guid.NewGuid()}");
         Directory.CreateDirectory(directory);
         var certificatePath = Path.Combine(directory, "chain.pem");
         var privateKeyPath = Path.Combine(directory, "key.pem");
@@ -324,140 +333,142 @@ public sealed class DomainCertificateService(
 public sealed class DomainCertificateProvider(
     IDbContextFactory<MailDbContext> dbFactory,
     SystemSettingsService systemSettings,
-    ILogger<DomainCertificateProvider> logger) : IDisposable
+    ILogger<DomainCertificateProvider> logger,
+    ConfigurationSnapshotCache? cache = null) : Microsoft.Extensions.Hosting.BackgroundService
 {
+    private sealed record CertificateRecord(string HostName, string CertificatePath, string PrivateKeyPath);
+    private sealed record CertificateRecords(IReadOnlyList<CertificateRecord> Items);
+    private sealed record Loaded(string Stamp, LoadedPemCertificate Certificate);
+    private sealed record Snapshot(IReadOnlyDictionary<string, Loaded> Certificates,
+        CertificateSelectionSettingsView Settings, long SettingsVersion, long LocalVersion);
     private readonly SemaphoreSlim _reloadLock = new(1, 1);
-    private readonly List<LoadedPemCertificate> _retired = [];
-    private IReadOnlyDictionary<string, LoadedPemCertificate> _certificates =
-        new Dictionary<string, LoadedPemCertificate>(StringComparer.OrdinalIgnoreCase);
-    private DateTimeOffset _loadedAt = DateTimeOffset.MinValue;
-    private volatile bool _invalidated = true;
+    private readonly List<(LoadedPemCertificate Certificate, DateTimeOffset RetiredAt)> _retired = [];
+    private Snapshot? _snapshot;
+    private long _invalidation;
+    private long _appliedInvalidation = -1;
 
-    public void Invalidate() => _invalidated = true;
+    public void Invalidate() => Interlocked.Increment(ref _invalidation);
 
     public async Task<bool> HasAnyCertificateAsync(CancellationToken cancellationToken)
     {
-        await ReloadIfNeededAsync(cancellationToken);
-        return _certificates.Count > 0;
+        await EnsureLoadedAsync(cancellationToken);
+        return Volatile.Read(ref _snapshot)!.Certificates.Count > 0;
     }
 
-    public async ValueTask<SslServerAuthenticationOptions> SelectOptionsAsync(
-        SslClientHelloInfo hello,
-        CancellationToken cancellationToken)
+    public async ValueTask<SslServerAuthenticationOptions> SelectOptionsAsync(SslClientHelloInfo hello, CancellationToken cancellationToken)
     {
-        await ReloadIfNeededAsync(cancellationToken);
-        var settings = await systemSettings.GetCertificateSelectionSettingsAsync(cancellationToken);
-        var certificate = SelectCertificate(
-            hello.ServerName,
-            settings.DefaultMailHostName,
-            settings.AllowSingleCertificateFallback);
+        await EnsureLoadedAsync(cancellationToken);
+        var snapshot = Volatile.Read(ref _snapshot)!;
+        var host = NormalizeHostName(hello.ServerName);
+        Loaded? selected = null;
+        if (host.Length > 0)
+        {
+            if (!snapshot.Certificates.TryGetValue(host, out selected))
+                throw new AuthenticationException($"No TLS certificate is configured for SNI host '{host}'.");
+        }
+        else
+        {
+            var fallback = NormalizeHostName(snapshot.Settings.DefaultMailHostName);
+            if (fallback.Length > 0) snapshot.Certificates.TryGetValue(fallback, out selected);
+            if (selected is null && snapshot.Settings.AllowSingleCertificateFallback && snapshot.Certificates.Count == 1)
+                selected = snapshot.Certificates.Values.Single();
+        }
+        if (selected is null) throw new AuthenticationException("No matching mail TLS certificate is configured.");
         return new SslServerAuthenticationOptions
         {
-            ServerCertificateContext = certificate.SslContext,
+            ServerCertificateContext = selected.Certificate.SslContext,
             EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
             ClientCertificateRequired = false
         };
     }
 
-    private LoadedPemCertificate SelectCertificate(
-        string? serverName,
-        string? defaultMailHostName,
-        bool allowSingleCertificateFallback)
+    private Task EnsureLoadedAsync(CancellationToken token)
     {
-        if (!string.IsNullOrWhiteSpace(serverName))
-        {
-            var host = NormalizeHostName(serverName);
-            if (_certificates.TryGetValue(host, out var certificate))
-            {
-                return certificate;
-            }
-
-            throw new AuthenticationException($"No TLS certificate is configured for SNI host '{host}'.");
-        }
-
-        var defaultHost = NormalizeHostName(defaultMailHostName);
-        if (!string.IsNullOrWhiteSpace(defaultHost)
-            && _certificates.TryGetValue(defaultHost, out var defaultCertificate))
-        {
-            logger.LogDebug(
-                "TLS client did not provide SNI; using default mail certificate for {HostName}.",
-                defaultHost);
-            return defaultCertificate;
-        }
-
-        if (allowSingleCertificateFallback && _certificates.Count == 1)
-        {
-            var only = _certificates.Single();
-            logger.LogDebug(
-                "TLS client did not provide SNI; using the only configured mail certificate for {HostName}.",
-                only.Key);
-            return only.Value;
-        }
-
-        throw new AuthenticationException(
-            _certificates.Count == 0
-                ? "No mail TLS certificate is configured."
-                : "TLS SNI is required because no matching default mail host certificate is configured.");
+        var snapshot = Volatile.Read(ref _snapshot);
+        return snapshot is not null && _appliedInvalidation == Interlocked.Read(ref _invalidation)
+            && snapshot.SettingsVersion == (cache?.Versions.Settings ?? 0)
+            && snapshot.LocalVersion == systemSettings.CertificateSettingsVersion
+            ? Task.CompletedTask : RefreshAsync(token);
     }
 
-    private static string NormalizeHostName(string? hostName) =>
-        string.IsNullOrWhiteSpace(hostName)
-            ? string.Empty
-            : hostName.Trim().TrimEnd('.').ToLowerInvariant();
-
-    private async Task ReloadIfNeededAsync(CancellationToken cancellationToken)
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        if (!_invalidated && DateTimeOffset.UtcNow - _loadedAt < TimeSpan.FromSeconds(5)) return;
-        await _reloadLock.WaitAsync(cancellationToken);
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            try { await RefreshAsync(stoppingToken); }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { break; }
+            catch (Exception error) { logger.LogError(error, "Unable to refresh mail TLS certificates."); }
+            try { await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken); }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { break; }
+        }
+    }
+
+    private async Task RefreshAsync(CancellationToken token)
+    {
+        await _reloadLock.WaitAsync(token);
         try
         {
-            if (!_invalidated && DateTimeOffset.UtcNow - _loadedAt < TimeSpan.FromSeconds(5)) return;
-            await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
-            var records = await db.DomainCertificates.AsNoTracking()
-                .Where(x => x.Domain.IsActive && x.Domain.MailHostName != null)
-                .Select(x => new
-                {
-                    HostName = x.Domain.MailHostName!,
-                    x.CertificatePath,
-                    x.PrivateKeyPath
-                })
-                .ToListAsync(cancellationToken);
-            var loaded = new Dictionary<string, LoadedPemCertificate>(StringComparer.OrdinalIgnoreCase);
-            foreach (var record in records)
+            var invalidation = Interlocked.Read(ref _invalidation);
+            var version = cache?.Versions.Settings ?? 0;
+            async Task<(CertificateRecords Value, long Size)> LoadAsync(CancellationToken ct)
             {
+                await using var db = await dbFactory.CreateDbContextAsync(ct);
+                var records = await db.DomainCertificates.AsNoTracking()
+                    .Where(x => x.Domain.IsActive && x.Domain.MailHostName != null)
+                    .Select(x => new CertificateRecord(x.Domain.MailHostName!, x.CertificatePath, x.PrivateKeyPath)).ToListAsync(ct);
+                return (new CertificateRecords(records), 256L + records.Sum(x => 128L + 2L * (x.HostName.Length + x.CertificatePath.Length + x.PrivateKeyPath.Length)));
+            }
+            var records = cache is null || invalidation != _appliedInvalidation
+                ? (await LoadAsync(token)).Value
+                : await cache.GetAsync($"certificates:{cache.Versions.Routing}", ConfigurationScopes.Settings, LoadAsync, token);
+            var settings = await systemSettings.GetCertificateSelectionSettingsAsync(token);
+            var previous = Volatile.Read(ref _snapshot);
+            var loaded = new Dictionary<string, Loaded>(StringComparer.OrdinalIgnoreCase);
+            foreach (var record in records.Items)
+            {
+                var host = NormalizeHostName(record.HostName);
                 try
                 {
-                    loaded[NormalizeHostName(record.HostName)] = PemCertificateLoader.Load(
-                        new PemCertificateOptions
-                        {
-                            CertificatePath = record.CertificatePath,
-                            PrivateKeyPath = record.PrivateKeyPath
-                        },
-                        $"Domain {record.HostName}");
+                    var certificateFile = new FileInfo(record.CertificatePath);
+                    var keyFile = new FileInfo(record.PrivateKeyPath);
+                    var stamp = $"{certificateFile.FullName}:{certificateFile.LastWriteTimeUtc.Ticks}:{certificateFile.Length}|{keyFile.FullName}:{keyFile.LastWriteTimeUtc.Ticks}:{keyFile.Length}";
+                    if (previous is not null && previous.Certificates.TryGetValue(host, out var old) && old.Stamp == stamp
+                        && old.Certificate.Certificate.NotAfter.ToUniversalTime() > DateTime.UtcNow)
+                        loaded[host] = old;
+                    else loaded[host] = new Loaded(stamp, PemCertificateLoader.Load(new PemCertificateOptions
+                    {
+                        CertificatePath = record.CertificatePath, PrivateKeyPath = record.PrivateKeyPath
+                    }, $"Domain {record.HostName}"));
                 }
-                catch (Exception exception)
-                {
-                    logger.LogError(exception, "Unable to load TLS certificate for {HostName}.", record.HostName);
-                }
+                catch (Exception error) { logger.LogError(error, "Unable to load TLS certificate for {HostName}.", host); }
             }
-            foreach (var certificate in _retired) certificate.Dispose();
-            _retired.Clear();
-            _retired.AddRange(_certificates.Values);
-            _certificates = loaded;
-            _loadedAt = DateTimeOffset.UtcNow;
-            _invalidated = false;
+            var now = DateTimeOffset.UtcNow;
+            if (previous is not null)
+                foreach (var old in previous.Certificates.Values)
+                    if (!loaded.Values.Contains(old)) _retired.Add((old.Certificate, now));
+            Volatile.Write(ref _snapshot, new Snapshot(loaded, settings, version, systemSettings.CertificateSettingsVersion));
+            _appliedInvalidation = invalidation;
+            // Allow handshakes already using the previous context to finish (configured maximum: 120s).
+            foreach (var old in _retired.Where(x => now - x.RetiredAt > TimeSpan.FromMinutes(10)).ToArray())
+            {
+                old.Certificate.Dispose();
+                _retired.Remove(old);
+            }
         }
-        finally
-        {
-            _reloadLock.Release();
-        }
+        finally { _reloadLock.Release(); }
     }
 
-    public void Dispose()
+    private static string NormalizeHostName(string? name) => name?.Trim().TrimEnd('.').ToLowerInvariant() ?? string.Empty;
+    public override void Dispose()
     {
-        foreach (var certificate in _certificates.Values) certificate.Dispose();
-        foreach (var certificate in _retired) certificate.Dispose();
-        _reloadLock.Dispose();
+        base.Dispose();
+        _reloadLock.Wait();
+        try
+        {
+            if (_snapshot is { } current) foreach (var value in current.Certificates.Values) value.Certificate.Dispose();
+            foreach (var old in _retired) old.Certificate.Dispose();
+        }
+        finally { _reloadLock.Release(); }
     }
 }
 

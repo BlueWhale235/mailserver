@@ -1,12 +1,17 @@
 <script setup lang="ts">
-import { computed, onUnmounted, ref } from 'vue'
+import { computed, onUnmounted, ref, watch } from 'vue'
+import { useDisplay } from 'vuetify'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
 import { api, jsonBody } from '../lib/api'
 import ConsoleAlerts from '../components/ConsoleAlerts.vue'
 import { canAccessPage, getPageDefinition, primaryPages, searchablePages } from '../lib/pageAccess'
 
+const { mobile } = useDisplay()
+const drawerOpen = ref(!mobile.value)
+watch(mobile, value => { drawerOpen.value = !value })
 const route = useRoute()
+watch(() => route.fullPath, () => { if (mobile.value) drawerOpen.value = false })
 const router = useRouter()
 const auth = useAuthStore()
 const logoutBusy = ref(false)
@@ -48,7 +53,6 @@ const active = computed(() => (route.path === '/' ? '/' : `/${route.path.split('
 const currentTitle = computed(() => getPageDefinition(route.name)?.title
   ?? items.value.find(item => item.to === active.value)?.title
   ?? (route.name === 'forbidden' ? '访问受限' : '管理中心'))
-const drawer = ref(true)
 const now = ref(new Date())
 const timer = globalThis.setInterval(() => { now.value = new Date() }, 60_000)
 onUnmounted(() => globalThis.clearInterval(timer))
@@ -63,7 +67,7 @@ async function logout() {
 </script>
 
 <template>
-    <v-navigation-drawer v-model="drawer" permanent width="248" class="app-nav">
+    <v-navigation-drawer v-model="drawerOpen" :permanent="!mobile" :temporary="mobile" width="248" class="app-nav">
       <div class="brand">
         <div class="brand-mark"><v-icon>mdi-email-fast-outline</v-icon></div>
         <div><b>MailServer</b><small>Direct MX 控制台</small></div>
@@ -105,6 +109,7 @@ async function logout() {
     </v-navigation-drawer>
 
     <v-app-bar flat height="64" class="topbar">
+      <v-app-bar-nav-icon v-if="mobile" aria-label="打开导航菜单" @click="drawerOpen = !drawerOpen" />
       <div class="topbar-title">
         <v-icon size="18" class="mr-2 text-medium-emphasis">mdi-view-grid-outline</v-icon>
         <span>{{ currentTitle }}</span>
@@ -114,7 +119,7 @@ async function logout() {
         v-model="selectedPage"
         :items="pageOptions"
         @update:model-value="openPage"
-        class="topbar-search"
+        class="topbar-search d-none d-md-flex"
         density="compact"
         variant="solo"
         flat
@@ -127,7 +132,7 @@ async function logout() {
       />
       <ConsoleAlerts />
       <v-divider vertical inset class="mx-3" />
-      <span class="top-time">
+      <span class="top-time d-none d-md-inline">
         {{ now.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) }}
       </span>
     </v-app-bar>

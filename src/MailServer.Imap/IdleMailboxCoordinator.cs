@@ -11,7 +11,7 @@ internal sealed class IdleMailboxCoordinator : IDisposable
     private readonly MailboxChangeSignal? _changes;
     private readonly ILogger _logger;
     private readonly object _gate = new();
-    private readonly Dictionary<(Guid Account, string Name), Entry> _entries = [];
+    private readonly Dictionary<(long Account, string Name), Entry> _entries = [];
 
     internal IdleMailboxCoordinator(IServiceScopeFactory scopes, MailboxChangeSignal? changes, ILogger logger)
     {
@@ -21,7 +21,7 @@ internal sealed class IdleMailboxCoordinator : IDisposable
         if (changes is not null) changes.Changed += OnChanged;
     }
 
-    internal Subscription Subscribe(Guid account, string mailbox, TimeSpan interval)
+    internal Subscription Subscribe(long account, string mailbox, TimeSpan interval)
     {
         var key = (account, mailbox.ToUpperInvariant());
         lock (_gate)
@@ -82,7 +82,7 @@ internal sealed class IdleMailboxCoordinator : IDisposable
         catch (OperationCanceledException) when (entry.Stop.IsCancellationRequested) { }
     }
 
-    private void OnChanged(Guid mailboxId)
+    private void OnChanged(long mailboxId)
     {
         lock (_gate)
             foreach (var entry in _entries.Values)
@@ -113,15 +113,15 @@ internal sealed class IdleMailboxCoordinator : IDisposable
     private static TaskCompletionSource NewSource() =>
         new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-    internal sealed class Entry((Guid Account, string Name) key, TimeSpan interval)
+    internal sealed class Entry((long Account, string Name) key, TimeSpan interval)
     {
         internal readonly object Gate = new();
-        internal readonly (Guid Account, string Name) Key = key;
+        internal readonly (long Account, string Name) Key = key;
         internal readonly TimeSpan Interval = interval;
         internal readonly CancellationTokenSource Stop = new();
         internal int Subscribers;
         internal long Version;
-        internal Guid? MailboxId;
+        internal long? MailboxId;
         internal MailboxSummary? Summary;
         internal Exception? Error;
         internal TaskCompletionSource Updated = NewSource();

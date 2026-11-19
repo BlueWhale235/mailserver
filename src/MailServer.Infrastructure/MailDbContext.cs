@@ -7,9 +7,77 @@ namespace MailServer.Infrastructure;
 /// <summary>
 /// 邮件系统的 EF Core 数据模型入口。领域服务应通过这里持久化状态，不直接拼接数据库表名。
 /// </summary>
-public sealed class MailDbContext(DbContextOptions<MailDbContext> options) : DbContext(options)
+public sealed class MailDbContext(DbContextOptions<MailDbContext> options, LocalLogDatabase? localLogs = null, ConfigurationSnapshotCache? configurationCache = null) : DbContext(options)
 {
+    private LocalLogDbContext? _logs;
+    public LocalLogDbContext Logs => _logs ??= (localLogs ?? throw new InvalidOperationException("Local log database is required.")).CreateDbContext();
+    internal LocalLogDbContext? PendingLogs => _logs;
+    internal bool AtomicQuotaUpdates { get; set; }
+
     public override async Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
+    {
+        var saved = await MailboxPersistence.SaveAsync(this, SaveBusinessChangesAsync, cancellationToken);
+        if (Database.CurrentTransaction is null) await FlushLocalLogsAsync();
+        return saved;
+    }
+
+    public override int SaveChanges() => SaveChangesAsync().GetAwaiter().GetResult();
+    public override int SaveChanges(bool acceptAllChangesOnSuccess) => acceptAllChangesOnSuccess
+        ? SaveChanges() : throw new NotSupportedException("Use SaveChanges with acceptAllChangesOnSuccess=true.");
+    public override Task<int> SaveChangesAsync(bool acceptAllChangesOnSuccess, CancellationToken cancellationToken = default) => acceptAllChangesOnSuccess
+        ? SaveChangesAsync(cancellationToken) : throw new NotSupportedException("Use SaveChanges with acceptAllChangesOnSuccess=true.");
+
+    internal async Task FlushLocalLogsAsync()
+    {
+        if (_logs is null || !_logs.ChangeTracker.HasChanges()) return;
+        foreach (var entry in _logs.ChangeTracker.Entries<DeliveryAttempt>().Where(x => x.State == EntityState.Added))
+            if (entry.Entity.DeliveryJob is { } job) entry.Entity.DeliveryJobId = job.Id;
+        foreach (var entry in _logs.ChangeTracker.Entries<TaskExecution>().Where(x => x.State == EntityState.Added))
+            if (entry.Entity.ScheduledTask is { } task)
+            {
+                entry.Entity.ScheduledTaskId = task.Id;
+                entry.Entity.TaskName = task.Name;
+                entry.Entity.TaskType = task.Type;
+            }
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+            using var suppression = PerformanceTelemetry.Suppress();
+            if (localLogs?.Writer is { IsRunning: true } writer)
+            {
+                var completions = new List<Task>();
+                foreach (var entry in _logs.ChangeTracker.Entries().Where(x => x.State == EntityState.Added
+                             && x.Entity is AuditRecord or DeliveryAttempt).ToArray())
+                {
+                    // Snapshot scalar values, since a producer can mutate/reuse its tracked entity.
+                    var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                    await writer.EnqueueAsync(new LocalLogWrite(entry.CurrentValues.ToObject(), completion), timeout.Token);
+                    completions.Add(completion.Task);
+                    entry.State = EntityState.Detached;
+                }
+                // Concurrent commits share a SQLite transaction while retaining read-after-write
+                // visibility for audit/queue APIs and reporting failure independently of business commits.
+                await Task.WhenAll(completions).WaitAsync(timeout.Token);
+            }
+            await _logs.SaveChangesAsync(timeout.Token);
+        }
+        catch (Exception error)
+        {
+            localLogs!.ReportFailure(error);
+            _logs.ChangeTracker.Clear();
+        }
+    }
+
+    public override void Dispose() { _logs?.Dispose(); _logs = null; AtomicQuotaUpdates = false; base.Dispose(); }
+    public override async ValueTask DisposeAsync()
+    {
+        if (_logs is not null) await _logs.DisposeAsync();
+        _logs = null;
+        AtomicQuotaUpdates = false;
+        await base.DisposeAsync();
+    }
+
+    private async Task<int> SaveBusinessChangesAsync(CancellationToken cancellationToken = default)
     {
         using var performance = PerformanceTelemetry.Stage("database.save-changes");
         using (PerformanceTelemetry.Stage("database.detect-changes"))
@@ -34,7 +102,8 @@ public sealed class MailDbContext(DbContextOptions<MailDbContext> options) : DbC
                     entry.Entity switch
                     {
                         MailDomain => RoutingFieldsChanged(entry, nameof(MailDomain.Name), nameof(MailDomain.IsActive),
-                            nameof(MailDomain.DeletedAt)),
+                            nameof(MailDomain.DeletedAt), nameof(MailDomain.MailHostName), nameof(MailDomain.SmtpHostName),
+                            nameof(MailDomain.OutboundIpAddresses), nameof(MailDomain.DkimSelector), nameof(MailDomain.DkimPrivateKeyPath)),
                         MailAccount => RoutingFieldsChanged(entry, nameof(MailAccount.DomainId), nameof(MailAccount.LocalPart),
                             nameof(MailAccount.IsEnabled), nameof(MailAccount.DeletedAt)),
                         MailAlias => RoutingFieldsChanged(entry, nameof(MailAlias.DomainId), nameof(MailAlias.SourceLocalPart),
@@ -45,7 +114,7 @@ public sealed class MailDbContext(DbContextOptions<MailDbContext> options) : DbC
             if (!routingChanged)
             {
                 using var persist = PerformanceTelemetry.Stage("database.persist");
-                return await base.SaveChangesAsync(cancellationToken);
+                return await base.SaveChangesAsync(true, cancellationToken);
             }
         }
         finally { ChangeTracker.AutoDetectChangesEnabled = autoDetect; }
@@ -54,16 +123,16 @@ public sealed class MailDbContext(DbContextOptions<MailDbContext> options) : DbC
         {
             await ConfigurationVersionService.BumpAsync(this, ConfigurationScopes.Routing, cancellationToken);
             using var persist = PerformanceTelemetry.Stage("database.persist");
-            return await base.SaveChangesAsync(cancellationToken);
+            return await base.SaveChangesAsync(true, cancellationToken);
         }
 
         await using var transaction = await Database.BeginTransactionAsync(cancellationToken);
         var version = await ConfigurationVersionService.BumpAsync(this, ConfigurationScopes.Routing, cancellationToken);
         int saved;
         using (PerformanceTelemetry.Stage("database.persist"))
-            saved = await base.SaveChangesAsync(cancellationToken);
+            saved = await base.SaveChangesAsync(true, cancellationToken);
         await transaction.CommitAsync(cancellationToken);
-        ConfigurationSnapshotCache.NotifyRoutingCommitted(version);
+        configurationCache?.ObserveCommittedVersion(ConfigurationScopes.Routing, version);
         return saved;
     }
 
@@ -72,7 +141,7 @@ public sealed class MailDbContext(DbContextOptions<MailDbContext> options) : DbC
         var version = await ConfigurationVersions.AsNoTracking()
             .Where(x => x.Scope == ConfigurationScopes.Routing)
             .Select(x => (long?)x.Version).SingleOrDefaultAsync(cancellationToken);
-        if (version is not null) ConfigurationSnapshotCache.NotifyRoutingCommitted(version.Value);
+        if (version is not null) configurationCache?.ObserveCommittedVersion(ConfigurationScopes.Routing, version.Value);
     }
 
     private static bool RoutingFieldsChanged(Microsoft.EntityFrameworkCore.ChangeTracking.EntityEntry entry,
@@ -93,15 +162,16 @@ public sealed class MailDbContext(DbContextOptions<MailDbContext> options) : DbC
     public DbSet<StoredMessage> Messages => Set<StoredMessage>();
     public DbSet<StoredMessageRecipient> MessageRecipients => Set<StoredMessageRecipient>();
     public DbSet<MessageSearchRecord> MessageSearchRecords => Set<MessageSearchRecord>();
+    public DbSet<MessageFetchMetadata> MessageFetchMetadata => Set<MessageFetchMetadata>();
     public DbSet<MailboxMessage> MailboxMessages => Set<MailboxMessage>();
     public DbSet<DeliveryJob> DeliveryJobs => Set<DeliveryJob>();
-    public DbSet<DeliveryAttempt> DeliveryAttempts => Set<DeliveryAttempt>();
+    public DbSet<DeliveryAttempt> DeliveryAttempts => Logs.Set<DeliveryAttempt>();
     public DbSet<SrsAddressMapping> SrsAddressMappings => Set<SrsAddressMapping>();
     public DbSet<SentCopyJob> SentCopyJobs => Set<SentCopyJob>();
     public DbSet<AdminUser> AdminUsers => Set<AdminUser>();
     public DbSet<PermissionGrant> PermissionGrants => Set<PermissionGrant>();
     public DbSet<ApiKeyRecord> ApiKeys => Set<ApiKeyRecord>();
-    public DbSet<AuditRecord> AuditRecords => Set<AuditRecord>();
+    public DbSet<AuditRecord> AuditRecords => Logs.Set<AuditRecord>();
     public DbSet<SystemSetting> SystemSettings => Set<SystemSetting>();
     public DbSet<FirewallRule> FirewallRules => Set<FirewallRule>();
     public DbSet<ConfigurationVersion> ConfigurationVersions => Set<ConfigurationVersion>();
@@ -110,58 +180,18 @@ public sealed class MailDbContext(DbContextOptions<MailDbContext> options) : DbC
     public DbSet<TlsDeliveryEvent> TlsDeliveryEvents => Set<TlsDeliveryEvent>();
     public DbSet<TlsReportDelivery> TlsReportDeliveries => Set<TlsReportDelivery>();
     public DbSet<ScheduledTask> ScheduledTasks => Set<ScheduledTask>();
-    public DbSet<TaskExecution> TaskExecutions => Set<TaskExecution>();
+    public DbSet<TaskExecution> TaskExecutions => Logs.Set<TaskExecution>();
     public DbSet<TaskLease> TaskLeases => Set<TaskLease>();
     public DbSet<CleanupQueueItem> CleanupQueue => Set<CleanupQueueItem>();
     public DbSet<QuotaLedgerEntry> QuotaLedger => Set<QuotaLedgerEntry>();
     public DbSet<QuarantineRecord> QuarantineRecords => Set<QuarantineRecord>();
-    public DbSet<PerformanceOperation> PerformanceOperations => Set<PerformanceOperation>();
-    public DbSet<PerformanceMinute> PerformanceMinutes => Set<PerformanceMinute>();
-    public DbSet<PerformanceSql> PerformanceSql => Set<PerformanceSql>();
-    public DbSet<PerformanceProcess> PerformanceProcesses => Set<PerformanceProcess>();
+    public DbSet<PerformanceOperation> PerformanceOperations => Logs.Set<PerformanceOperation>();
+    public DbSet<PerformanceMinute> PerformanceMinutes => Logs.Set<PerformanceMinute>();
+    public DbSet<PerformanceSql> PerformanceSql => Logs.Set<PerformanceSql>();
+    public DbSet<PerformanceProcess> PerformanceProcesses => Logs.Set<PerformanceProcess>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
-        modelBuilder.Entity<PerformanceOperation>(entity =>
-        {
-            entity.ToTable("performance_operations");
-            entity.HasKey(x => x.Id);
-            entity.Property(x => x.TraceId).HasMaxLength(32);
-            entity.Property(x => x.SourceTraceId).HasMaxLength(32);
-            entity.Property(x => x.ProcessId).HasMaxLength(128);
-            entity.Property(x => x.Module).HasMaxLength(32);
-            entity.Property(x => x.Name).HasMaxLength(128);
-            entity.Property(x => x.Status).HasMaxLength(16);
-            entity.HasIndex(x => new { x.StartedAt, x.Id });
-            entity.HasIndex(x => x.TraceId);
-            entity.HasIndex(x => x.SourceTraceId);
-            entity.HasIndex(x => x.MessageId);
-            entity.HasIndex(x => x.DeliveryJobId);
-        });
-        modelBuilder.Entity<PerformanceMinute>(entity =>
-        {
-            entity.ToTable("performance_minutes");
-            entity.HasKey(x => x.Id);
-            entity.Property(x => x.ProcessId).HasMaxLength(128);
-            entity.Property(x => x.Kind).HasMaxLength(16);
-            entity.Property(x => x.Module).HasMaxLength(32);
-            entity.Property(x => x.Name).HasMaxLength(128);
-            entity.HasIndex(x => new { x.Minute, x.Kind });
-            entity.HasIndex(x => new { x.ProcessId, x.Minute, x.Kind, x.Module, x.Name }).IsUnique();
-        });
-        modelBuilder.Entity<PerformanceSql>(entity =>
-        {
-            entity.ToTable("performance_sql"); entity.HasKey(x => x.Fingerprint);
-            entity.Property(x => x.Fingerprint).HasMaxLength(64);
-            entity.Property(x => x.Provider).HasMaxLength(16);
-            entity.Property(x => x.Template).HasMaxLength(2048);
-            entity.HasIndex(x => x.LastSeenAt);
-        });
-        modelBuilder.Entity<PerformanceProcess>(entity =>
-        {
-            entity.ToTable("performance_processes"); entity.HasKey(x => x.ProcessId);
-            entity.Property(x => x.ProcessId).HasMaxLength(128);
-        });
         modelBuilder.Entity<StoredMessage>().Property(x => x.SourceTraceId).HasMaxLength(32);
         modelBuilder.Entity<DeliveryJob>().Property(x => x.SourceTraceId).HasMaxLength(32);
         if (Database.IsSqlite())
@@ -376,6 +406,9 @@ public sealed class MailDbContext(DbContextOptions<MailDbContext> options) : DbC
             entity.HasKey(x => x.Id);
             entity.HasIndex(x => new { x.AccountId, x.Name }).IsUnique();
             entity.Property(x => x.Name).HasMaxLength(255);
+            if (Database.IsSqlite()) entity.Property(x => x.Name).UseCollation("NOCASE");
+            entity.Property(x => x.MessageCount).HasDefaultValue(0L);
+            entity.Property(x => x.UnseenCount).HasDefaultValue(0L);
             entity.HasIndex(x => x.DeletedAt);
             entity.HasIndex(x => x.PendingDeletionJobId);
             entity.HasOne(x => x.Account).WithMany().HasForeignKey(x => x.AccountId).OnDelete(DeleteBehavior.Cascade);
@@ -430,6 +463,15 @@ public sealed class MailDbContext(DbContextOptions<MailDbContext> options) : DbC
                 .OnDelete(DeleteBehavior.Cascade);
         });
 
+        modelBuilder.Entity<MessageFetchMetadata>(entity =>
+        {
+            entity.ToTable("message_fetch_metadata");
+            entity.HasKey(x => x.MessageId);
+            entity.Property(x => x.ContentKey).HasMaxLength(64);
+            entity.HasOne(x => x.Message).WithOne().HasForeignKey<MessageFetchMetadata>(x => x.MessageId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
         modelBuilder.Entity<QuarantineRecord>(entity =>
         {
             // 隔离记录引用已保存消息内容，审核释放或删除只改变状态，不直接改原始邮件。
@@ -462,15 +504,6 @@ public sealed class MailDbContext(DbContextOptions<MailDbContext> options) : DbC
             entity.Property(x => x.Status).HasConversion<string>().HasMaxLength(32);
             entity.Property(x => x.SettingsJson).HasMaxLength(8192);
         });
-        modelBuilder.Entity<TaskExecution>(entity =>
-        {
-            entity.ToTable("task_executions");
-            entity.HasKey(x => x.Id);
-            entity.HasIndex(x => new { x.ScheduledTaskId, x.StartedAt });
-            entity.Property(x => x.Status).HasConversion<string>().HasMaxLength(32);
-            entity.Property(x => x.Error).HasMaxLength(4096);
-            entity.HasOne(x => x.ScheduledTask).WithMany().HasForeignKey(x => x.ScheduledTaskId).OnDelete(DeleteBehavior.Cascade);
-        });
         modelBuilder.Entity<TaskLease>(entity =>
         {
             entity.ToTable("task_leases");
@@ -501,6 +534,7 @@ public sealed class MailDbContext(DbContextOptions<MailDbContext> options) : DbC
         {
             entity.ToTable("mailbox_messages");
             entity.HasKey(x => x.Id);
+            entity.HasIndex(x => x.MessageId);
             entity.Property(x => x.QuotaReleased).HasDefaultValue(false);
             entity.HasIndex(x => new { x.MailboxId, x.Uid }).IsUnique();
             entity.HasIndex(x => x.DeletedAt);
@@ -515,6 +549,7 @@ public sealed class MailDbContext(DbContextOptions<MailDbContext> options) : DbC
         {
             entity.ToTable("delivery_jobs");
             entity.HasKey(x => x.Id);
+            entity.HasIndex(x => x.MessageId);
             entity.HasIndex(x => new { x.Status, x.NextAttemptAt });
             entity.Property(x => x.Status).HasConversion<string>().HasMaxLength(32);
             entity.Property(x => x.Sender).HasMaxLength(320);
@@ -535,24 +570,6 @@ public sealed class MailDbContext(DbContextOptions<MailDbContext> options) : DbC
             entity.Property(x => x.Note).HasMaxLength(512);
         });
 
-        modelBuilder.Entity<DeliveryAttempt>(entity =>
-        {
-            entity.ToTable("delivery_attempts");
-            entity.HasKey(x => x.Id);
-            entity.HasIndex(x => x.DeliveryJobId);
-            entity.HasIndex(x => x.CreatedAt);
-            entity.Property(x => x.Stage).HasMaxLength(32);
-            entity.Property(x => x.RemoteHost).HasMaxLength(255);
-            entity.Property(x => x.RemoteAddress).HasMaxLength(64);
-            entity.Property(x => x.SmtpStatusCode).HasMaxLength(16);
-            entity.Property(x => x.EnhancedStatusCode).HasMaxLength(16);
-            entity.Property(x => x.TlsProtocol).HasMaxLength(32);
-            entity.Property(x => x.TlsCipherSuite).HasMaxLength(128);
-            entity.Property(x => x.FailureCategory).HasMaxLength(64);
-            entity.Property(x => x.SessionSummary).HasMaxLength(65536);
-            entity.Property(x => x.Response).HasMaxLength(4096);
-            entity.HasOne(x => x.DeliveryJob).WithMany().HasForeignKey(x => x.DeliveryJobId).OnDelete(DeleteBehavior.Cascade);
-        });
 
         modelBuilder.Entity<SrsAddressMapping>(entity =>
         {
@@ -569,6 +586,7 @@ public sealed class MailDbContext(DbContextOptions<MailDbContext> options) : DbC
         {
             entity.ToTable("sent_copy_jobs");
             entity.HasKey(x => x.Id);
+            entity.HasIndex(x => x.MessageId);
             entity.HasIndex(x => new { x.State, x.ReadyAt });
             entity.HasIndex(x => new { x.AccountId, x.DeduplicateUntil });
             entity.Property(x => x.TargetMailboxName).HasMaxLength(255);
@@ -613,28 +631,6 @@ public sealed class MailDbContext(DbContextOptions<MailDbContext> options) : DbC
             entity.HasIndex(x => x.LastUsedAt);
         });
 
-        modelBuilder.Entity<AuditRecord>(entity =>
-        {
-            entity.ToTable("audit_records");
-            entity.HasKey(x => x.Id);
-            entity.HasIndex(x => x.CreatedAt);
-            entity.HasIndex(x => x.Category);
-            entity.HasIndex(x => x.Status);
-            entity.HasIndex(x => x.PluginId);
-            entity.HasIndex(x => new { x.Action, x.Resource, x.RequestId });
-            entity.Property(x => x.Actor).HasMaxLength(256);
-            entity.Property(x => x.Action).HasMaxLength(128);
-            entity.Property(x => x.Resource).HasMaxLength(512);
-            entity.Property(x => x.RemoteAddress).HasMaxLength(128);
-            entity.Property(x => x.Category).HasConversion<string>().HasMaxLength(32);
-            entity.Property(x => x.Status).HasConversion<string>().HasMaxLength(32);
-            entity.Property(x => x.RequestId).HasMaxLength(128);
-            entity.Property(x => x.RelatedId).HasMaxLength(256);
-            entity.Property(x => x.PluginId).HasMaxLength(128);
-            entity.Property(x => x.PluginName).HasMaxLength(256);
-            entity.Property(x => x.ChangeSummaryJson).HasMaxLength(32768);
-            entity.Property(x => x.RawJson).HasMaxLength(262144);
-        });
 
         modelBuilder.Entity<MtaStsPolicyCache>(entity =>
         {
@@ -676,5 +672,15 @@ public sealed class MailDbContext(DbContextOptions<MailDbContext> options) : DbC
             entity.Property(x => x.LastManualRetryKey).HasMaxLength(32);
             entity.Property(x => x.LeaseOwner).HasMaxLength(128);
         });
+        modelBuilder.Ignore<PerformanceOperation>();
+        modelBuilder.Ignore<PerformanceMinute>();
+        modelBuilder.Ignore<PerformanceSql>();
+        modelBuilder.Ignore<PerformanceProcess>();
+        modelBuilder.Ignore<AuditRecord>();
+        modelBuilder.Ignore<TaskExecution>();
+        modelBuilder.Ignore<DeliveryAttempt>();
+        foreach (var entity in modelBuilder.Model.GetEntityTypes())
+            foreach (var property in entity.GetProperties().Where(x => x.ClrType == typeof(long) && x.IsPrimaryKey()))
+                property.ValueGenerated = Microsoft.EntityFrameworkCore.Metadata.ValueGenerated.Never;
     }
 }

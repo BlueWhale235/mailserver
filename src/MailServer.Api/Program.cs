@@ -23,6 +23,7 @@ using Microsoft.Extensions.Options;
 
 var builder = WebApplication.CreateBuilder(args);
 builder.Configuration.AddPortableConfiguration();
+using var snowflakeLease = SnowflakeProcess.Acquire(builder.Configuration, builder.Configuration.GetValue("RunAll:Enabled", false) ? "all" : "api");
 builder.Logging.AddMailServerLogging(builder.Configuration);
 var adminCertificate = AdminWebHosting.ConfigureAdminListeners(builder);
 builder.Services.AddMailServerInfrastructure(builder.Configuration);
@@ -71,12 +72,12 @@ if (runAll)
     builder.Services.AddHostedService<SmtpServerService>();
     builder.Services.AddHostedService<ImapServerService>();
     builder.Services.AddHostedService<DeliveryWorker>();
-    builder.Services.AddHostedService<SentCopyBackgroundService>();
-    builder.Services.AddHostedService<TlsReportBackgroundService>();
-    builder.Services.AddHostedService<MaintenanceBackgroundService>();
 }
 builder.Services.ConfigureHttpJsonOptions(options =>
-    options.SerializerOptions.Converters.Add(new JsonStringEnumConverter()));
+    {
+    options.SerializerOptions.Converters.Add(new JsonStringEnumConverter());
+    SnowflakeJson.Configure(options.SerializerOptions);
+});
 
 var jwtIssuer = builder.Configuration["Jwt:Issuer"] ?? "mailserver";
 var jwtAudience = builder.Configuration["Jwt:Audience"] ?? "mailserver-admin";
@@ -330,9 +331,10 @@ app.MapGet("/api/v1/health/live", () => Results.Ok(new { status = "alive" })).Al
 app.MapGet("/api/v1/health/ready", async (
     IDbContextFactory<MailDbContext> dbFactory,
     IConfiguration configuration,
+    IMessageStorageMaintenance storage,
     CancellationToken cancellationToken) =>
 {
-    var snapshot = await MailServerReadiness.CheckAsync(dbFactory, configuration, cancellationToken);
+    var snapshot = await MailServerReadiness.CheckAsync(dbFactory, configuration, cancellationToken, storage);
     return Results.Json(snapshot, statusCode: snapshot.Status == "ready"
         ? StatusCodes.Status200OK : StatusCodes.Status503ServiceUnavailable);
 }).AllowAnonymous();
@@ -377,6 +379,7 @@ app.MapPost("/api/v1/auth/token", async (
 var api = app.MapGroup("/api/v1").RequireAuthorization("admin")
     .AddEndpointFilterFactory(RequiredInputValidation.Create);
 api.MapPerformanceEndpoints();
+api.MapLocalLogEndpoints();
 
 api.MapGet("/overview", async (
     AdminApplicationService administration,
@@ -402,7 +405,7 @@ api.MapGet("/tasks/executions", async (int? take, ITaskExecutionService tasks, C
     Results.Ok(await tasks.ListExecutionsAsync(take ?? 100, cancellationToken)))
     .RequirePermission(PermissionCodes.TaskRead);
 api.MapGet("/tasks/executions/search", async (
-    Guid? taskId, string? status, DateTimeOffset? from, DateTimeOffset? to, int? page, int? pageSize,
+    long? taskId, string? status, DateTimeOffset? from, DateTimeOffset? to, int? page, int? pageSize,
     HttpContext http, ITaskExecutionService tasks, CancellationToken cancellationToken) =>
 {
     if (page is < 1 || pageSize is < 1 or > 100)
@@ -421,12 +424,12 @@ api.MapGet("/tasks/executions/search", async (
     var result = await tasks.SearchExecutionsAsync(taskId, parsedStatus, from, to, currentPage, currentPageSize, cancellationToken);
     return Results.Ok(new { result.Items, Page = currentPage, PageSize = currentPageSize, result.TotalCount });
 }).RequirePermission(PermissionCodes.TaskRead);
-api.MapGet("/tasks/executions/{id:guid}", async (Guid id, HttpContext http, ITaskExecutionService tasks, CancellationToken cancellationToken) =>
+api.MapGet("/tasks/executions/{id:long}", async (long id, HttpContext http, ITaskExecutionService tasks, CancellationToken cancellationToken) =>
 {
     var execution = await tasks.GetExecutionAsync(id, cancellationToken);
     return execution is null ? AdminApiProblems.NotFound(http, "未找到该次任务执行记录。") : Results.Ok(execution);
 }).RequirePermission(PermissionCodes.TaskRead);
-api.MapPut("/tasks/{id:guid}", async (Guid id, TaskUpdateRequest request, HttpContext http, ITaskExecutionService tasks, CancellationToken cancellationToken) =>
+api.MapPut("/tasks/{id:long}", async (long id, TaskUpdateRequest request, HttpContext http, ITaskExecutionService tasks, CancellationToken cancellationToken) =>
 {
     try
     {
@@ -437,7 +440,7 @@ api.MapPut("/tasks/{id:guid}", async (Guid id, TaskUpdateRequest request, HttpCo
     catch (TaskBusyException) { return AdminApiProblems.Conflict(http, "任务正在执行，请等待结束后再修改。"); }
     catch (KeyNotFoundException) { return AdminApiProblems.NotFound(http, "未找到计划任务。"); }
 }).RequirePermission(PermissionCodes.TaskManage);
-api.MapPost("/tasks/{id:guid}/run", async (Guid id, HttpContext http, TaskExecutionService tasks, CancellationToken cancellationToken) =>
+api.MapPost("/tasks/{id:long}/run", async (long id, HttpContext http, TaskExecutionService tasks, CancellationToken cancellationToken) =>
 {
     try { return Results.Accepted(value: new { executionId = await tasks.RunNowAsync(id, cancellationToken, Actor(http)) }); }
     catch (TaskBusyException) { return AdminApiProblems.Conflict(http, "任务正在执行，请等待结束后重试。"); }
@@ -480,7 +483,7 @@ api.MapGet("/recycle-bin/search", async (
         deletedFrom, deletedTo, purgeFrom, purgeTo, currentPage, currentPageSize, cancellationToken);
     return Results.Ok(new { result.Items, Page = currentPage, PageSize = currentPageSize, result.TotalCount });
 }).RequirePermission(PermissionCodes.TaskRead);
-api.MapPost("/recycle-bin/{id:guid}/restore", async (Guid id, HttpContext http, IRecycleBinService recycle, CancellationToken cancellationToken) =>
+api.MapPost("/recycle-bin/{id:long}/restore", async (long id, HttpContext http, IRecycleBinService recycle, CancellationToken cancellationToken) =>
 {
     try
     {
@@ -490,7 +493,7 @@ api.MapPost("/recycle-bin/{id:guid}/restore", async (Guid id, HttpContext http, 
     catch (KeyNotFoundException) { return AdminApiProblems.NotFound(http, "未找到该回收站对象。"); }
     catch (RecycleBinConflictException exception) { return AdminApiProblems.Conflict(http, exception.Message); }
 }).RequirePermission(PermissionCodes.TaskManage);
-api.MapDelete("/recycle-bin/{id:guid}", async (Guid id, HttpContext http, IRecycleBinService recycle, CancellationToken cancellationToken) =>
+api.MapDelete("/recycle-bin/{id:long}", async (long id, HttpContext http, IRecycleBinService recycle, CancellationToken cancellationToken) =>
 {
     try
     {
@@ -505,7 +508,7 @@ api.MapPost("/recycle-bin/batch/purge", async (
     CancellationToken cancellationToken) =>
 {
     if (request.Ids is not { Length: > 0 and <= 100 }
-        || request.Ids.Any(id => id == Guid.Empty)
+        || request.Ids.Any(id => id == 0)
         || request.Ids.Distinct().Count() != request.Ids.Length)
         return AdminApiProblems.Validation(http, "ids", "请选择 1 至 100 个不同的回收站对象。");
     var logger = loggerFactory.CreateLogger("RecycleBinBatchPurge");
@@ -546,8 +549,8 @@ api.MapGet("/audit", async (
         cancellationToken)))
     .RequirePermission(PermissionCodes.AuditList);
 
-api.MapGet("/audit/{id:guid}", async (
-    Guid id,
+api.MapGet("/audit/{id:long}", async (
+    long id,
     HttpContext http,
     AuditLogService audit,
     CancellationToken cancellationToken) =>
@@ -615,8 +618,8 @@ api.MapPost("/firewall/rules", async (
     catch (InvalidOperationException) { return AdminApiProblems.Conflict(http, "相同的 IP 或 CIDR 防火墙规则已存在，请检查现有规则。"); }
 }).RequirePermission(PermissionCodes.FirewallCreate);
 
-api.MapPut("/firewall/rules/{id:guid}", async (
-    Guid id,
+api.MapPut("/firewall/rules/{id:long}", async (
+    long id,
     UpdateFirewallRuleRequest request,
     HttpContext http,
     AdminApplicationService administration,
@@ -635,8 +638,8 @@ api.MapPut("/firewall/rules/{id:guid}", async (
     catch (KeyNotFoundException) { return AdminApiProblems.NotFound(http, "防火墙规则不存在或已被删除。"); }
 }).RequirePermission(PermissionCodes.FirewallUpdate);
 
-api.MapDelete("/firewall/rules/{id:guid}", async (
-    Guid id,
+api.MapDelete("/firewall/rules/{id:long}", async (
+    long id,
     HttpContext http,
     AdminApplicationService administration,
     CancellationToken cancellationToken) =>
@@ -681,8 +684,8 @@ api.MapGet("/domains/search", async (
         cancellationToken));
 }).RequireAnyDomainPermission(PermissionCodes.DomainList);
 
-api.MapGet("/domains/{id:guid}", async (
-    Guid id,
+api.MapGet("/domains/{id:long}", async (
+    long id,
     HttpContext http,
     AdminApplicationService administration,
     CancellationToken cancellationToken) =>
@@ -723,8 +726,8 @@ api.MapPost("/domains", async (
     }
 }).RequireAllDomainsPermission(PermissionCodes.DomainManage);
 
-api.MapPatch("/domains/{id:guid}", async (
-    Guid id,
+api.MapPatch("/domains/{id:long}", async (
+    long id,
     UpdateDomainRequest request,
     HttpContext http,
     AdminApplicationService administration,
@@ -744,8 +747,8 @@ api.MapPatch("/domains/{id:guid}", async (
     catch (KeyNotFoundException) { return Results.NotFound(); }
 }).RequireDomainPermission(PermissionCodes.DomainUpdate);
 
-api.MapDelete("/domains/{id:guid}", async (
-    Guid id,
+api.MapDelete("/domains/{id:long}", async (
+    long id,
     HttpContext http,
     AdminApplicationService administration,
     CancellationToken cancellationToken) =>
@@ -773,8 +776,8 @@ api.MapPost("/domains/batch/delete", async (
     catch (InvalidOperationException exception) { return Results.BadRequest(new { error = exception.Message }); }
 }).RequireBatchDomainPermission(PermissionCodes.DomainDelete);
 
-api.MapPut("/domains/{id:guid}/details", async (
-    Guid id,
+api.MapPut("/domains/{id:long}/details", async (
+    long id,
     DomainDetailsRequest request,
     HttpContext http,
     AdminApplicationService administration,
@@ -799,8 +802,8 @@ api.MapPut("/domains/{id:guid}/details", async (
     }
 }).RequireDomainPermission(PermissionCodes.DomainUpdate);
 
-api.MapPut("/domains/{id:guid}/quota", async (
-    Guid id,
+api.MapPut("/domains/{id:long}/quota", async (
+    long id,
     DomainQuotaRequest request,
     HttpContext http,
     AdminApplicationService administration,
@@ -821,8 +824,8 @@ api.MapPut("/domains/{id:guid}/quota", async (
     }
 }).RequireDomainPermission(PermissionCodes.DomainQuotaUpdate);
 
-api.MapPost("/domains/{id:guid}/certificate/inspect-upload", async (
-    Guid id,
+api.MapPost("/domains/{id:long}/certificate/inspect-upload", async (
+    long id,
     HttpRequest request,
     DomainCertificateService certificates,
     CancellationToken cancellationToken) =>
@@ -847,8 +850,8 @@ api.MapPost("/domains/{id:guid}/certificate/inspect-upload", async (
 }).DisableAntiforgery()
     .RequireDomainPermission(PermissionCodes.DomainCertificateUpdate);
 
-api.MapPost("/domains/{id:guid}/certificate/upload", async (
-    Guid id,
+api.MapPost("/domains/{id:long}/certificate/upload", async (
+    long id,
     HttpRequest request,
     HttpContext http,
     DomainCertificateService certificates,
@@ -875,8 +878,8 @@ api.MapPost("/domains/{id:guid}/certificate/upload", async (
 }).DisableAntiforgery()
     .RequireDomainPermission(PermissionCodes.DomainCertificateUpdate);
 
-api.MapPost("/domains/{id:guid}/certificate/inspect-path", async (
-    Guid id,
+api.MapPost("/domains/{id:long}/certificate/inspect-path", async (
+    long id,
     CertificatePathRequest request,
     DomainCertificateService certificates,
     CancellationToken cancellationToken) =>
@@ -896,8 +899,8 @@ api.MapPost("/domains/{id:guid}/certificate/inspect-path", async (
     }
 }).RequireDomainPermission(PermissionCodes.DomainCertificateUpdate);
 
-api.MapPut("/domains/{id:guid}/certificate/path", async (
-    Guid id,
+api.MapPut("/domains/{id:long}/certificate/path", async (
+    long id,
     CertificatePathRequest request,
     HttpContext http,
     DomainCertificateService certificates,
@@ -919,8 +922,8 @@ api.MapPut("/domains/{id:guid}/certificate/path", async (
     }
 }).RequireDomainPermission(PermissionCodes.DomainCertificateUpdate);
 
-api.MapDelete("/domains/{id:guid}/certificate", async (
-    Guid id,
+api.MapDelete("/domains/{id:long}/certificate", async (
+    long id,
     HttpContext http,
     DomainCertificateService certificates,
     CancellationToken cancellationToken) =>
@@ -929,8 +932,8 @@ api.MapDelete("/domains/{id:guid}/certificate", async (
     return Results.NoContent();
 }).RequireDomainPermission(PermissionCodes.DomainCertificateDelete);
 
-api.MapGet("/domains/{id:guid}/dns", async (
-    Guid id,
+api.MapGet("/domains/{id:long}/dns", async (
+    long id,
     DomainDnsService dns,
     CancellationToken cancellationToken) =>
 {
@@ -938,8 +941,8 @@ api.MapGet("/domains/{id:guid}/dns", async (
     catch (KeyNotFoundException) { return Results.NotFound(); }
 }).RequireDomainPermission(PermissionCodes.DomainDnsDetail);
 
-api.MapPut("/domains/{id:guid}/dns", async (
-    Guid id,
+api.MapPut("/domains/{id:long}/dns", async (
+    long id,
     DomainDnsSettings request,
     HttpContext http,
     DomainDnsService dns,
@@ -950,8 +953,8 @@ api.MapPut("/domains/{id:guid}/dns", async (
     catch (FormatException exception) { return Results.BadRequest(new { error = exception.Message }); }
 }).RequireDomainPermission(PermissionCodes.DomainDnsUpdate);
 
-api.MapPost("/domains/{id:guid}/dkim", async (
-    Guid id,
+api.MapPost("/domains/{id:long}/dkim", async (
+    long id,
     DkimGenerateRequest request,
     HttpContext http,
     DomainDnsService dns,
@@ -966,8 +969,8 @@ api.MapPost("/domains/{id:guid}/dkim", async (
     catch (FormatException exception) { return Results.BadRequest(new { error = exception.Message }); }
 }).RequireDomainPermission(PermissionCodes.DomainDnsUpdate);
 
-api.MapPost("/domains/{id:guid}/dns/validate", async (
-    Guid id,
+api.MapPost("/domains/{id:long}/dns/validate", async (
+    long id,
     DomainDnsService dns,
     CancellationToken cancellationToken) =>
 {
@@ -975,8 +978,8 @@ api.MapPost("/domains/{id:guid}/dns/validate", async (
     catch (KeyNotFoundException) { return Results.NotFound(); }
 }).RequireDomainPermission(PermissionCodes.DomainDnsDetail);
 
-api.MapGet("/domains/{id:guid}/dns/check", async (
-    Guid id,
+api.MapGet("/domains/{id:long}/dns/check", async (
+    long id,
     DomainDnsService dns,
     CancellationToken cancellationToken) =>
 {
@@ -984,8 +987,8 @@ api.MapGet("/domains/{id:guid}/dns/check", async (
     catch (KeyNotFoundException) { return Results.NotFound(); }
 }).RequireDomainPermission(PermissionCodes.DomainDnsDetail);
 
-api.MapPost("/domains/{id:guid}/dns/check", async (
-    Guid id,
+api.MapPost("/domains/{id:long}/dns/check", async (
+    long id,
     DomainDnsService dns,
     CancellationToken cancellationToken) =>
 {
@@ -1003,8 +1006,8 @@ api.MapPost("/domains/batch/dns-check", async (
     catch (InvalidOperationException exception) { return Results.BadRequest(new { error = exception.Message }); }
 }).RequireBatchDomainPermission(PermissionCodes.DomainDnsCheck);
 
-api.MapGet("/domains/{id:guid}/health", async (
-    Guid id,
+api.MapGet("/domains/{id:long}/health", async (
+    long id,
     AdminApplicationService administration,
     CancellationToken cancellationToken) =>
 {
@@ -1014,8 +1017,8 @@ api.MapGet("/domains/{id:guid}/health", async (
 
 api.MapAccountDirectory();
 
-api.MapGet("/domains/{id:guid}/accounts", async (
-    Guid id,
+api.MapGet("/domains/{id:long}/accounts", async (
+    long id,
     AdminApplicationService administration,
     CancellationToken cancellationToken) =>
 {
@@ -1023,8 +1026,8 @@ api.MapGet("/domains/{id:guid}/accounts", async (
     catch (KeyNotFoundException) { return Results.NotFound(); }
 }).RequireDomainPermission(PermissionCodes.DomainAccountList);
 
-api.MapGet("/domains/{id:guid}/mailbox-settings", async (
-    Guid id,
+api.MapGet("/domains/{id:long}/mailbox-settings", async (
+    long id,
     AdminApplicationService administration,
     CancellationToken cancellationToken) =>
 {
@@ -1032,8 +1035,8 @@ api.MapGet("/domains/{id:guid}/mailbox-settings", async (
     catch (KeyNotFoundException) { return Results.NotFound(); }
 }).RequireDomainPermission(PermissionCodes.DomainDetail);
 
-api.MapPut("/domains/{id:guid}/mailbox-settings", async (
-    Guid id,
+api.MapPut("/domains/{id:long}/mailbox-settings", async (
+    long id,
     MailboxSettingsRequest request,
     HttpContext http,
     AdminApplicationService administration,
@@ -1052,8 +1055,8 @@ api.MapPut("/domains/{id:guid}/mailbox-settings", async (
     catch (InvalidOperationException exception) { return Results.Conflict(new { error = exception.Message }); }
 }).RequireDomainPermission(PermissionCodes.DomainUpdate);
 
-api.MapGet("/domains/{id:guid}/mailbox-folders", async (
-    Guid id,
+api.MapGet("/domains/{id:long}/mailbox-folders", async (
+    long id,
     MailboxFolderManagementService folders,
     CancellationToken cancellationToken) =>
 {
@@ -1061,8 +1064,8 @@ api.MapGet("/domains/{id:guid}/mailbox-folders", async (
     catch (KeyNotFoundException) { return Results.NotFound(); }
 }).RequireDomainPermission(PermissionCodes.DomainDetail);
 
-api.MapPost("/domains/{id:guid}/mailbox-folders", async (
-    Guid id,
+api.MapPost("/domains/{id:long}/mailbox-folders", async (
+    long id,
     MailboxFolderNameRequest request,
     HttpContext http,
     MailboxFolderManagementService folders,
@@ -1074,8 +1077,8 @@ api.MapPost("/domains/{id:guid}/mailbox-folders", async (
     catch (InvalidOperationException exception) { return Results.Conflict(new { error = exception.Message }); }
 }).RequireDomainPermission(PermissionCodes.DomainUpdate);
 
-api.MapPut("/domains/{id:guid}/mailbox-folders/order", async (
-    Guid id,
+api.MapPut("/domains/{id:long}/mailbox-folders/order", async (
+    long id,
     MailboxFolderOrderRequest request,
     HttpContext http,
     MailboxFolderManagementService folders,
@@ -1087,8 +1090,8 @@ api.MapPut("/domains/{id:guid}/mailbox-folders/order", async (
     { return Results.Conflict(new { error = exception.Message }); }
 }).RequireDomainPermission(PermissionCodes.DomainUpdate);
 
-api.MapPost("/domains/{id:guid}/mailbox-folders/deletion-preview", async (
-    Guid id,
+api.MapPost("/domains/{id:long}/mailbox-folders/deletion-preview", async (
+    long id,
     MailboxFolderNameRequest request,
     MailboxFolderManagementService folders,
     CancellationToken cancellationToken) =>
@@ -1099,8 +1102,8 @@ api.MapPost("/domains/{id:guid}/mailbox-folders/deletion-preview", async (
     { return Results.BadRequest(new { error = exception.Message }); }
 }).RequireDomainPermission(PermissionCodes.DomainDetail);
 
-api.MapPost("/domains/{id:guid}/mailbox-folders/deletions", async (
-    Guid id,
+api.MapPost("/domains/{id:long}/mailbox-folders/deletions", async (
+    long id,
     MailboxFolderNameRequest request,
     HttpContext http,
     MailboxFolderManagementService folders,
@@ -1112,9 +1115,9 @@ api.MapPost("/domains/{id:guid}/mailbox-folders/deletions", async (
     { return Results.Conflict(new { error = exception.Message }); }
 }).RequireDomainPermission(PermissionCodes.DomainUpdate);
 
-api.MapPost("/domains/{id:guid}/mailbox-folders/deletions/{jobId:guid}/retry", async (
-    Guid id,
-    Guid jobId,
+api.MapPost("/domains/{id:long}/mailbox-folders/deletions/{jobId:long}/retry", async (
+    long id,
+    long jobId,
     HttpContext http,
     MailboxFolderManagementService folders,
     CancellationToken cancellationToken) =>
@@ -1124,8 +1127,8 @@ api.MapPost("/domains/{id:guid}/mailbox-folders/deletions/{jobId:guid}/retry", a
     catch (InvalidOperationException exception) { return Results.Conflict(new { error = exception.Message }); }
 }).RequireDomainPermission(PermissionCodes.DomainUpdate);
 
-api.MapPost("/domains/{id:guid}/accounts/batch-disable", async (
-    Guid id,
+api.MapPost("/domains/{id:long}/accounts/batch-disable", async (
+    long id,
     IdBatchRequest request,
     HttpContext http,
     AdminApplicationService administration,
@@ -1139,8 +1142,8 @@ api.MapPost("/domains/{id:guid}/accounts/batch-disable", async (
     catch (KeyNotFoundException) { return Results.NotFound(); }
 }).RequireDomainPermission(PermissionCodes.DomainAccountUpdate);
 
-api.MapPost("/domains/{id:guid}/accounts/batch-enable", async (
-    Guid id,
+api.MapPost("/domains/{id:long}/accounts/batch-enable", async (
+    long id,
     IdBatchRequest request,
     HttpContext http,
     AdminApplicationService administration,
@@ -1154,8 +1157,8 @@ api.MapPost("/domains/{id:guid}/accounts/batch-enable", async (
     catch (KeyNotFoundException) { return Results.NotFound(); }
 }).RequireDomainPermission(PermissionCodes.DomainAccountUpdate);
 
-api.MapPost("/domains/{id:guid}/accounts/batch-delete", async (
-    Guid id,
+api.MapPost("/domains/{id:long}/accounts/batch-delete", async (
+    long id,
     IdBatchRequest request,
     HttpContext http,
     AdminApplicationService administration,
@@ -1170,8 +1173,8 @@ api.MapPost("/domains/{id:guid}/accounts/batch-delete", async (
     catch (InvalidOperationException exception) { return Results.Conflict(new { error = exception.Message }); }
 }).RequireDomainPermission(PermissionCodes.DomainAccountUpdate);
 
-api.MapGet("/domains/{id:guid}/accounts/search", async (
-    Guid id,
+api.MapGet("/domains/{id:long}/accounts/search", async (
+    long id,
     string? query,
     bool? isEnabled,
     int? page,
@@ -1192,8 +1195,8 @@ api.MapGet("/domains/{id:guid}/accounts/search", async (
     catch (KeyNotFoundException) { return Results.NotFound(); }
 }).RequireDomainPermission(PermissionCodes.DomainAccountList);
 
-api.MapPost("/domains/{id:guid}/accounts", async (
-    Guid id,
+api.MapPost("/domains/{id:long}/accounts", async (
+    long id,
     DomainAccountRequest request,
     HttpContext http,
     AdminApplicationService administration,
@@ -1217,8 +1220,8 @@ api.MapPost("/domains/{id:guid}/accounts", async (
     catch (InvalidOperationException exception) { return AccountDirectoryEndpoints.Problem(http, 409, exception.Message); }
 }).RequireDomainPermission(PermissionCodes.DomainAccountCreate);
 
-api.MapGet("/domains/{id:guid}/aliases", async (
-    Guid id,
+api.MapGet("/domains/{id:long}/aliases", async (
+    long id,
     AdminApplicationService administration,
     CancellationToken cancellationToken) =>
 {
@@ -1226,8 +1229,8 @@ api.MapGet("/domains/{id:guid}/aliases", async (
     catch (KeyNotFoundException) { return Results.NotFound(); }
 }).RequireDomainPermission(PermissionCodes.DomainAliasList);
 
-api.MapGet("/domains/{id:guid}/aliases/search", async (
-    Guid id,
+api.MapGet("/domains/{id:long}/aliases/search", async (
+    long id,
     string? query,
     int? page,
     int? pageSize,
@@ -1238,8 +1241,8 @@ api.MapGet("/domains/{id:guid}/aliases/search", async (
     catch (KeyNotFoundException) { return Results.NotFound(); }
 }).RequireDomainPermission(PermissionCodes.DomainAliasList);
 
-api.MapPost("/domains/{id:guid}/aliases/batch-mode", async (
-    Guid id,
+api.MapPost("/domains/{id:long}/aliases/batch-mode", async (
+    long id,
     AliasModeBatchRequest request,
     HttpContext http,
     AdminApplicationService administration,
@@ -1255,8 +1258,8 @@ api.MapPost("/domains/{id:guid}/aliases/batch-mode", async (
     { return Results.Conflict(new { error = exception.Message }); }
 }).RequireDomainPermission(PermissionCodes.DomainAliasUpdate);
 
-api.MapPost("/domains/{id:guid}/aliases/batch-delete", async (
-    Guid id,
+api.MapPost("/domains/{id:long}/aliases/batch-delete", async (
+    long id,
     IdBatchRequest request,
     HttpContext http,
     AdminApplicationService administration,
@@ -1270,8 +1273,8 @@ api.MapPost("/domains/{id:guid}/aliases/batch-delete", async (
     catch (KeyNotFoundException) { return Results.NotFound(); }
 }).RequireDomainPermission(PermissionCodes.DomainAliasDelete);
 
-api.MapPost("/domains/{id:guid}/aliases", async (
-    Guid id,
+api.MapPost("/domains/{id:long}/aliases", async (
+    long id,
     DomainAliasRequest request,
     HttpContext http,
     AdminApplicationService administration,
@@ -1293,9 +1296,9 @@ api.MapPost("/domains/{id:guid}/aliases", async (
     catch (InvalidOperationException exception) { return AccountDirectoryEndpoints.Problem(http, 409, exception.Message); }
 }).RequireDomainPermission(PermissionCodes.DomainAliasCreate);
 
-api.MapPut("/domains/{id:guid}/aliases/{aliasId:guid}", async (
-    Guid id,
-    Guid aliasId,
+api.MapPut("/domains/{id:long}/aliases/{aliasId:long}", async (
+    long id,
+    long aliasId,
     RebindAliasRequest request,
     HttpContext http,
     AdminApplicationService administration,
@@ -1319,8 +1322,8 @@ api.MapPut("/domains/{id:guid}/aliases/{aliasId:guid}", async (
     catch (InvalidOperationException exception) { return AccountDirectoryEndpoints.Problem(http, 409, exception.Message); }
 }).RequireDomainPermission(PermissionCodes.DomainAliasUpdate);
 
-api.MapGet("/domains/{id:guid}/rules", async (
-    Guid id,
+api.MapGet("/domains/{id:long}/rules", async (
+    long id,
     MailRuleDirection? direction,
     MailRuleService ruleService,
     CancellationToken cancellationToken) =>
@@ -1329,8 +1332,8 @@ api.MapGet("/domains/{id:guid}/rules", async (
     catch (KeyNotFoundException) { return Results.NotFound(); }
 }).RequireDomainPermission(PermissionCodes.DomainRuleList);
 
-api.MapGet("/domains/{id:guid}/rule-folders", async (
-    Guid id,
+api.MapGet("/domains/{id:long}/rule-folders", async (
+    long id,
     MailRuleService ruleService,
     CancellationToken cancellationToken) =>
 {
@@ -1338,8 +1341,8 @@ api.MapGet("/domains/{id:guid}/rule-folders", async (
     catch (KeyNotFoundException) { return Results.NotFound(); }
 }).RequireDomainPermission(PermissionCodes.DomainRuleList);
 
-api.MapPost("/domains/{id:guid}/rules", async (
-    Guid id,
+api.MapPost("/domains/{id:long}/rules", async (
+    long id,
     MailRuleInput request,
     HttpContext http,
     MailRuleService ruleService,
@@ -1355,9 +1358,9 @@ api.MapPost("/domains/{id:guid}/rules", async (
     { return Results.BadRequest(new { error = exception.Message }); }
 }).RequireDomainPermission(PermissionCodes.DomainRuleCreate);
 
-api.MapPut("/domains/{id:guid}/rules/{ruleId:guid}", async (
-    Guid id,
-    Guid ruleId,
+api.MapPut("/domains/{id:long}/rules/{ruleId:long}", async (
+    long id,
+    long ruleId,
     MailRuleInput request,
     HttpContext http,
     MailRuleService ruleService,
@@ -1369,9 +1372,9 @@ api.MapPut("/domains/{id:guid}/rules/{ruleId:guid}", async (
     { return Results.BadRequest(new { error = exception.Message }); }
 }).RequireDomainPermission(PermissionCodes.DomainRuleUpdate);
 
-api.MapDelete("/domains/{id:guid}/rules/{ruleId:guid}", async (
-    Guid id,
-    Guid ruleId,
+api.MapDelete("/domains/{id:long}/rules/{ruleId:long}", async (
+    long id,
+    long ruleId,
     HttpContext http,
     MailRuleService ruleService,
     CancellationToken cancellationToken) =>
@@ -1384,8 +1387,8 @@ api.MapDelete("/domains/{id:guid}/rules/{ruleId:guid}", async (
     catch (KeyNotFoundException) { return Results.NotFound(); }
 }).RequireDomainPermission(PermissionCodes.DomainRuleDelete);
 
-api.MapPut("/domains/{id:guid}/rules/order", async (
-    Guid id,
+api.MapPut("/domains/{id:long}/rules/order", async (
+    long id,
     ReorderRulesRequest request,
     HttpContext http,
     MailRuleService ruleService,
@@ -1400,8 +1403,8 @@ api.MapPut("/domains/{id:guid}/rules/order", async (
     catch (InvalidOperationException exception) { return Results.BadRequest(new { error = exception.Message }); }
 }).RequireDomainPermission(PermissionCodes.DomainRuleReorder);
 
-api.MapGet("/domains/{id:guid}/audit", async (
-    Guid id,
+api.MapGet("/domains/{id:long}/audit", async (
+    long id,
     AdminApplicationService administration,
     CancellationToken cancellationToken) =>
 {
@@ -1420,8 +1423,8 @@ api.MapGet("/quarantine/domains", async (
     return Results.Ok(domains.Select(domain => new { domain.Id, domain.Name }));
 }).RequireAnyDomainPermission(PermissionCodes.DomainQuarantineRead);
 
-api.MapGet("/domains/{domainId:guid}/quarantine", async (
-    Guid domainId,
+api.MapGet("/domains/{domainId:long}/quarantine", async (
+    long domainId,
     string? search,
     QuarantineStatus? status,
     int? page,
@@ -1431,9 +1434,9 @@ api.MapGet("/domains/{domainId:guid}/quarantine", async (
     Results.Ok(await quarantine.SearchAsync(domainId, search, status, page ?? 1, pageSize ?? 10, cancellationToken)))
     .RequireDomainPermission(PermissionCodes.DomainQuarantineRead, "domainId");
 
-api.MapGet("/domains/{domainId:guid}/quarantine/{id:guid}/raw", async (
-    Guid domainId,
-    Guid id,
+api.MapGet("/domains/{domainId:long}/quarantine/{id:long}/raw", async (
+    long domainId,
+    long id,
     IQuarantineService quarantine,
     CancellationToken cancellationToken) =>
 {
@@ -1442,9 +1445,9 @@ api.MapGet("/domains/{domainId:guid}/quarantine/{id:guid}/raw", async (
     catch (FileNotFoundException exception) { return Results.NotFound(new { error = exception.Message }); }
 }).RequireDomainPermission(PermissionCodes.DomainQuarantineRead, "domainId");
 
-api.MapGet("/domains/{domainId:guid}/quarantine/{id:guid}/raw/download", async (
-    Guid domainId,
-    Guid id,
+api.MapGet("/domains/{domainId:long}/quarantine/{id:long}/raw/download", async (
+    long domainId,
+    long id,
     IQuarantineService quarantine,
     CancellationToken cancellationToken) =>
 {
@@ -1457,9 +1460,9 @@ api.MapGet("/domains/{domainId:guid}/quarantine/{id:guid}/raw/download", async (
     catch (FileNotFoundException exception) { return Results.NotFound(new { error = exception.Message }); }
 }).RequireDomainPermission(PermissionCodes.DomainQuarantineRead, "domainId");
 
-api.MapPost("/domains/{domainId:guid}/quarantine/{id:guid}/release", async (
-    Guid domainId,
-    Guid id,
+api.MapPost("/domains/{domainId:long}/quarantine/{id:long}/release", async (
+    long domainId,
+    long id,
     QuarantineActionRequest request,
     HttpContext http,
     IQuarantineService quarantine,
@@ -1474,9 +1477,9 @@ api.MapPost("/domains/{domainId:guid}/quarantine/{id:guid}/release", async (
     catch (InvalidOperationException exception) { return Results.BadRequest(new { error = exception.Message }); }
 }).RequireDomainPermission(PermissionCodes.DomainQuarantineManage, "domainId");
 
-api.MapDelete("/domains/{domainId:guid}/quarantine/{id:guid}", async (
-    Guid domainId,
-    Guid id,
+api.MapDelete("/domains/{domainId:long}/quarantine/{id:long}", async (
+    long domainId,
+    long id,
     [FromBody] QuarantineActionRequest? request,
     HttpContext http,
     IQuarantineService quarantine,
@@ -1527,8 +1530,8 @@ api.MapPost("/accounts", async (
     }
 }).RequireAddressDomainPermission(PermissionCodes.DomainAccountCreate, nameof(AccountRequest.Address));
 
-api.MapPost("/accounts/{id:guid}/password", async (
-    Guid id,
+api.MapPost("/accounts/{id:long}/password", async (
+    long id,
     PasswordRequest request,
     HttpContext http,
     AdminApplicationService administration,
@@ -1543,8 +1546,8 @@ api.MapPost("/accounts/{id:guid}/password", async (
     catch (FormatException exception) { return AccountDirectoryEndpoints.Invalid(http, "password", exception.Message); }
 }).RequireAccountDomainPermission(PermissionCodes.DomainAccountPassword);
 
-api.MapPatch("/accounts/{id:guid}", async (
-    Guid id,
+api.MapPatch("/accounts/{id:long}", async (
+    long id,
     UpdateAccountRequest request,
     HttpContext http,
     AdminApplicationService administration,
@@ -1560,8 +1563,8 @@ api.MapPatch("/accounts/{id:guid}", async (
     catch (InvalidOperationException exception) { return AccountDirectoryEndpoints.Invalid(http, "quotaBytes", exception.Message); }
 }).RequireAccountDomainPermission(PermissionCodes.DomainAccountUpdate);
 
-api.MapDelete("/accounts/{id:guid}", async (
-    Guid id,
+api.MapDelete("/accounts/{id:long}", async (
+    long id,
     HttpContext http,
     AdminApplicationService administration,
     CancellationToken cancellationToken) =>
@@ -1606,8 +1609,8 @@ api.MapPost("/aliases", async (
     }
 }).RequireAddressDomainPermission(PermissionCodes.DomainAliasCreate, nameof(AliasRequest.Source));
 
-api.MapDelete("/aliases/{id:guid}", async (
-    Guid id,
+api.MapDelete("/aliases/{id:long}", async (
+    long id,
     HttpContext http,
     AdminApplicationService administration,
     CancellationToken cancellationToken) =>
@@ -1653,11 +1656,11 @@ api.MapGet("/permissions/domains/resolve", async (
     if (!PermissionCodes.SupportsDomainScope(code))
         return AdminApiProblems.Validation(http, "code", "请选择支持域范围的权限代码。");
     var values = ids?.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries) ?? [];
-    if (values.Length > 100 || values.Any(value => !Guid.TryParse(value, out _)))
+    if (values.Length > 100 || values.Any(value => !long.TryParse(value, out _)))
         return AdminApiProblems.Validation(http, "ids", "每次最多查询 100 个有效的域 ID。");
     var scope = await permissions.GetPermittedDomainScopeAsync(http.User, code, cancellationToken);
     return Results.Ok(await administration.ResolvePermissionDomainsAsync(
-        values.Select(Guid.Parse).Distinct().ToArray(), scope, cancellationToken));
+        values.Select(long.Parse).Distinct().ToArray(), scope, cancellationToken));
 }).RequirePermission(PermissionCodes.IamManage);
 
 api.MapGet("/admins", async (
@@ -1702,8 +1705,8 @@ api.MapPost("/admins", async (
 }).RequirePermission(PermissionCodes.AdminAccountCreate)
     .RequirePermission(PermissionCodes.IamManage);
 
-api.MapPatch("/admins/{id:guid}", async (
-    Guid id,
+api.MapPatch("/admins/{id:long}", async (
+    long id,
     UpdateAdminUserRequest request,
     HttpContext http,
     AdminApplicationService administration,
@@ -1726,8 +1729,8 @@ api.MapPatch("/admins/{id:guid}", async (
     }
 }).RequirePermission(PermissionCodes.AdminAccountUpdate);
 
-api.MapDelete("/admins/{id:guid}", async (
-    Guid id,
+api.MapDelete("/admins/{id:long}", async (
+    long id,
     HttpContext http,
     AdminApplicationService administration,
     CancellationToken cancellationToken) =>
@@ -1741,8 +1744,8 @@ api.MapDelete("/admins/{id:guid}", async (
     catch (InvalidOperationException exception) { return Results.BadRequest(new { error = exception.Message }); }
 }).RequirePermission(PermissionCodes.AdminAccountDelete);
 
-api.MapGet("/admins/{id:guid}/grants", async (
-    Guid id,
+api.MapGet("/admins/{id:long}/grants", async (
+    long id,
     PermissionService permissions,
     CancellationToken cancellationToken) =>
 {
@@ -1750,8 +1753,8 @@ api.MapGet("/admins/{id:guid}/grants", async (
     catch (KeyNotFoundException) { return Results.NotFound(); }
 }).RequirePermission(PermissionCodes.IamManage);
 
-api.MapPut("/admins/{id:guid}/grants", async (
-    Guid id,
+api.MapPut("/admins/{id:long}/grants", async (
+    long id,
     PermissionGrantsRequest request,
     HttpContext http,
     PermissionService permissions,
@@ -1772,8 +1775,8 @@ api.MapPut("/admins/{id:guid}/grants", async (
     catch (InvalidOperationException exception) { return Results.BadRequest(new { error = exception.Message }); }
 }).RequirePermission(PermissionCodes.IamManage);
 
-api.MapGet("/api-keys/{id:guid}/grants", async (
-    Guid id,
+api.MapGet("/api-keys/{id:long}/grants", async (
+    long id,
     PermissionService permissions,
     CancellationToken cancellationToken) =>
 {
@@ -1781,8 +1784,8 @@ api.MapGet("/api-keys/{id:guid}/grants", async (
     catch (KeyNotFoundException) { return Results.NotFound(); }
 }).RequirePermission(PermissionCodes.IamManage);
 
-api.MapPut("/api-keys/{id:guid}/grants", async (
-    Guid id,
+api.MapPut("/api-keys/{id:long}/grants", async (
+    long id,
     PermissionGrantsRequest request,
     HttpContext http,
     PermissionService permissions,
@@ -1844,8 +1847,8 @@ api.MapGet("/api-keys", async (
         cancellationToken)))
     .RequirePermission(PermissionCodes.ApiKeyList);
 
-api.MapDelete("/api-keys/{id:guid}", async (
-    Guid id,
+api.MapDelete("/api-keys/{id:long}", async (
+    long id,
     HttpContext http,
     AdminApplicationService administration,
     CancellationToken cancellationToken) =>
@@ -1858,8 +1861,8 @@ api.MapDelete("/api-keys/{id:guid}", async (
     catch (KeyNotFoundException) { return Results.NotFound(); }
 }).RequirePermission(PermissionCodes.ApiKeyDelete);
 
-api.MapPost("/api-keys/{id:guid}/refresh", async (
-    Guid id,
+api.MapPost("/api-keys/{id:long}/refresh", async (
+    long id,
     HttpContext http,
     AdminApplicationService administration,
     CancellationToken cancellationToken) =>
@@ -1880,7 +1883,7 @@ api.MapPost("/admins/me/password", async (
 {
     var subject = http.User.FindFirstValue(JwtRegisteredClaimNames.Sub)
                   ?? http.User.FindFirstValue(ClaimTypes.NameIdentifier);
-    if (!Guid.TryParse(subject, out var adminId)) return Results.Unauthorized();
+    if (!long.TryParse(subject, out var adminId)) return Results.Unauthorized();
     try
     {
         await administration.ChangeAdminPasswordAsync(
@@ -1916,41 +1919,41 @@ api.MapGet("/operations/messages", async (string? messageId, string? sender, str
     return Results.Ok(await mail.SearchAsync(new(messageId, sender, recipient, authenticatedAccount,
         from, to, deliveryStatus, recycled, page ?? 1, pageSize ?? 50), token));
 }).RequirePermission(PermissionCodes.OperationsMailRead);
-api.MapGet("/operations/messages/{id:guid}", async (Guid id, OperationsMailService mail, CancellationToken token) =>
+api.MapGet("/operations/messages/{id:long}", async (long id, OperationsMailService mail, CancellationToken token) =>
     await mail.GetAsync(id, token) is { } result ? Results.Ok(result) : Results.NotFound())
     .RequirePermission(PermissionCodes.OperationsMailRead);
-api.MapGet("/operations/messages/{id:guid}/recipients", async (Guid id, string kind, int? page, int? pageSize,
+api.MapGet("/operations/messages/{id:long}/recipients", async (long id, string kind, int? page, int? pageSize,
     OperationsMailService mail, CancellationToken token) =>
     await mail.GetRecipientsAsync(id, kind, page ?? 1, pageSize ?? 50, token) is { } result
         ? Results.Ok(result) : Results.NotFound())
     .RequirePermission(PermissionCodes.OperationsMailRead);
-api.MapGet("/operations/messages/{id:guid}/copies", async (Guid id, int? page, int? pageSize,
+api.MapGet("/operations/messages/{id:long}/copies", async (long id, int? page, int? pageSize,
     OperationsMailService mail, CancellationToken token) =>
     await mail.GetCopiesAsync(id, page ?? 1, pageSize ?? 50, token) is { } result
         ? Results.Ok(result) : Results.NotFound())
     .RequirePermission(PermissionCodes.OperationsMailRead);
-api.MapGet("/operations/messages/{id:guid}/deliveries", async (Guid id, int? page, int? pageSize,
+api.MapGet("/operations/messages/{id:long}/deliveries", async (long id, int? page, int? pageSize,
     OperationsMailService mail, CancellationToken token) =>
     await mail.GetDeliveriesAsync(id, page ?? 1, pageSize ?? 50, token) is { } result
         ? Results.Ok(result) : Results.NotFound())
     .RequirePermission(PermissionCodes.OperationsMailRead);
-api.MapGet("/operations/messages/{id:guid}/deliveries/{jobId:guid}/attempts", async (
-    Guid id, Guid jobId, int? page, int? pageSize, OperationsMailService mail, CancellationToken token) =>
+api.MapGet("/operations/messages/{id:long}/deliveries/{jobId:long}/attempts", async (
+    long id, long jobId, int? page, int? pageSize, OperationsMailService mail, CancellationToken token) =>
     await mail.GetAttemptsAsync(id, jobId, page ?? 1, pageSize ?? 50, token) is { } result ? Results.Ok(result) : Results.NotFound())
     .RequirePermission(PermissionCodes.OperationsMailRead);
-api.MapGet("/operations/messages/{id:guid}/content", async (Guid id, HttpContext http,
+api.MapGet("/operations/messages/{id:long}/content", async (long id, HttpContext http,
     OperationsMailService mail, CancellationToken token) =>
 {
     var content = await mail.GetContentAsync(id, Actor(http), "operations.mail.preview", token);
     return content is null ? Results.NotFound(new { error = "邮件记录或原文不存在。" }) : Results.Ok(content);
 }).RequirePermission(PermissionCodes.OperationsMailRead)
     .RequirePermission(PermissionCodes.OperationsMailContentRead);
-api.MapGet("/operations/messages/{id:guid}/raw", async (Guid id, HttpContext http,
+api.MapGet("/operations/messages/{id:long}/raw", async (long id, HttpContext http,
     OperationsMailService mail, CancellationToken token) =>
 {
     var stream = await mail.OpenAuditedAsync(id, Actor(http), "operations.mail.download", token);
     return stream is null ? Results.NotFound(new { error = "邮件记录或原文不存在。" })
-        : Results.Stream(stream, "message/rfc822", $"message-{id:N}.eml");
+        : Results.Stream(stream, "message/rfc822", $"message-{id}.eml");
 }).RequirePermission(PermissionCodes.OperationsMailRead)
     .RequirePermission(PermissionCodes.OperationsMailContentRead);
 
@@ -1960,8 +1963,8 @@ api.MapGet("/queues/summary", async (
     Results.Ok(await administration.GetDeliveryQueueSummaryAsync(cancellationToken)))
     .RequirePermission(PermissionCodes.QueueList);
 
-api.MapGet("/queues/{id:guid}/raw", async (
-    Guid id,
+api.MapGet("/queues/{id:long}/raw", async (
+    long id,
     AdminApplicationService administration,
     CancellationToken cancellationToken) =>
 {
@@ -1979,8 +1982,8 @@ api.MapGet("/queues/{id:guid}/raw", async (
     }
 }).RequirePermission(PermissionCodes.QueueList);
 
-api.MapGet("/queues/{id:guid}/attempts", async (
-    Guid id,
+api.MapGet("/queues/{id:long}/attempts", async (
+    long id,
     AdminApplicationService administration,
     CancellationToken cancellationToken) =>
 {
@@ -1988,8 +1991,8 @@ api.MapGet("/queues/{id:guid}/attempts", async (
     catch (KeyNotFoundException) { return Results.NotFound(); }
 }).RequirePermission(PermissionCodes.QueueList);
 
-api.MapPost("/queues/{id:guid}/retry", async (
-    Guid id,
+api.MapPost("/queues/{id:long}/retry", async (
+    long id,
     DeliveryRetryRequest request,
     HttpContext http,
     AdminApplicationService administration,
@@ -2024,8 +2027,8 @@ api.MapPost("/queues/batch/delete", async (
     catch (ArgumentException exception) { return Results.Problem(statusCode: 400, title: "批量投递请求无效", detail: exception.Message, type: "https://mailserver.local/problems/invalid-delivery-batch", extensions: new Dictionary<string, object?> { ["traceId"] = http.TraceIdentifier }); }
 }).RequirePermission(PermissionCodes.QueueDelete);
 
-api.MapDelete("/queues/{id:guid}", async (
-    Guid id,
+api.MapDelete("/queues/{id:long}", async (
+    long id,
     HttpContext http,
     AdminApplicationService administration,
     CancellationToken cancellationToken) =>
@@ -2054,8 +2057,8 @@ api.MapGet("/delivery/tls-reports", async (
         cancellationToken)))
     .RequirePermission(PermissionCodes.QueueList);
 
-api.MapGet("/delivery/tls-reports/{id:guid}", async (
-    Guid id,
+api.MapGet("/delivery/tls-reports/{id:long}", async (
+    long id,
     AdminApplicationService administration,
     CancellationToken cancellationToken) =>
 {
@@ -2063,8 +2066,8 @@ api.MapGet("/delivery/tls-reports/{id:guid}", async (
     catch (KeyNotFoundException) { return Results.NotFound(); }
 }).RequirePermission(PermissionCodes.QueueList);
 
-api.MapPost("/delivery/tls-reports/{id:guid}/retry", async (
-    Guid id,
+api.MapPost("/delivery/tls-reports/{id:long}/retry", async (
+    long id,
     HttpContext http,
     AdminApplicationService administration,
     CancellationToken cancellationToken) =>
@@ -2080,8 +2083,8 @@ api.MapPost("/delivery/tls-reports/{id:guid}/retry", async (
     catch (InvalidOperationException exception) { return Results.Problem(statusCode: 409, title: "TLS 报告当前不可重试", detail: exception.Message, type: "https://mailserver.local/problems/tls-report-retry-conflict", extensions: new Dictionary<string, object?> { ["traceId"] = http.TraceIdentifier }); }
 }).RequirePermission(PermissionCodes.QueueRetry);
 
-api.MapGet("/domains/{domainId:guid}/queue", async (
-    Guid domainId,
+api.MapGet("/domains/{domainId:long}/queue", async (
+    long domainId,
     string? search,
     DeliveryStatus? status,
     DeliveryJobScope? scope,
@@ -2099,9 +2102,9 @@ api.MapGet("/domains/{domainId:guid}/queue", async (
         domainId)))
     .RequireDomainPermission(PermissionCodes.DomainRead, "domainId");
 
-api.MapGet("/domains/{domainId:guid}/queue/{id:guid}/raw", async (
-    Guid domainId,
-    Guid id,
+api.MapGet("/domains/{domainId:long}/queue/{id:long}/raw", async (
+    long domainId,
+    long id,
     AdminApplicationService administration,
     CancellationToken cancellationToken) =>
 {
@@ -2119,9 +2122,9 @@ api.MapGet("/domains/{domainId:guid}/queue/{id:guid}/raw", async (
     }
 }).RequireDomainPermission(PermissionCodes.DomainRead, "domainId");
 
-api.MapPost("/domains/{domainId:guid}/queue/{id:guid}/retry", async (
-    Guid domainId,
-    Guid id,
+api.MapPost("/domains/{domainId:long}/queue/{id:long}/retry", async (
+    long domainId,
+    long id,
     DeliveryRetryRequest request,
     HttpContext http,
     AdminApplicationService administration,
@@ -2139,8 +2142,8 @@ api.MapPost("/domains/{domainId:guid}/queue/{id:guid}/retry", async (
     catch (DeliveryStateConflictException) { return DeliveryConflict(http); }
 }).RequireDomainPermission(PermissionCodes.DomainManage, "domainId");
 
-api.MapPost("/domains/{domainId:guid}/queue/batch/retry", async (
-    Guid domainId, IdBatchRequest request, HttpContext http, AdminApplicationService administration, CancellationToken cancellationToken) =>
+api.MapPost("/domains/{domainId:long}/queue/batch/retry", async (
+    long domainId, IdBatchRequest request, HttpContext http, AdminApplicationService administration, CancellationToken cancellationToken) =>
 {
     if (request.ExpectedAttempts is null)
         return AdminApiProblems.Validation(http, "ExpectedAttempts", "请提供每个任务的投递次数。");
@@ -2149,16 +2152,16 @@ api.MapPost("/domains/{domainId:guid}/queue/batch/retry", async (
     catch (ArgumentException exception) { return Results.Problem(statusCode: 400, title: "批量投递请求无效", detail: exception.Message, type: "https://mailserver.local/problems/invalid-delivery-batch", extensions: new Dictionary<string, object?> { ["traceId"] = http.TraceIdentifier }); }
 }).RequireDomainPermission(PermissionCodes.DomainManage, "domainId");
 
-api.MapPost("/domains/{domainId:guid}/queue/batch/delete", async (
-    Guid domainId, IdBatchRequest request, HttpContext http, AdminApplicationService administration, CancellationToken cancellationToken) =>
+api.MapPost("/domains/{domainId:long}/queue/batch/delete", async (
+    long domainId, IdBatchRequest request, HttpContext http, AdminApplicationService administration, CancellationToken cancellationToken) =>
 {
     try { return Results.Ok(await administration.BatchDeleteDeliveriesAsync(request.Ids, Actor(http), cancellationToken, domainId)); }
     catch (ArgumentException exception) { return Results.Problem(statusCode: 400, title: "批量投递请求无效", detail: exception.Message, type: "https://mailserver.local/problems/invalid-delivery-batch", extensions: new Dictionary<string, object?> { ["traceId"] = http.TraceIdentifier }); }
 }).RequireDomainPermission(PermissionCodes.DomainManage, "domainId");
 
-api.MapDelete("/domains/{domainId:guid}/queue/{id:guid}", async (
-    Guid domainId,
-    Guid id,
+api.MapDelete("/domains/{domainId:long}/queue/{id:long}", async (
+    long domainId,
+    long id,
     HttpContext http,
     AdminApplicationService administration,
     CancellationToken cancellationToken) =>
@@ -2223,6 +2226,8 @@ api.MapPut("/settings/resources", async (ResourceSelection request, ResourceSett
 }).RequirePermission(PermissionCodes.SettingsUpdate);
 api.MapGet("/settings/resources/status", async (ResourceSettingsService resources, CancellationToken token) =>
     Results.Ok(await resources.StatusAsync(token))).RequirePermission(PermissionCodes.SettingsDetail);
+api.MapGet("/settings/nodes", async (NodeStatusService nodes, CancellationToken token) =>
+    Results.Ok(await nodes.ListAsync(token))).RequirePermission(PermissionCodes.SettingsDetail);
 
 api.MapGet("/security/connection-protection", async (
     ConnectionProtectionSettingsService settings, CancellationToken token) =>
@@ -2551,20 +2556,20 @@ public sealed record AccountRequest(string Address, string Password, long? Quota
 public sealed record DomainAccountRequest(string LocalPart, string Password, long? QuotaBytes);
 public sealed record PasswordRequest(string Password);
 public sealed record UpdateAccountRequest(bool? IsEnabled, long? QuotaBytes);
-public sealed record AliasRequest(string Source, Guid TargetAccountId);
+public sealed record AliasRequest(string Source, long TargetAccountId);
 public sealed record DomainAliasRequest(
     string SourceLocalPart,
-    Guid TargetAccountId,
+    long TargetAccountId,
     MailAliasMode Mode = MailAliasMode.SendReceive);
 public sealed record RebindAliasRequest(
-    Guid? TargetAccountId,
+    long? TargetAccountId,
     string? SourceLocalPart = null,
     MailAliasMode? Mode = null);
-public sealed record IdBatchRequest(Guid[] Ids, Dictionary<Guid, int>? ExpectedAttempts = null);
+public sealed record IdBatchRequest(long[] Ids, Dictionary<long, int>? ExpectedAttempts = null);
 public sealed record DeliveryRetryRequest(int? ExpectedAttempts);
-public sealed record AliasModeBatchRequest(Guid[] Ids, MailAliasMode Mode);
-public sealed record DomainBatchRequest(Guid[] DomainIds);
-public sealed record ReorderRulesRequest(MailRuleDirection Direction, Guid[] RuleIds);
+public sealed record AliasModeBatchRequest(long[] Ids, MailAliasMode Mode);
+public sealed record DomainBatchRequest(long[] DomainIds);
+public sealed record ReorderRulesRequest(MailRuleDirection Direction, long[] RuleIds);
 public sealed record ApiKeyRequest(string Name, PermissionGrantInput[] Grants, DateTimeOffset? ExpiresAt);
 public sealed record PermissionGrantsRequest(PermissionGrantInput[] Grants);
 public sealed record AdminUserRequest(string UserName, string Password, bool IsEnabled, PermissionGrantInput[] Grants);

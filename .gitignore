@@ -2,6 +2,7 @@
 **/bin/
 **/obj/
 builds/
+/.cache/
 src/MailServer.Admin/node_modules/
 src/MailServer.Admin/dist/
 artifacts/
@@ -60,6 +61,8 @@ Desktop.ini
 
 
 # QA artifacts
+docs/.performance/
+docs/.testing/
 .tmp-tests/
 .qa-cdp-profile/
 .qa-login-browser/

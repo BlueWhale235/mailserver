@@ -13,7 +13,7 @@ public sealed record MailboxFolderDeletionPreview(
     int AffectedRuleCount);
 
 public sealed record MailboxFolderDeletionJobView(
-    Guid Id,
+    long Id,
     string FolderName,
     MailboxFolderDeletionStatus Status,
     int AffectedAccountCount,
@@ -37,7 +37,7 @@ public sealed class MailboxFolderManagementService(
 {
     private const string GlobalMailboxFoldersKey = "mailbox-defaults:folders";
 
-    public async Task<DomainMailboxFoldersView> GetAsync(Guid domainId, CancellationToken cancellationToken)
+    public async Task<DomainMailboxFoldersView> GetAsync(long domainId, CancellationToken cancellationToken)
     {
         var settings = await systemSettings.GetDomainMailboxSettingsAsync(domainId, cancellationToken);
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
@@ -53,7 +53,7 @@ public sealed class MailboxFolderManagementService(
     }
 
     public async Task<DomainMailboxFoldersView> AddAsync(
-        Guid domainId,
+        long domainId,
         string folderName,
         string actor,
         CancellationToken cancellationToken)
@@ -115,7 +115,7 @@ public sealed class MailboxFolderManagementService(
     }
 
     public async Task<DomainMailboxFoldersView> ReorderAsync(
-        Guid domainId,
+        long domainId,
         IReadOnlyList<string> extraFolders,
         string actor,
         CancellationToken cancellationToken)
@@ -140,7 +140,7 @@ public sealed class MailboxFolderManagementService(
     }
 
     public async Task<MailboxFolderDeletionPreview> PreviewAsync(
-        Guid domainId,
+        long domainId,
         string folderName,
         CancellationToken cancellationToken)
     {
@@ -152,7 +152,7 @@ public sealed class MailboxFolderManagementService(
     }
 
     public async Task<MailboxFolderDeletionJobView> RequestDomainDeletionAsync(
-        Guid domainId,
+        long domainId,
         string folderName,
         string actor,
         CancellationToken cancellationToken)
@@ -162,21 +162,21 @@ public sealed class MailboxFolderManagementService(
     }
 
     public async Task<MailboxFolderDeletionJobView> RequestAccountDeletionAsync(
-        Guid accountId,
+        long accountId,
         string folderName,
         string actor,
         CancellationToken cancellationToken)
     {
         var normalized = ValidateDeletable(folderName);
         await using var lookup = await dbFactory.CreateDbContextAsync(cancellationToken);
-        var domainId = await lookup.Accounts.Where(x => x.Id == accountId).Select(x => (Guid?)x.DomainId)
+        var domainId = await lookup.Accounts.Where(x => x.Id == accountId).Select(x => (long?)x.DomainId)
             .SingleOrDefaultAsync(cancellationToken) ?? throw new KeyNotFoundException("Account not found.");
         return await RequestDeletionAsync(domainId, accountId, normalized, actor, removeFromConfiguration: false, cancellationToken);
     }
 
     public async Task<MailboxFolderDeletionJobView> RetryAsync(
-        Guid domainId,
-        Guid jobId,
+        long domainId,
+        long jobId,
         string actor,
         CancellationToken cancellationToken)
     {
@@ -201,7 +201,7 @@ public sealed class MailboxFolderManagementService(
         var jobId = await db.MailboxFolderDeletionJobs.AsNoTracking()
             .Where(x => x.Status == MailboxFolderDeletionStatus.Pending || x.Status == MailboxFolderDeletionStatus.Running)
             .OrderBy(x => x.CreatedAt)
-            .Select(x => (Guid?)x.Id)
+            .Select(x => (long?)x.Id)
             .FirstOrDefaultAsync(cancellationToken);
         if (jobId is null) return 0;
 
@@ -283,8 +283,8 @@ public sealed class MailboxFolderManagementService(
     }
 
     private async Task<MailboxFolderDeletionJobView> RequestDeletionAsync(
-        Guid domainId,
-        Guid? accountId,
+        long domainId,
+        long? accountId,
         string normalized,
         string actor,
         bool removeFromConfiguration,
@@ -352,7 +352,7 @@ public sealed class MailboxFolderManagementService(
         return ToView(job);
     }
 
-    private static async Task RedirectRulesAsync(MailDbContext db, Guid domainId, string folderName, CancellationToken cancellationToken)
+    private static async Task RedirectRulesAsync(MailDbContext db, long domainId, string folderName, CancellationToken cancellationToken)
     {
         var rules = await db.MailRules.Include(x => x.Actions).Where(x => x.DomainId == domainId).ToListAsync(cancellationToken);
         foreach (var rule in rules)
@@ -384,8 +384,8 @@ public sealed class MailboxFolderManagementService(
 
     private static async Task<MailboxFolderDeletionPreview> PreviewCoreAsync(
         MailDbContext db,
-        Guid domainId,
-        Guid? accountId,
+        long domainId,
+        long? accountId,
         string folderName,
         CancellationToken cancellationToken)
     {
@@ -403,7 +403,7 @@ public sealed class MailboxFolderManagementService(
         return new MailboxFolderDeletionPreview(folderName, accounts, ids.Length, messages, ruleCount);
     }
 
-    private static IQueryable<Mailbox> MatchingMailboxes(MailDbContext db, Guid domainId, Guid? accountId, string folderName)
+    private static IQueryable<Mailbox> MatchingMailboxes(MailDbContext db, long domainId, long? accountId, string folderName)
     {
         var prefix = folderName + "/";
         var query = db.Mailboxes.Where(x => x.Account.DomainId == domainId && (x.Name == folderName || x.Name.StartsWith(prefix)));
@@ -413,8 +413,8 @@ public sealed class MailboxFolderManagementService(
 
     private static async Task<bool> HasOverlappingActiveJobAsync(
         MailDbContext db,
-        Guid domainId,
-        Guid? accountId,
+        long domainId,
+        long? accountId,
         string folderName,
         CancellationToken cancellationToken)
     {
@@ -442,7 +442,7 @@ public sealed class MailboxFolderManagementService(
         job.Id, job.FolderName, job.Status, job.AffectedAccountCount, job.AffectedMailboxCount,
         job.AffectedRuleCount, job.TotalMessages, job.ProcessedMessages, job.LastError, job.CreatedAt, job.CompletedAt);
 
-    private static async Task<List<string>> GetConfiguredFoldersAsync(MailDbContext db, Guid domainId, CancellationToken cancellationToken)
+    private static async Task<List<string>> GetConfiguredFoldersAsync(MailDbContext db, long domainId, CancellationToken cancellationToken)
     {
         if (!await db.Domains.AnyAsync(x => x.Id == domainId, cancellationToken))
             throw new KeyNotFoundException("Domain not found.");
@@ -460,7 +460,7 @@ public sealed class MailboxFolderManagementService(
         }
     }
 
-    private static async Task SaveConfiguredFoldersAsync(MailDbContext db, Guid domainId, IReadOnlyList<string> folders, CancellationToken cancellationToken)
+    private static async Task SaveConfiguredFoldersAsync(MailDbContext db, long domainId, IReadOnlyList<string> folders, CancellationToken cancellationToken)
     {
         var normalized = MailboxNames.NormalizeDefaults(folders);
         var key = SystemSettingsService.DomainMailboxFoldersKey(domainId);

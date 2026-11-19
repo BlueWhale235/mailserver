@@ -7,7 +7,7 @@ import { ApiError, api, jsonBody } from '../../lib/api'
 import type { ResourceSettings, ResourceStatus, ResourceProcess, ResourceProfile, ResourceValues } from '../../lib/resources'
 import { usePermission } from '../../composables/usePermission'
 
-type SectionKey = 'delivery' | 'smtp' | 'relay' | 'mailboxes' | 'certificates' | 'resources'
+type SectionKey = 'delivery' | 'smtp' | 'relay' | 'mailboxes' | 'certificates' | 'resources' | 'logs'
 
 interface DeliverySettings {
   batchSize: number
@@ -50,6 +50,8 @@ interface CertificateSettings {
   effectiveDefaultMailHostName: string | null
 }
 
+interface LocalLogSettings { machine: string; path: string; retentionDays: number; failedWrites: number; lastError: string | null }
+const localLogs = ref<LocalLogSettings>({ machine: '', path: '', retentionDays: 30, failedWrites: 0, lastError: null })
 const { can } = usePermission()
 const sections: Array<{ key: SectionKey; title: string; description: string; icon: string }> = [
   { key: 'delivery', title: '投递调度', description: '批量、租约与重试节奏', icon: 'mdi-send-clock-outline' },
@@ -57,6 +59,7 @@ const sections: Array<{ key: SectionKey; title: string; description: string; ico
   { key: 'relay', title: '邮件中继', description: '配对、收信与发信通道', icon: 'mdi-transit-connection-variant' },
   { key: 'mailboxes', title: '默认文件夹', description: '新邮箱初始化目录', icon: 'mdi-folder-multiple-outline' },
   { key: 'certificates', title: '证书选择', description: '全局证书后备策略', icon: 'mdi-certificate-outline' },
+  { key: 'logs', title: '本机日志', description: '保留天数与本地存储状态', icon: 'mdi-text-box-outline' },
   { key: 'resources', title: '资源与性能', description: '内存档位与服务运行状态', icon: 'mdi-memory' },
 ]
 const systemFolders = ['INBOX', 'Sent', 'Drafts', 'Trash', 'Junk', 'Archives']
@@ -85,9 +88,9 @@ const onlineCacheBytes = computed(() => resourceStatus.value.processes
   .filter(x => x.state !== 'unreported').reduce((sum, x) => sum + x.estimatedCacheBytes, 0))
 let statusTimer: ReturnType<typeof globalThis.setInterval> | undefined
 let statusLoading = false
-const baselines = ref<Record<SectionKey, string>>({ delivery: '', smtp: '', relay: '', mailboxes: '', certificates: '', resources: '' })
-const loaded = ref<Record<SectionKey, boolean>>({ delivery: false, smtp: false, relay: false, mailboxes: false, certificates: false, resources: false })
-const sectionErrors = ref<Record<SectionKey, string>>({ delivery: '', smtp: '', relay: '', mailboxes: '', certificates: '', resources: '' })
+const baselines = ref<Record<SectionKey, string>>({ delivery: '', smtp: '', relay: '', mailboxes: '', certificates: '', resources: '', logs: '' })
+const loaded = ref<Record<SectionKey, boolean>>({ delivery: false, smtp: false, relay: false, mailboxes: false, certificates: false, resources: false, logs: false })
+const sectionErrors = ref<Record<SectionKey, string>>({ delivery: '', smtp: '', relay: '', mailboxes: '', certificates: '', resources: '', logs: '' })
 const loading = ref(false)
 const savingSection = ref<SectionKey | null>(null)
 const notice = ref('')
@@ -113,6 +116,7 @@ const snapshots = computed<Record<SectionKey, string>>(() => ({
     availableMailHostNames: certificates.value.availableMailHostNames,
     effectiveDefaultMailHostName: certificates.value.effectiveDefaultMailHostName,
   }),
+  logs: JSON.stringify({ retentionDays: localLogs.value.retentionDays }),
   resources: JSON.stringify({ profileId: resources.value.profileId, values: resources.value.values }),
 }))
 const dirtySections = computed(() => sections.filter(section => loaded.value[section.key] && snapshots.value[section.key] !== baselines.value[section.key]).map(section => section.key))
@@ -150,6 +154,7 @@ const resourceErrors = computed(() => {
   return errors
 })
 const sectionValid = computed<Record<SectionKey, boolean>>(() => ({
+  logs: !integerError(localLogs.value.retentionDays, 1, 3650),
   delivery: Object.values(deliveryErrors.value).every(value => !value),
   smtp: !smtpError.value,
   relay: relayValid.value,
@@ -226,6 +231,12 @@ function serviceStateLabel(state: string | undefined) {
   if (state === 'stopped') return '已停止'
   if (state === 'error') return '发生故障'
   return '等待首次上报'
+}
+
+function acceptLogs(value: LocalLogSettings) {
+  localLogs.value = globalThis.structuredClone(value)
+  baselines.value.logs = snapshots.value.logs
+  loaded.value.logs = true
 }
 
 function acceptDelivery(value: DeliverySettings) {
@@ -326,7 +337,8 @@ async function refreshResourceStatus() {
 async function loadSection(section: SectionKey) {
   sectionErrors.value[section] = ''
   try {
-    if (section === 'delivery') acceptDelivery(await api<DeliverySettings>('/settings/delivery'))
+    if (section === 'logs') acceptLogs(await api<LocalLogSettings>('/settings/local-logs'))
+    else if (section === 'delivery') acceptDelivery(await api<DeliverySettings>('/settings/delivery'))
     else if (section === 'smtp') acceptSmtp(await api<SmtpSettings>('/settings/smtp'))
     else if (section === 'relay') { acceptRelay(await api<RelaySettings>('/settings/relay')); await refreshRelayStatus() }
     else if (section === 'mailboxes') acceptMailboxes(await api<MailboxSettings>('/settings/mailboxes'))
@@ -364,7 +376,8 @@ async function discardAndReload() {
 function resetCurrent() {
   const baseline = baselines.value[activeSection.value]
   if (!baseline) return
-  if (activeSection.value === 'delivery') delivery.value = JSON.parse(baseline) as DeliverySettings
+  if (activeSection.value === 'logs') localLogs.value.retentionDays = (JSON.parse(baseline) as Pick<LocalLogSettings, 'retentionDays'>).retentionDays
+  else if (activeSection.value === 'delivery') delivery.value = JSON.parse(baseline) as DeliverySettings
   else if (activeSection.value === 'smtp') smtp.value = JSON.parse(baseline) as SmtpSettings
   else if (activeSection.value === 'relay') Object.assign(relay.value, JSON.parse(baseline))
   else if (activeSection.value === 'mailboxes') mailboxes.value = JSON.parse(baseline) as MailboxSettings
@@ -386,7 +399,9 @@ async function saveCurrent() {
   sectionErrors.value[section] = ''
   notice.value = ''
   try {
-    if (section === 'delivery') {
+    if (section === 'logs') {
+      acceptLogs(await api<LocalLogSettings>('/settings/local-logs', { method: 'PUT', body: jsonBody({ retentionDays: localLogs.value.retentionDays }) }))
+    } else if (section === 'delivery') {
       acceptDelivery(await api<DeliverySettings>('/settings/delivery', { method: 'PUT', body: jsonBody(delivery.value) }))
     } else if (section === 'smtp') {
       acceptSmtp(await api<SmtpSettings>('/settings/smtp', { method: 'PUT', body: jsonBody(smtp.value) }))
@@ -621,7 +636,7 @@ onBeforeUnmount(() => {
           </div>
         </template>
 
-        <template v-else>
+        <template v-else-if="activeSection === 'resources'">
           <p class="resource-intro">按邮件服务运行环境的内存选择档位。保存后自动应用，已有连接和正在投递的邮件会继续完成。</p>
           <v-alert v-if="!resources.profileId" type="info" variant="tonal" density="compact" class="mb-4">尚未选择档位，当前沿用原有配置。</v-alert>
           <div class="profile-grid" role="radiogroup" aria-label="内存档位">
@@ -679,6 +694,15 @@ onBeforeUnmount(() => {
             <v-alert v-if="!resourceStatus.processes.some(process => process.roles.some(role => role === 'smtp' || role === 'imap' || role === 'worker'))" type="info" variant="tonal">尚未收到邮件服务上报。SMTP、IMAP 或 Worker 启动后会在这里显示；管理 API 不使用配置缓存。</v-alert>
           </div>
         </template>
+        <template v-if="activeSection === 'logs'">
+          <div class="field-grid single-column">
+            <v-text-field v-model.number="localLogs.retentionDays" label="日志保留天数" type="number" min="1" max="3650" :disabled="!can('settings.manage')" :error-messages="integerError(localLogs.retentionDays, 1, 3650)" />
+            <p class="field-help">自动清理超过保留期限的审计日志、性能记录、任务执行历史和投递尝试。每 5 分钟检查一次。</p>
+            <p class="field-help">当前机器：{{ localLogs.machine }}。日志保存在本机，管理页面仅显示当前机器的记录。</p>
+            <p class="field-help log-path">日志库：{{ localLogs.path }}</p>
+            <v-alert v-if="localLogs.failedWrites" type="warning" variant="tonal">本进程发生 {{ localLogs.failedWrites }} 次日志写入失败（{{ localLogs.lastError }}）。已提交的邮件业务不受影响。</v-alert>
+          </div>
+        </template>
       </div>
 
       <div v-if="currentLoaded && !currentError" class="section-actions">
@@ -726,6 +750,7 @@ onBeforeUnmount(() => {
 .resource-status-heading span { font-size: 12px; color: var(--text-muted); }
 @media (max-width: 700px) { .profile-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 
+.log-path { overflow-wrap: anywhere; }
 .settings-layout { display: grid; grid-template-columns: 260px minmax(0, 1fr); align-items: start; gap: 16px; }
 .settings-nav { position: sticky; top: 76px; overflow: hidden; border: 1px solid var(--border); border-radius: 10px; background: #fff; }
 .settings-nav button { display: grid; grid-template-columns: 25px minmax(0, 1fr) 18px; align-items: center; gap: 10px; width: 100%; padding: 14px 15px; border: 0; border-bottom: 1px solid var(--border); color: var(--text-secondary); background: transparent; text-align: left; cursor: pointer; }
@@ -792,7 +817,7 @@ onBeforeUnmount(() => {
   .certificate-grid { grid-template-columns: 1fr; }
 }
 @media (max-width: 700px) {
-  .settings-nav, .field-grid.two-columns { grid-template-columns: 1fr; }
+  .settings-nav, .field-grid.two-columns, .field-grid.single-column { grid-template-columns: minmax(0, 1fr); }
   .folder-add { grid-template-columns: 1fr; }
   .section-actions { align-items: stretch; flex-direction: column; gap: 8px; }
   .cache-summary, .cache-processes dl, .resource-field-grid { grid-template-columns: 1fr; }

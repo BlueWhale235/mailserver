@@ -25,7 +25,7 @@ public sealed record DomainDnsValidation(
     IReadOnlyList<string> Warnings);
 
 public sealed record DomainDnsCheckView(
-    Guid DomainId,
+    long DomainId,
     DomainDnsCheckStatus Status,
     DomainDnsValidation? Validation,
     string? LastError,
@@ -38,7 +38,7 @@ public sealed class DomainDnsService(
 {
     private readonly string _securityRoot = Path.GetFullPath(securityAssets.Value.RootPath);
 
-    public async Task<DomainDnsConfiguration> GetAsync(Guid domainId, CancellationToken cancellationToken)
+    public async Task<DomainDnsConfiguration> GetAsync(long domainId, CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         var domain = await db.Domains.AsNoTracking()
@@ -50,7 +50,7 @@ public sealed class DomainDnsService(
     }
 
     public async Task<DomainDnsConfiguration> SaveAsync(
-        Guid domainId,
+        long domainId,
         DomainDnsSettings input,
         string actor,
         CancellationToken cancellationToken)
@@ -97,7 +97,7 @@ public sealed class DomainDnsService(
     }
 
     public async Task<string> GenerateDkimAsync(
-        Guid domainId,
+        long domainId,
         string? selector,
         string actor,
         CancellationToken cancellationToken)
@@ -115,7 +115,7 @@ public sealed class DomainDnsService(
         Directory.CreateDirectory(directory);
         SecurityAssetFiles.RestrictDirectory(directory);
         var privateKeyPath = Path.Combine(directory, $"dkim-{normalizedSelector}.pem");
-        var temporaryPath = privateKeyPath + $".{Guid.NewGuid():N}.tmp";
+        var temporaryPath = privateKeyPath + $".{System.Guid.NewGuid()}.tmp";
         using var rsa = RSA.Create(2048);
         await File.WriteAllTextAsync(temporaryPath, rsa.ExportPkcs8PrivateKeyPem(), cancellationToken);
         SecurityAssetFiles.RestrictFile(temporaryPath);
@@ -134,7 +134,7 @@ public sealed class DomainDnsService(
     }
 
     public async Task<DomainDnsValidation> ValidatePublishedAsync(
-        Guid domainId,
+        long domainId,
         CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
@@ -182,7 +182,7 @@ public sealed class DomainDnsService(
     }
 
     public async Task<DomainDnsCheckView> GetCachedCheckAsync(
-        Guid domainId,
+        long domainId,
         CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
@@ -196,7 +196,7 @@ public sealed class DomainDnsService(
     }
 
     public async Task<DomainDnsCheckView> CheckAndStoreAsync(
-        Guid domainId,
+        long domainId,
         CancellationToken cancellationToken)
     {
         await SetCheckingAsync(domainId, cancellationToken);
@@ -230,7 +230,7 @@ public sealed class DomainDnsService(
     }
 
     public async Task<IReadOnlyList<DomainDnsCheckView>> CheckManyAsync(
-        IReadOnlyCollection<Guid> domainIds,
+        IReadOnlyCollection<long> domainIds,
         CancellationToken cancellationToken)
     {
         var ids = domainIds.Distinct().ToArray();
@@ -245,7 +245,7 @@ public sealed class DomainDnsService(
         return await Task.WhenAll(tasks);
     }
 
-    private async Task SetCheckingAsync(Guid domainId, CancellationToken cancellationToken)
+    private async Task SetCheckingAsync(long domainId, CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         if (!await db.Domains.AnyAsync(x => x.Id == domainId, cancellationToken))
@@ -347,7 +347,7 @@ public sealed class DomainDnsService(
         return string.Join(' ', chunks.Select(x => $"\"{x}\""));
     }
 
-    private static DomainDnsSettings CreateDefaults(Guid domainId) => new() { DomainId = domainId };
+    private static DomainDnsSettings CreateDefaults(long domainId) => new() { DomainId = domainId };
 
     private static void Validate(DomainDnsSettings settings)
     {

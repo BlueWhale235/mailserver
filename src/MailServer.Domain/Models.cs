@@ -119,7 +119,7 @@ public sealed class SystemSetting
 /// </summary>
 public sealed class MailDomain
 {
-    public Guid Id { get; set; } = Guid.NewGuid();
+    public long Id { get; set; } = MailServer.Domain.SnowflakeIds.NewId();
     public required string Name { get; set; }
     public bool IsActive { get; set; } = true;
     public string? MailHostName { get; set; }
@@ -144,7 +144,7 @@ public sealed class MailDomain
 /// </summary>
 public sealed class DomainCertificate
 {
-    public Guid DomainId { get; set; }
+    public long DomainId { get; set; }
     [JsonIgnore]
     public MailDomain Domain { get; set; } = null!;
     public CertificateSource Source { get; set; }
@@ -164,7 +164,7 @@ public sealed class DomainCertificate
 /// </summary>
 public sealed class DomainDnsSettings
 {
-    public Guid DomainId { get; set; }
+    public long DomainId { get; set; }
     [JsonIgnore]
     public MailDomain Domain { get; set; } = null!;
     public bool SpfIncludeMx { get; set; } = true;
@@ -213,7 +213,7 @@ public sealed class MtaStsPolicyCache
 /// </summary>
 public sealed class TlsDeliveryEvent
 {
-    public Guid Id { get; set; } = Guid.NewGuid();
+    public long Id { get; set; } = MailServer.Domain.SnowflakeIds.NewId();
     public required string PolicyDomain { get; set; }
     public required string MxHost { get; set; }
     public required string PolicyType { get; set; }
@@ -231,7 +231,7 @@ public sealed class TlsDeliveryEvent
 /// </summary>
 public sealed class TlsReportDelivery
 {
-    public Guid Id { get; set; } = Guid.NewGuid();
+    public long Id { get; set; } = MailServer.Domain.SnowflakeIds.NewId();
     public required string PolicyDomain { get; set; }
     public required string ReportUri { get; set; }
     public DateTimeOffset PeriodStart { get; set; }
@@ -251,8 +251,8 @@ public sealed class TlsReportDelivery
 /// </summary>
 public sealed class MailAccount
 {
-    public Guid Id { get; set; } = Guid.NewGuid();
-    public Guid DomainId { get; set; }
+    public long Id { get; set; } = MailServer.Domain.SnowflakeIds.NewId();
+    public long DomainId { get; set; }
     public MailDomain Domain { get; set; } = null!;
     public required string LocalPart { get; set; }
     public required string PasswordHash { get; set; }
@@ -270,11 +270,11 @@ public sealed class MailAccount
 /// </summary>
 public sealed class MailAlias
 {
-    public Guid Id { get; set; } = Guid.NewGuid();
-    public Guid DomainId { get; set; }
+    public long Id { get; set; } = MailServer.Domain.SnowflakeIds.NewId();
+    public long DomainId { get; set; }
     public MailDomain Domain { get; set; } = null!;
     public required string SourceLocalPart { get; set; }
-    public Guid? TargetAccountId { get; set; }
+    public long? TargetAccountId { get; set; }
     public MailAccount? TargetAccount { get; set; }
     public string? DestinationAddress { get; set; }
     public MailAliasMode Mode { get; set; } = MailAliasMode.SendReceive;
@@ -285,8 +285,8 @@ public sealed class MailAlias
 
 public sealed class MailRule
 {
-    public Guid Id { get; set; } = Guid.NewGuid();
-    public Guid DomainId { get; set; }
+    public long Id { get; set; } = MailServer.Domain.SnowflakeIds.NewId();
+    public long DomainId { get; set; }
     public MailDomain Domain { get; set; } = null!;
     public required string Name { get; set; }
     public MailRuleDirection Direction { get; set; }
@@ -302,8 +302,8 @@ public sealed class MailRule
 
 public sealed class MailRuleAction
 {
-    public Guid Id { get; set; } = Guid.NewGuid();
-    public Guid RuleId { get; set; }
+    public long Id { get; set; } = MailServer.Domain.SnowflakeIds.NewId();
+    public long RuleId { get; set; }
     public MailRule Rule { get; set; } = null!;
     public MailRuleActionKind Kind { get; set; }
     public required string ValuesJson { get; set; }
@@ -312,8 +312,8 @@ public sealed class MailRuleAction
 
 public sealed class MailRuleCondition
 {
-    public Guid Id { get; set; } = Guid.NewGuid();
-    public Guid RuleId { get; set; }
+    public long Id { get; set; } = MailServer.Domain.SnowflakeIds.NewId();
+    public long RuleId { get; set; }
     public MailRule Rule { get; set; } = null!;
     public MailRuleField Field { get; set; }
     public MailRuleOperator Operator { get; set; }
@@ -323,7 +323,7 @@ public sealed class MailRuleCondition
 
 public sealed class DomainDnsCheck
 {
-    public Guid DomainId { get; set; }
+    public long DomainId { get; set; }
     public MailDomain Domain { get; set; } = null!;
     public DomainDnsCheckStatus Status { get; set; } = DomainDnsCheckStatus.PendingConfiguration;
     public string DetailsJson { get; set; } = string.Empty;
@@ -333,26 +333,28 @@ public sealed class DomainDnsCheck
 
 public sealed class Mailbox
 {
-    public Guid Id { get; set; } = Guid.NewGuid();
-    public Guid AccountId { get; set; }
+    public long Id { get; set; } = MailServer.Domain.SnowflakeIds.NewId();
+    public long AccountId { get; set; }
     public MailAccount Account { get; set; } = null!;
     public required string Name { get; set; }
     public long UidValidity { get; set; } = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
     public long UidNext { get; set; } = 1;
     public long HighestModSeq { get; set; } = 1;
+    public long MessageCount { get; set; }
+    public long UnseenCount { get; set; }
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset? DeletedAt { get; set; }
     public string? DeletedBy { get; set; }
     public DateTimeOffset? PurgeAfter { get; set; }
-    public Guid? PendingDeletionJobId { get; set; }
+    public long? PendingDeletionJobId { get; set; }
 }
 
 public sealed class MailboxFolderDeletionJob
 {
-    public Guid Id { get; set; } = Guid.NewGuid();
-    public Guid DomainId { get; set; }
+    public long Id { get; set; } = MailServer.Domain.SnowflakeIds.NewId();
+    public long DomainId { get; set; }
     public MailDomain Domain { get; set; } = null!;
-    public Guid? AccountId { get; set; }
+    public long? AccountId { get; set; }
     public required string FolderName { get; set; }
     public MailboxFolderDeletionStatus Status { get; set; } = MailboxFolderDeletionStatus.Pending;
     public int AffectedAccountCount { get; set; }
@@ -372,13 +374,13 @@ public sealed class MailboxFolderDeletionJob
 public sealed class StoredMessage
 {
     public string? SourceTraceId { get; set; }
-    public Guid Id { get; set; } = Guid.NewGuid();
+    public long Id { get; set; } = MailServer.Domain.SnowflakeIds.NewId();
     public required string ContentKey { get; set; }
     public required string EnvelopeFrom { get; set; }
     public string? InternetMessageId { get; set; }
     public string? InternetMessageIdHash { get; set; }
     public string? SourceType { get; set; }
-    public Guid? AuthenticatedAccountId { get; set; }
+    public long? AuthenticatedAccountId { get; set; }
     public string? AuthenticatedAccountName { get; set; }
     public string? SourceIp { get; set; }
     public long Size { get; set; }
@@ -387,16 +389,29 @@ public sealed class StoredMessage
 
 public sealed class StoredMessageRecipient
 {
-    public Guid Id { get; set; } = Guid.NewGuid();
-    public Guid MessageId { get; set; }
+    public long Id { get; set; } = MailServer.Domain.SnowflakeIds.NewId();
+    public long MessageId { get; set; }
     public StoredMessage Message { get; set; } = null!;
     public required string Address { get; set; }
+}
+
+public sealed class MessageFetchMetadata
+{
+    public long MessageId { get; set; }
+    public StoredMessage Message { get; set; } = null!;
+    public string ContentKey { get; set; } = string.Empty;
+    public int ParserVersion { get; set; } = 1;
+    public string Envelope { get; set; } = "NIL";
+    public string Body { get; set; } = "NIL";
+    public string BodyStructure { get; set; } = "NIL";
+    public long HeaderEnd { get; set; }
+    public long BodyStart { get; set; }
 }
 
 /// <summary>Preparsed IMAP search text; incomplete rows still require source-message verification.</summary>
 public sealed class MessageSearchRecord
 {
-    public Guid MessageId { get; set; }
+    public long MessageId { get; set; }
     public StoredMessage Message { get; set; } = null!;
     public int ParserVersion { get; set; }
     public string Status { get; set; } = "Ready";
@@ -409,10 +424,10 @@ public sealed class MessageSearchRecord
 
 public sealed class MailboxMessage
 {
-    public Guid Id { get; set; } = Guid.NewGuid();
-    public Guid MailboxId { get; set; }
+    public long Id { get; set; } = MailServer.Domain.SnowflakeIds.NewId();
+    public long MailboxId { get; set; }
     public Mailbox Mailbox { get; set; } = null!;
-    public Guid MessageId { get; set; }
+    public long MessageId { get; set; }
     public StoredMessage Message { get; set; } = null!;
     public long Uid { get; set; }
     public string Flags { get; set; } = string.Empty;
@@ -427,10 +442,10 @@ public sealed class MailboxMessage
 
 public sealed class QuarantineRecord
 {
-    public Guid Id { get; set; } = Guid.NewGuid();
-    public Guid DomainId { get; set; }
+    public long Id { get; set; } = MailServer.Domain.SnowflakeIds.NewId();
+    public long DomainId { get; set; }
     public MailDomain Domain { get; set; } = null!;
-    public Guid MessageId { get; set; }
+    public long MessageId { get; set; }
     public StoredMessage Message { get; set; } = null!;
     public required string Sender { get; set; }
     public required string RecipientsJson { get; set; }
@@ -447,7 +462,7 @@ public sealed class QuarantineRecord
 
 public sealed class ScheduledTask
 {
-    public Guid Id { get; set; } = Guid.NewGuid();
+    public long Id { get; set; } = MailServer.Domain.SnowflakeIds.NewId();
     public required string Type { get; set; }
     public required string Name { get; set; }
     public bool IsSystem { get; set; } = true;
@@ -464,9 +479,11 @@ public sealed class ScheduledTask
 
 public sealed class TaskExecution
 {
-    public Guid Id { get; set; } = Guid.NewGuid();
-    public Guid ScheduledTaskId { get; set; }
+    public long Id { get; set; } = MailServer.Domain.SnowflakeIds.NewId();
+    public long ScheduledTaskId { get; set; }
     public ScheduledTask ScheduledTask { get; set; } = null!;
+    public string TaskName { get; set; } = "";
+    public string TaskType { get; set; } = "";
     public TaskExecutionStatus Status { get; set; } = TaskExecutionStatus.Running;
     public DateTimeOffset StartedAt { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset? CompletedAt { get; set; }
@@ -478,19 +495,19 @@ public sealed class TaskExecution
 
 public sealed class TaskLease
 {
-    public Guid ScheduledTaskId { get; set; }
+    public long ScheduledTaskId { get; set; }
     public required string Owner { get; set; }
     public DateTimeOffset ExpiresAt { get; set; }
 }
 
 public sealed class CleanupQueueItem
 {
-    public Guid Id { get; set; } = Guid.NewGuid();
+    public long Id { get; set; } = MailServer.Domain.SnowflakeIds.NewId();
     public CleanupResourceType ResourceType { get; set; }
-    public Guid? ResourceId { get; set; }
+    public long? ResourceId { get; set; }
     public string? ContentKey { get; set; }
-    public Guid? AccountId { get; set; }
-    public Guid? DomainId { get; set; }
+    public long? AccountId { get; set; }
+    public long? DomainId { get; set; }
     public long EstimatedBytes { get; set; }
     public CleanupQueueStatus Status { get; set; } = CleanupQueueStatus.Pending;
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
@@ -502,11 +519,11 @@ public sealed class CleanupQueueItem
 
 public sealed class QuotaLedgerEntry
 {
-    public Guid Id { get; set; } = Guid.NewGuid();
+    public long Id { get; set; } = MailServer.Domain.SnowflakeIds.NewId();
     public required string IdempotencyKey { get; set; }
-    public Guid AccountId { get; set; }
-    public Guid DomainId { get; set; }
-    public Guid? MailboxMessageId { get; set; }
+    public long AccountId { get; set; }
+    public long DomainId { get; set; }
+    public long? MailboxMessageId { get; set; }
     public QuotaLedgerOperation Operation { get; set; }
     public long Bytes { get; set; }
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
@@ -515,18 +532,18 @@ public sealed class QuotaLedgerEntry
 
 public sealed class SentCopyJob
 {
-    public Guid Id { get; set; } = Guid.NewGuid();
-    public Guid AccountId { get; set; }
+    public long Id { get; set; } = MailServer.Domain.SnowflakeIds.NewId();
+    public long AccountId { get; set; }
     public MailAccount Account { get; set; } = null!;
-    public Guid MessageId { get; set; }
+    public long MessageId { get; set; }
     public StoredMessage Message { get; set; } = null!;
-    public Guid? RuleId { get; set; }
+    public long? RuleId { get; set; }
     public MailRule? Rule { get; set; }
     public required string TargetMailboxName { get; set; }
     public string? IdentityKey { get; set; }
     public SentCopyState State { get; set; } = SentCopyState.PendingClient;
-    public Guid? ClientMailboxMessageId { get; set; }
-    public Guid? ServerMailboxMessageId { get; set; }
+    public long? ClientMailboxMessageId { get; set; }
+    public long? ServerMailboxMessageId { get; set; }
     public DateTimeOffset ReadyAt { get; set; }
     public DateTimeOffset DeduplicateUntil { get; set; }
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
@@ -536,12 +553,12 @@ public sealed class SentCopyJob
 public sealed class DeliveryJob
 {
     public string? SourceTraceId { get; set; }
-    public Guid Id { get; set; } = Guid.NewGuid();
-    public Guid MessageId { get; set; }
+    public long Id { get; set; } = MailServer.Domain.SnowflakeIds.NewId();
+    public long MessageId { get; set; }
     public StoredMessage Message { get; set; } = null!;
     public required string Sender { get; set; }
     public required string Recipient { get; set; }
-    public Guid? RouteDomainId { get; set; }
+    public long? RouteDomainId { get; set; }
     public MailDomain? RouteDomain { get; set; }
     public DeliveryStatus Status { get; set; } = DeliveryStatus.Pending;
     public int Attempts { get; set; }
@@ -549,7 +566,7 @@ public sealed class DeliveryJob
     public string? LeaseOwner { get; set; }
     public DateTimeOffset? LeaseUntil { get; set; }
     public string? LastError { get; set; }
-    public Guid? OriginRuleId { get; set; }
+    public long? OriginRuleId { get; set; }
     public int ForwardDepth { get; set; }
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
@@ -557,7 +574,7 @@ public sealed class DeliveryJob
 
 public sealed class FirewallRule
 {
-    public Guid Id { get; set; } = Guid.NewGuid();
+    public long Id { get; set; } = MailServer.Domain.SnowflakeIds.NewId();
     public required string Cidr { get; set; }
     public string? Note { get; set; }
     public bool IsEnabled { get; set; } = true;
@@ -600,8 +617,8 @@ public sealed class ConfigurationProcessStatus
 
 public sealed class DeliveryAttempt
 {
-    public Guid Id { get; set; } = Guid.NewGuid();
-    public Guid DeliveryJobId { get; set; }
+    public long Id { get; set; } = MailServer.Domain.SnowflakeIds.NewId();
+    public long DeliveryJobId { get; set; }
     public DeliveryJob DeliveryJob { get; set; } = null!;
     public int AttemptNumber { get; set; }
     public bool Succeeded { get; set; }
@@ -624,7 +641,7 @@ public sealed class DeliveryAttempt
 public sealed class SrsAddressMapping
 {
     public required string Token { get; set; }
-    public Guid DomainId { get; set; }
+    public long DomainId { get; set; }
     public MailDomain Domain { get; set; } = null!;
     public required string OriginalSender { get; set; }
     public int ForwardDepth { get; set; }
@@ -634,7 +651,7 @@ public sealed class SrsAddressMapping
 
 public sealed class AdminUser
 {
-    public Guid Id { get; set; } = Guid.NewGuid();
+    public long Id { get; set; } = MailServer.Domain.SnowflakeIds.NewId();
     public required string UserName { get; set; }
     public required string PasswordHash { get; set; }
     public bool IsEnabled { get; set; } = true;
@@ -650,7 +667,7 @@ public enum PermissionSubjectType
 public sealed class PermissionGrant
 {
     public PermissionSubjectType SubjectType { get; set; }
-    public Guid SubjectId { get; set; }
+    public long SubjectId { get; set; }
     public required string PermissionCode { get; set; }
     public string ResourceType { get; set; } = string.Empty;
     public string ResourceKey { get; set; } = string.Empty;
@@ -660,7 +677,7 @@ public sealed class PermissionGrant
 
 public sealed class ApiKeyRecord
 {
-    public Guid Id { get; set; } = Guid.NewGuid();
+    public long Id { get; set; } = MailServer.Domain.SnowflakeIds.NewId();
     public required string Name { get; set; }
     public required string Prefix { get; set; }
     public required string SecretHash { get; set; }
@@ -673,7 +690,7 @@ public sealed class ApiKeyRecord
 
 public sealed class AuditRecord
 {
-    public Guid Id { get; set; } = Guid.NewGuid();
+    public long Id { get; set; } = MailServer.Domain.SnowflakeIds.NewId();
     public required string Actor { get; set; }
     public required string Action { get; set; }
     public required string Resource { get; set; }

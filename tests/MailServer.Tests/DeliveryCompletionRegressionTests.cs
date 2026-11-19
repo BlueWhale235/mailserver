@@ -122,7 +122,7 @@ public sealed class DeliveryCompletionRegressionTests
         {
             var completion = await queue.CompleteAsync(lease, DeliveryResult.Permanent("550 5.1.1 rejected"), CancellationToken.None);
             if (completion.Applied && completion.FinalFailure)
-                await notifications.CreateAsync(job.Sender, job.Recipient, "550 5.1.1 rejected", job.Id.ToString("N"),
+                await notifications.CreateAsync(job.Sender, job.Recipient, "550 5.1.1 rejected", job.Id.ToString(),
                     job.Attempts, DeliveryNotificationKind.PermanentFailure, CancellationToken.None);
         }
         await using var verify = await env.Factory.CreateDbContextAsync();
@@ -184,11 +184,11 @@ public sealed class DeliveryCompletionRegressionTests
         public ServiceProvider Services { get; } = services;
         public MailAccount Account { get; } = account;
         public IDbContextFactory<MailDbContext> Factory => Services.GetRequiredService<IDbContextFactory<MailDbContext>>();
-        private readonly List<Guid> _messageIds = [];
+        private readonly List<long> _messageIds = [];
 
         public static async Task<TestEnvironment> CreateAsync(string provider)
         {
-            var root = Path.Combine(Path.GetTempPath(), "mailserver-completion-" + Guid.NewGuid().ToString("N"));
+            var root = Path.Combine(Path.GetTempPath(), "mailserver-completion-" + MailServer.Domain.SnowflakeIds.NewId().ToString());
             Directory.CreateDirectory(root);
             var connection = provider == "MySql" ? Environment.GetEnvironmentVariable("MAILSERVER_TEST_MYSQL_CONNECTION")!
                 : "Data Source=" + Path.Combine(root, "test.db") + ";Pooling=False";
@@ -208,7 +208,7 @@ public sealed class DeliveryCompletionRegressionTests
             var factory = services.GetRequiredService<IDbContextFactory<MailDbContext>>();
             await using var db = await factory.CreateDbContextAsync();
             await db.Database.MigrateAsync();
-            var domain = new MailDomain { Name = Guid.NewGuid().ToString("N") + ".test", QuotaBytes = 1000000 };
+            var domain = new MailDomain { Name = MailServer.Domain.SnowflakeIds.NewId().ToString() + ".test", QuotaBytes = 1000000 };
             var account = new MailAccount { Domain = domain, LocalPart = "sender", QuotaBytes = 1000000, PasswordHash = "unused" };
             db.Accounts.Add(account);db.Mailboxes.Add(new Mailbox { Account = account, Name = "INBOX" });
             await db.SaveChangesAsync();
@@ -234,7 +234,7 @@ public sealed class DeliveryCompletionRegressionTests
             {
                 var mailboxIds = await db.Mailboxes.IgnoreQueryFilters().Where(x => x.AccountId == Account.Id)
                     .Select(x => x.Id).ToListAsync();
-                var references = new List<(Guid Id, Guid MessageId)>();
+                var references = new List<(long Id, long MessageId)>();
                 foreach (var mailboxId in mailboxIds)
                 {
                     var owned = await db.MailboxMessages.IgnoreQueryFilters().Where(x => x.MailboxId == mailboxId)

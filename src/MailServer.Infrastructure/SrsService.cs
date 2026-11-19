@@ -7,8 +7,8 @@ using Microsoft.Extensions.Options;
 
 namespace MailServer.Infrastructure;
 
-public sealed record SrsDecodedAddress(string OriginalSender, int ForwardDepth, Guid DomainId);
-public sealed record ForwardingTrace(Guid RuleId, int ForwardDepth);
+public sealed record SrsDecodedAddress(string OriginalSender, int ForwardDepth, long DomainId);
+public sealed record ForwardingTrace(long RuleId, int ForwardDepth);
 
 public sealed class SrsService(IOptions<ForwardingOptions> options)
 {
@@ -89,11 +89,11 @@ public sealed class SrsService(IOptions<ForwardingOptions> options)
 
     public string CreateForwardingTrace(
         MailDbContext db,
-        Guid ruleId,
+        long ruleId,
         int forwardDepth,
         string messageId)
     {
-        if (ruleId == Guid.Empty)
+        if (ruleId == 0)
             throw new ArgumentException("Forwarding rule id is required.", nameof(ruleId));
         if (forwardDepth < 1 || forwardDepth > Math.Clamp(_options.MaxHops, 1, 20))
             throw new InvalidOperationException("Forwarding hop limit exceeded.");
@@ -102,7 +102,7 @@ public sealed class SrsService(IOptions<ForwardingOptions> options)
         var signature = SignTrace(secret, normalizedMessageId, ruleId, forwardDepth);
         return string.Create(
             CultureInfo.InvariantCulture,
-            $"v1;{forwardDepth};{ruleId:N};{signature}");
+            $"v1;{forwardDepth};{ruleId};{signature}");
     }
 
     public async Task<IReadOnlyList<ForwardingTrace>> ReadForwardingTracesAsync(
@@ -124,7 +124,7 @@ public sealed class SrsService(IOptions<ForwardingOptions> options)
                 || !int.TryParse(pieces[1], NumberStyles.None, CultureInfo.InvariantCulture, out var depth)
                 || depth < 1
                 || depth > Math.Clamp(_options.MaxHops, 1, 20)
-                || !Guid.TryParseExact(pieces[2], "N", out var ruleId))
+                || !long.TryParse(pieces[2], NumberStyles.None, CultureInfo.InvariantCulture, out var ruleId))
                 continue;
             var expected = SignTrace(secret, normalizedMessageId, ruleId, depth);
             var actualBytes = Encoding.ASCII.GetBytes(pieces[3]);
@@ -145,9 +145,9 @@ public sealed class SrsService(IOptions<ForwardingOptions> options)
         return Hex(hmac.ComputeHash(data).AsSpan(0, 12));
     }
 
-    private static string SignTrace(string secret, string messageId, Guid ruleId, int depth)
+    private static string SignTrace(string secret, string messageId, long ruleId, int depth)
     {
-        var data = Encoding.UTF8.GetBytes($"forward|{messageId}|{ruleId:N}|{depth}");
+        var data = Encoding.UTF8.GetBytes($"forward|{messageId}|{ruleId}|{depth}");
         using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(secret));
         return Hex(hmac.ComputeHash(data).AsSpan(0, 12));
     }

@@ -9,7 +9,8 @@ internal sealed class MailboxSelectionSnapshot : IMailboxSelectionSnapshot
     private const long MaximumFileBytes = 64L * 1024 * 1024;
     private const long MaximumProcessBytes = 256L * 1024 * 1024;
     private static long _reservedBytes;
-    private readonly FileStream _stream;
+    private Stream _stream = new MemoryStream();
+    private const int MemoryThreshold = 64 * 1024;
     private readonly long _maximumFileBytes;
     private long _bytes;
     private bool _sealed;
@@ -21,10 +22,8 @@ internal sealed class MailboxSelectionSnapshot : IMailboxSelectionSnapshot
     public MailboxSelectionSnapshot(long maximumFileBytes = MaximumFileBytes)
     {
         _maximumFileBytes = maximumFileBytes;
-        var path = Path.Combine(Path.GetTempPath(), $"mailbox-selection-{Guid.NewGuid():N}.tmp");
+        var path = Path.Combine(Path.GetTempPath(), $"mailbox-selection-{System.Guid.NewGuid()}.tmp");
         FilePath = path;
-        _stream = new FileStream(path, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None,
-            64 * 1024, FileOptions.Asynchronous | FileOptions.DeleteOnClose | FileOptions.SequentialScan);
     }
 
     public async Task AddAsync(MailboxItem item, CancellationToken cancellationToken)
@@ -33,8 +32,8 @@ internal sealed class MailboxSelectionSnapshot : IMailboxSelectionSnapshot
         _record.SetLength(0);
         using (var writer = new BinaryWriter(_record, Encoding.UTF8, leaveOpen: true))
         {
-            writer.Write((byte)1);
-            writer.Write(item.Id.ToByteArray()); writer.Write(item.MessageId.ToByteArray());
+            writer.Write((byte)2);
+            writer.Write(item.Id); writer.Write(item.MessageId);
             writer.Write(item.Sequence); writer.Write(item.Uid); writer.Write(item.ModSeq);
             writer.Write(item.InternalDate.Ticks); writer.Write((short)item.InternalDate.Offset.TotalMinutes);
             writer.Write(item.Size); writer.Write(item.Flags); writer.Write(item.ContentKey);
@@ -49,6 +48,19 @@ internal sealed class MailboxSelectionSnapshot : IMailboxSelectionSnapshot
             throw new InvalidOperationException("Mailbox selections exceed the process temporary storage limit.");
         }
         _bytes += bytes.Length;
+        if (_stream is MemoryStream && (_bytes > MemoryThreshold || Count >= 1024))
+        {
+            var file = new FileStream(FilePath, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None,
+                64 * 1024, FileOptions.Asynchronous | FileOptions.DeleteOnClose | FileOptions.SequentialScan);
+            try
+            {
+                _stream.Position = 0;
+                await _stream.CopyToAsync(file, cancellationToken);
+            }
+            catch { await file.DisposeAsync(); throw; }
+            await _stream.DisposeAsync();
+            _stream = file;
+        }
         await _stream.WriteAsync(bytes, cancellationToken);
         Count++;
     }
@@ -69,8 +81,8 @@ internal sealed class MailboxSelectionSnapshot : IMailboxSelectionSnapshot
         while (_stream.Position < _stream.Length)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (reader.ReadByte() != 1) throw new InvalidDataException("Unsupported mailbox snapshot version.");
-            var id = new Guid(reader.ReadBytes(16)); var messageId = new Guid(reader.ReadBytes(16));
+            if (reader.ReadByte() != 2) throw new InvalidDataException("Unsupported mailbox snapshot version.");
+            var id = reader.ReadInt64(); var messageId = reader.ReadInt64();
             var sequence = reader.ReadInt64(); var uid = reader.ReadInt64(); var modSeq = reader.ReadInt64();
             var date = new DateTimeOffset(reader.ReadInt64(), TimeSpan.FromMinutes(reader.ReadInt16()));
             var size = reader.ReadInt64(); var flags = reader.ReadString(); var key = reader.ReadString();
@@ -83,7 +95,7 @@ internal sealed class MailboxSelectionSnapshot : IMailboxSelectionSnapshot
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         _record.Dispose();
-        await _stream.DisposeAsync();
-        Interlocked.Add(ref _reservedBytes, -_bytes);
+        try { await _stream.DisposeAsync(); }
+        finally { Interlocked.Add(ref _reservedBytes, -_bytes); }
     }
 }

@@ -22,6 +22,7 @@ interface ScheduledTask {
 
 interface TaskExecution {
   id: string
+  taskName?: string
   scheduledTaskId: string
   status: 'Running' | 'Succeeded' | 'Failed' | 'Cancelled'
   startedAt: string
@@ -242,7 +243,7 @@ function formatInterval(minutes: number) {
 }
 
 function executionTaskName(execution: TaskExecution) {
-  return tasks.value.find(task => task.id === execution.scheduledTaskId)?.name ?? '未知任务'
+  return tasks.value.find(task => task.id === execution.scheduledTaskId)?.name ?? execution.taskName ?? '未知任务'
 }
 
 function executionDuration(execution: TaskExecution) {

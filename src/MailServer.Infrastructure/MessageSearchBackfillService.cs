@@ -19,7 +19,7 @@ public sealed class MessageSearchBackfillService(
 {
     public const int ParserVersion = 2;
     private const string CursorKey = "internal.search.backfill.cursor.v2";
-    private sealed record ScanCursor(DateTimeOffset ReceivedAt, Guid Id);
+    private sealed record ScanCursor(DateTimeOffset ReceivedAt, long Id);
     public const int MaximumTextBytes = 512 * 1024;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -134,7 +134,7 @@ public sealed class MessageSearchBackfillService(
         }
     }
 
-    internal static MessageSearchRecord BuildRecord(Guid messageId, MimeMessage message, bool omitBody = false)
+    internal static MessageSearchRecord BuildRecord(long messageId, MimeMessage message, bool omitBody = false)
     {
         var headers = message.Headers.GroupBy(x => x.Field, StringComparer.OrdinalIgnoreCase)
             .ToDictionary(group => group.Key,

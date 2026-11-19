@@ -59,7 +59,7 @@ public static class PermissionEndpointExtensions
         {
             var domainIds = context.Arguments
                 .SelectMany(ExtractDomainIds)
-                .Where(x => x != Guid.Empty)
+                .Where(x => x != 0)
                 .Distinct()
                 .ToArray();
             if (domainIds.Length == 0)
@@ -131,13 +131,13 @@ public static class PermissionEndpointExtensions
             return allowed ? await next(context) : Results.Forbid();
         });
 
-    private static bool TryRouteGuid(HttpContext http, string routeValueName, out Guid value)
+    private static bool TryRouteGuid(HttpContext http, string routeValueName, out long value)
     {
         var raw = http.Request.RouteValues[routeValueName]?.ToString();
-        return Guid.TryParse(raw, out value);
+        return long.TryParse(raw, out value);
     }
 
-    private static IEnumerable<Guid> ExtractDomainIds(object? argument)
+    private static IEnumerable<long> ExtractDomainIds(object? argument)
     {
         if (argument is null) yield break;
         if (argument is DomainBatchRequest batch)
@@ -177,33 +177,33 @@ public static class PermissionEndpointExtensions
         return !string.IsNullOrWhiteSpace(domainName);
     }
 
-    private static async Task<Guid?> ResolveDomainIdAsync(HttpContext http, string domainName)
+    private static async Task<long?> ResolveDomainIdAsync(HttpContext http, string domainName)
     {
         var factory = http.RequestServices.GetRequiredService<IDbContextFactory<MailDbContext>>();
         await using var db = await factory.CreateDbContextAsync(http.RequestAborted);
         return await db.Domains.AsNoTracking()
             .Where(x => x.Name == domainName)
-            .Select(x => (Guid?)x.Id)
+            .Select(x => (long?)x.Id)
             .SingleOrDefaultAsync(http.RequestAborted);
     }
 
-    private static async Task<Guid?> ResolveAccountDomainAsync(HttpContext http, Guid accountId)
+    private static async Task<long?> ResolveAccountDomainAsync(HttpContext http, long accountId)
     {
         var factory = http.RequestServices.GetRequiredService<IDbContextFactory<MailDbContext>>();
         await using var db = await factory.CreateDbContextAsync(http.RequestAborted);
         return await db.Accounts.AsNoTracking()
             .Where(x => x.Id == accountId)
-            .Select(x => (Guid?)x.DomainId)
+            .Select(x => (long?)x.DomainId)
             .SingleOrDefaultAsync(http.RequestAborted);
     }
 
-    private static async Task<Guid?> ResolveAliasDomainAsync(HttpContext http, Guid aliasId)
+    private static async Task<long?> ResolveAliasDomainAsync(HttpContext http, long aliasId)
     {
         var factory = http.RequestServices.GetRequiredService<IDbContextFactory<MailDbContext>>();
         await using var db = await factory.CreateDbContextAsync(http.RequestAborted);
         return await db.Aliases.AsNoTracking()
             .Where(x => x.Id == aliasId)
-            .Select(x => (Guid?)x.DomainId)
+            .Select(x => (long?)x.DomainId)
             .SingleOrDefaultAsync(http.RequestAborted);
     }
 }

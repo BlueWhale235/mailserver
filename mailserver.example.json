@@ -1,11 +1,16 @@
 {
   "Database": {
-    "Provider": "Sqlite"
+    "Provider": "Sqlite",
+    "ContextPoolSize": 32
+  },
+  "BackgroundServices": {
+    "ProcessWakeEnabled": true
   },
   "ConnectionStrings": {
     "MailDatabase": "Data Source=data/mailserver.db"
   },
   "Storage": {
+    "Provider": "File",
     "RootPath": "data/messages",
     "MaximumMessageBytes": 52428800
   },
@@ -168,7 +173,8 @@
   },
   "SmtpConnectionReuse": {
     "Enabled": false,
-    "MaximumIdleConnections": 4,
+    "MaximumIdleConnections": 64,
+    "MaximumIdleConnectionsPerKey": 8,
     "IdleSeconds": 30,
     "MaximumLifetimeSeconds": 300,
     "MaximumMessages": 50

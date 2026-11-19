@@ -34,7 +34,7 @@ public sealed class AuditStampInterceptor(
         if (context is not MailDbContext db) return;
         var http = httpContextAccessor.HttpContext;
         var operationIp = Normalize(http?.Connection.RemoteIpAddress);
-        foreach (var entry in db.ChangeTracker.Entries<AuditRecord>()
+        foreach (var entry in (db.PendingLogs?.ChangeTracker.Entries<AuditRecord>() ?? [])
                      .Where(x => x.State == EntityState.Added))
         {
             entry.Entity.RequestId ??= http?.TraceIdentifier;

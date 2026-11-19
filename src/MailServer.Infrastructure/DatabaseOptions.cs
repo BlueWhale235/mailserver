@@ -10,6 +10,8 @@ public sealed class DatabaseOptions
 {
     public const string SectionName = "Database";
     public DatabaseProvider Provider { get; set; } = DatabaseProvider.Sqlite;
+    // Retained contexts, not a limit on active requests or database connections.
+    public int ContextPoolSize { get; set; } = 32;
 }
 
 public static class DatabaseProviderExtensions

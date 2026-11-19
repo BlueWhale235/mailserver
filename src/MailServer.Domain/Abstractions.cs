@@ -8,7 +8,7 @@ public sealed record ScheduledTaskRunResult(int ProcessedCount, long ReleasedByt
 /// <summary>
 /// 回收站展示项，代表一个等待恢复或到期清理的软删除资源。
 /// </summary>
-public sealed record RecycleBinItem(Guid QueueId, CleanupResourceType ResourceType, Guid? ResourceId,
+public sealed record RecycleBinItem(long QueueId, CleanupResourceType ResourceType, long? ResourceId,
     string DisplayName, long EstimatedBytes, DateTimeOffset DeletedAt, DateTimeOffset PurgeAfter, CleanupQueueStatus Status,
     string? Sender = null, string? Subject = null, DateTimeOffset? ReceivedAt = null);
 
@@ -29,9 +29,9 @@ public sealed record QuarantineCreateRequest(
 /// 隔离区列表项，供管理后台审核、释放或删除邮件。
 /// </summary>
 public sealed record QuarantineListItem(
-    Guid Id,
-    Guid DomainId,
-    Guid MessageId,
+    long Id,
+    long DomainId,
+    long MessageId,
     string Sender,
     IReadOnlyList<string> Recipients,
     string RemoteAddress,
@@ -69,7 +69,7 @@ public interface ITaskScheduler
 {
     Task EnsureDefaultsAsync(CancellationToken cancellationToken);
     Task RunDueAsync(CancellationToken cancellationToken);
-    Task<Guid> RunNowAsync(Guid taskId, CancellationToken cancellationToken);
+    Task<long> RunNowAsync(long taskId, CancellationToken cancellationToken);
 }
 
 public interface ITaskExecutionService
@@ -77,10 +77,10 @@ public interface ITaskExecutionService
     Task<IReadOnlyList<ScheduledTask>> ListTasksAsync(CancellationToken cancellationToken);
     Task<IReadOnlyList<TaskExecution>> ListExecutionsAsync(int take, CancellationToken cancellationToken);
     Task<(IReadOnlyList<TaskExecution> Items, int TotalCount)> SearchExecutionsAsync(
-        Guid? taskId, TaskExecutionStatus? status, DateTimeOffset? from, DateTimeOffset? to,
+        long? taskId, TaskExecutionStatus? status, DateTimeOffset? from, DateTimeOffset? to,
         int page, int pageSize, CancellationToken cancellationToken);
-    Task<TaskExecution?> GetExecutionAsync(Guid id, CancellationToken cancellationToken);
-    Task UpdateAsync(Guid taskId, bool enabled, int intervalMinutes, int timeoutSeconds, int batchSize,
+    Task<TaskExecution?> GetExecutionAsync(long id, CancellationToken cancellationToken);
+    Task UpdateAsync(long taskId, bool enabled, int intervalMinutes, int timeoutSeconds, int batchSize,
         CancellationToken cancellationToken, string? actor = null);
 }
 
@@ -92,8 +92,8 @@ public interface IRecycleBinService
         DateTimeOffset? deletedFrom, DateTimeOffset? deletedTo,
         DateTimeOffset? purgeFrom, DateTimeOffset? purgeTo,
         int page, int pageSize, CancellationToken cancellationToken);
-    Task RestoreAsync(Guid queueId, string actor, CancellationToken cancellationToken);
-    Task PurgeAsync(Guid queueId, string actor, CancellationToken cancellationToken);
+    Task RestoreAsync(long queueId, string actor, CancellationToken cancellationToken);
+    Task PurgeAsync(long queueId, string actor, CancellationToken cancellationToken);
 }
 
 public interface ICleanupQueueService
@@ -104,7 +104,7 @@ public interface ICleanupQueueService
 
 public interface IQuotaLedgerService
 {
-    Task ApplyAsync(Guid accountId, Guid domainId, Guid? mailboxMessageId, long bytes,
+    Task ApplyAsync(long accountId, long domainId, long? mailboxMessageId, long bytes,
         QuotaLedgerOperation operation, string idempotencyKey, CancellationToken cancellationToken);
 }
 
@@ -117,11 +117,11 @@ public interface IQuotaReconciliationService
 public interface IQuarantineService
 {
     Task<IReadOnlyList<QuarantineRecord>> CreateAsync(QuarantineCreateRequest request, CancellationToken cancellationToken);
-    Task<PagedQuarantineResult> SearchAsync(Guid domainId, string? search, QuarantineStatus? status, int page, int pageSize, CancellationToken cancellationToken);
-    Task<QuarantineDetailView> GetRawAsync(Guid domainId, Guid id, CancellationToken cancellationToken);
-    Task<QuarantineRawDownload> OpenRawAsync(Guid domainId, Guid id, CancellationToken cancellationToken);
-    Task ReleaseAsync(Guid domainId, Guid id, string actor, string? note, CancellationToken cancellationToken);
-    Task DeleteAsync(Guid domainId, Guid id, string actor, string? note, CancellationToken cancellationToken);
+    Task<PagedQuarantineResult> SearchAsync(long domainId, string? search, QuarantineStatus? status, int page, int pageSize, CancellationToken cancellationToken);
+    Task<QuarantineDetailView> GetRawAsync(long domainId, long id, CancellationToken cancellationToken);
+    Task<QuarantineRawDownload> OpenRawAsync(long domainId, long id, CancellationToken cancellationToken);
+    Task ReleaseAsync(long domainId, long id, string actor, string? note, CancellationToken cancellationToken);
+    Task DeleteAsync(long domainId, long id, string actor, string? note, CancellationToken cancellationToken);
 }
 
 /// <summary>
@@ -143,7 +143,7 @@ public sealed record InboundEnvelope(
     string? AuthenticatedUser,
     string RemoteAddress,
     string HeloName,
-    Guid? AuthenticatedAccountId = null)
+    long? AuthenticatedAccountId = null)
 {
     public string? SourceType { get; init; }
 }
@@ -151,7 +151,7 @@ public sealed record InboundEnvelope(
 /// <summary>
 /// 入站邮件被接受后的结果，包含原始内容键以及本地/外发分发数量。
 /// </summary>
-public sealed record InboundAcceptance(Guid MessageId, string ContentKey, int LocalDeliveries, int QueuedDeliveries);
+public sealed record InboundAcceptance(long MessageId, string ContentKey, int LocalDeliveries, int QueuedDeliveries);
 
 /// <summary>
 /// 一次外发投递尝试的结果。PermanentFailure 决定队列是否继续重试。
@@ -187,8 +187,8 @@ public sealed record DeliveryLease(
 {
     public double QueueWaitMilliseconds { get; init; }
     public double RetryBackoffMilliseconds { get; init; }
-    public Guid Id => Job.Id;
-    public Guid MessageId => Job.MessageId;
+    public long Id => Job.Id;
+    public long MessageId => Job.MessageId;
     public DeliveryStatus Status => Job.Status;
 }
 
@@ -200,13 +200,13 @@ public sealed record DeliveryCompletion(
 /// <summary>
 /// 邮箱摘要，字段含义遵循 IMAP 计数、UIDVALIDITY、UIDNEXT 和 MODSEQ 语义。
 /// </summary>
-public sealed record MailboxSummary(Guid Id, string Name, long Exists, long Unseen, long UidValidity, long UidNext, long HighestModSeq);
+public sealed record MailboxSummary(long Id, string Name, long Exists, long Unseen, long UidValidity, long UidNext, long HighestModSeq);
 
 /// <summary>
 /// 单封邮箱内邮件的协议视图。
 /// </summary>
 public sealed record MailboxItem(
-    Guid Id,
+    long Id,
     long Sequence,
     long Uid,
     string Flags,
@@ -214,7 +214,7 @@ public sealed record MailboxItem(
     DateTimeOffset InternalDate,
     long Size,
     string ContentKey,
-    Guid MessageId = default);
+    long MessageId = default);
 
 /// <summary>
 /// 邮箱 APPEND 结果，用于返回新 UID 和邮箱 UIDNEXT。
@@ -325,6 +325,17 @@ public interface IMessageContentStore
     Task DeleteIfUnreferencedAsync(string key, CancellationToken cancellationToken);
 }
 
+public sealed record ContentStorageObject(string Key, long Size, DateTimeOffset LastModified);
+public sealed record ContentStoragePage(IReadOnlyList<ContentStorageObject> Items, string? ContinuationToken);
+
+public interface IMessageStorageMaintenance
+{
+    Task<bool> ExistsAsync(string key, CancellationToken token);
+    Task<ContentStoragePage> ListAsync(string? continuationToken, int pageSize, CancellationToken token);
+    Task<bool> TryDeleteUnreferencedAsync(string key, DateTimeOffset olderThan, CancellationToken token);
+    Task CheckHealthAsync(CancellationToken token);
+}
+
 /// <summary>
 /// 凭据哈希服务抽象，集中封装密码/API Key 的哈希、校验和升级逻辑。
 /// </summary>
@@ -341,8 +352,8 @@ public interface ICredentialService
 /// </summary>
 public interface IAccountAuthenticator
 {
-    Task<Guid?> AuthenticateMailboxAsync(string address, string password, CancellationToken cancellationToken);
-    Task<Guid?> ResolveMailboxIdentityAsync(string address, CancellationToken cancellationToken);
+    Task<long?> AuthenticateMailboxAsync(string address, string password, CancellationToken cancellationToken);
+    Task<long?> ResolveMailboxIdentityAsync(string address, CancellationToken cancellationToken);
 }
 
 /// <summary>
@@ -350,7 +361,7 @@ public interface IAccountAuthenticator
 /// </summary>
 public interface ISmtpSenderAuthorizer
 {
-    Task<bool> IsAuthorizedSenderAsync(Guid accountId, string sender, CancellationToken cancellationToken);
+    Task<bool> IsAuthorizedSenderAsync(long accountId, string sender, CancellationToken cancellationToken);
 }
 
 /// <summary>
@@ -370,8 +381,8 @@ public interface IDeliveryQueue
     Task<IReadOnlyList<DeliveryLease>> LeaseAsync(string owner, int count, TimeSpan duration, CancellationToken cancellationToken);
     Task<bool> RenewAsync(DeliveryLease lease, TimeSpan duration, CancellationToken cancellationToken);
     Task<DeliveryCompletion> CompleteAsync(DeliveryLease lease, DeliveryResult result, CancellationToken cancellationToken);
-    Task RetryNowAsync(Guid jobId, CancellationToken cancellationToken, int? expectedAttempts = null);
-    Task DeleteAsync(Guid jobId, CancellationToken cancellationToken);
+    Task RetryNowAsync(long jobId, CancellationToken cancellationToken, int? expectedAttempts = null);
+    Task DeleteAsync(long jobId, CancellationToken cancellationToken);
 }
 
 /// <summary>
@@ -382,30 +393,36 @@ public interface IOutboundTransport
     Task<DeliveryResult> DeliverAsync(DeliveryJob job, Stream content, CancellationToken cancellationToken);
 }
 
+public interface IBatchOutboundTransport : IOutboundTransport
+{
+    Task<IReadOnlyDictionary<long, DeliveryResult>> DeliverBatchAsync(
+        IReadOnlyList<DeliveryJob> jobs, Stream content, CancellationToken cancellationToken);
+}
+
 /// <summary>
 /// 邮箱操作服务抽象，承载 IMAP 命令背后的 UID、flag、copy/move 和 APPEND 语义。
 /// </summary>
 public interface IMailboxService
 {
-    Task<IReadOnlyList<MailboxSummary>> ListAsync(Guid accountId, CancellationToken cancellationToken);
-    Task EnsureDefaultFoldersAsync(Guid accountId, CancellationToken cancellationToken);
-    Task<MailboxSummary?> SelectAsync(Guid accountId, string mailboxName, CancellationToken cancellationToken);
-    Task<MailboxSummary> CreateAsync(Guid accountId, string mailboxName, CancellationToken cancellationToken);
-    Task DeleteAsync(Guid accountId, string mailboxName, CancellationToken cancellationToken);
-    Task RenameAsync(Guid accountId, string existingMailboxName, string newMailboxName, CancellationToken cancellationToken);
-    Task SubscribeAsync(Guid accountId, string mailboxName, CancellationToken cancellationToken);
-    Task UnsubscribeAsync(Guid accountId, string mailboxName, CancellationToken cancellationToken);
-    Task<IReadOnlyList<MailboxSummary>> ListSubscribedAsync(Guid accountId, CancellationToken cancellationToken);
-    Task<IReadOnlyList<MailboxItem>> FetchAsync(Guid mailboxId, string sequenceSet, bool useUid, CancellationToken cancellationToken);
-    Task<IMailboxSelectionSnapshot> CreateFetchSnapshotAsync(Guid mailboxId, string sequenceSet,
+    Task<IReadOnlyList<MailboxSummary>> ListAsync(long accountId, CancellationToken cancellationToken);
+    Task EnsureDefaultFoldersAsync(long accountId, CancellationToken cancellationToken);
+    Task<MailboxSummary?> SelectAsync(long accountId, string mailboxName, CancellationToken cancellationToken);
+    Task<MailboxSummary> CreateAsync(long accountId, string mailboxName, CancellationToken cancellationToken);
+    Task DeleteAsync(long accountId, string mailboxName, CancellationToken cancellationToken);
+    Task RenameAsync(long accountId, string existingMailboxName, string newMailboxName, CancellationToken cancellationToken);
+    Task SubscribeAsync(long accountId, string mailboxName, CancellationToken cancellationToken);
+    Task UnsubscribeAsync(long accountId, string mailboxName, CancellationToken cancellationToken);
+    Task<IReadOnlyList<MailboxSummary>> ListSubscribedAsync(long accountId, CancellationToken cancellationToken);
+    Task<IReadOnlyList<MailboxItem>> FetchAsync(long mailboxId, string sequenceSet, bool useUid, CancellationToken cancellationToken);
+    Task<IMailboxSelectionSnapshot> CreateFetchSnapshotAsync(long mailboxId, string sequenceSet,
         bool useUid, CancellationToken cancellationToken);
-    Task<IReadOnlyList<long>> SearchAsync(Guid mailboxId, string criteria, bool useUid, CancellationToken cancellationToken);
-    Task StoreFlagsAsync(Guid mailboxId, string sequenceSet, bool useUid, string operation, IReadOnlyCollection<string> flags, CancellationToken cancellationToken);
-    Task MarkSeenAsync(Guid mailboxId, IReadOnlyCollection<Guid> mailboxMessageIds, CancellationToken cancellationToken);
-    Task<IReadOnlyList<ExpungedMailboxItem>> ExpungeAsync(Guid mailboxId, CancellationToken cancellationToken);
-    Task<CopyMoveResult> CopyAsync(Guid mailboxId, string sequenceSet, bool useUid, string destination, bool move, CancellationToken cancellationToken);
-    Task<AppendResult> AppendAsync(Guid accountId, string mailboxName, Stream content, IReadOnlyCollection<string> flags, DateTimeOffset? internalDate, CancellationToken cancellationToken);
-    Task<Stream> OpenMessageAsync(Guid mailboxMessageId, CancellationToken cancellationToken);
+    Task<IReadOnlyList<long>> SearchAsync(long mailboxId, string criteria, bool useUid, CancellationToken cancellationToken);
+    Task StoreFlagsAsync(long mailboxId, string sequenceSet, bool useUid, string operation, IReadOnlyCollection<string> flags, CancellationToken cancellationToken);
+    Task MarkSeenAsync(long mailboxId, IReadOnlyCollection<long> mailboxMessageIds, CancellationToken cancellationToken);
+    Task<IReadOnlyList<ExpungedMailboxItem>> ExpungeAsync(long mailboxId, CancellationToken cancellationToken);
+    Task<CopyMoveResult> CopyAsync(long mailboxId, string sequenceSet, bool useUid, string destination, bool move, CancellationToken cancellationToken);
+    Task<AppendResult> AppendAsync(long accountId, string mailboxName, Stream content, IReadOnlyCollection<string> flags, DateTimeOffset? internalDate, CancellationToken cancellationToken);
+    Task<Stream> OpenMessageAsync(long mailboxMessageId, CancellationToken cancellationToken);
 }
 
 public interface IMailboxSelectionSnapshot : IAsyncDisposable

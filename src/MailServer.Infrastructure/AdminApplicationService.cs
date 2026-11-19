@@ -45,7 +45,7 @@ public sealed record OverviewTraffic(
     IReadOnlyList<OverviewTrafficBucket> Buckets);
 
 public sealed record AccountView(
-    Guid Id,
+    long Id,
     string Address,
     bool IsEnabled,
     long QuotaBytes,
@@ -54,9 +54,9 @@ public sealed record AccountView(
     int AliasCount);
 
 public sealed record AliasView(
-    Guid Id,
+    long Id,
     string Source,
-    Guid? TargetAccountId,
+    long? TargetAccountId,
     string? TargetAddress,
     bool IsEnabled,
     string? LegacyDestinationAddress,
@@ -79,7 +79,7 @@ public enum AdminUserStatusFilter
 }
 
 public sealed record ApiKeyView(
-    Guid Id,
+    long Id,
     string Name,
     string Prefix,
     string CreatedBy,
@@ -88,18 +88,18 @@ public sealed record ApiKeyView(
     DateTimeOffset? ExpiresAt,
     DateTimeOffset? RevokedAt);
 
-public sealed record PermissionDomainOption(Guid Id, string Name);
+public sealed record PermissionDomainOption(long Id, string Name);
 
 public sealed record DeliveryRawMessageView(
-    Guid DeliveryJobId,
+    long DeliveryJobId,
     string FileName,
     string Content);
 public sealed record DeliveryMessageDownloadView(
-    Guid DeliveryJobId,
+    long DeliveryJobId,
     string FileName,
     Stream Content);
 public sealed record DeliveryAttemptDetail(
-    Guid Id,
+    long Id,
     int AttemptNumber,
     bool Succeeded,
     bool PermanentFailure,
@@ -117,7 +117,7 @@ public sealed record DeliveryAttemptDetail(
     string? SessionSummary,
     DateTimeOffset CreatedAt);
 public sealed record DeliveryJobView(
-    Guid Id,
+    long Id,
     string Sender,
     string Recipient,
     DeliveryStatus Status,
@@ -134,7 +134,7 @@ public sealed record DeliveryQueueSummary(
     int DeliveredLast24Hours,
     int FailedLast24Hours,
     double AverageAttemptMillisecondsLast24Hours);
-public sealed record DeliveryBatchItemResult(Guid Id, string Status, string? Detail);
+public sealed record DeliveryBatchItemResult(long Id, string Status, string? Detail);
 public sealed record DeliveryBatchResult(
     IReadOnlyList<DeliveryBatchItemResult> Items,
     int Succeeded,
@@ -162,7 +162,7 @@ public enum TlsReportDeliveryStatusFilter
     Completed = 4
 }
 public sealed record TlsReportDeliveryView(
-    Guid Id,
+    long Id,
     string PolicyDomain,
     string ReportUri,
     DateTimeOffset PeriodStart,
@@ -173,7 +173,7 @@ public sealed record TlsReportDeliveryView(
     DateTimeOffset? CompletedAt,
     string? LastError);
 public sealed record TlsReportDeliveryDetail(
-    Guid Id,
+    long Id,
     string PolicyDomain,
     string ReportUri,
     DateTimeOffset PeriodStart,
@@ -185,15 +185,15 @@ public sealed record TlsReportDeliveryDetail(
     string? LastError,
     string ReportJson);
 public sealed record TlsReportRetryResult(bool Scheduled, bool Replayed);
-public sealed record CreatedApiKey(Guid Id, string Value, DateTimeOffset? ExpiresAt);
+public sealed record CreatedApiKey(long Id, string Value, DateTimeOffset? ExpiresAt);
 public sealed record AdminUserView(
-    Guid Id,
+    long Id,
     string UserName,
     bool IsEnabled,
     DateTimeOffset CreatedAt,
     bool IsPrimary);
 public sealed record FirewallRuleView(
-    Guid Id,
+    long Id,
     string Cidr,
     string? Note,
     bool IsEnabled,
@@ -211,7 +211,7 @@ public sealed record DomainHealthView(
     DateTimeOffset? LastAuditAt,
     int PendingQuarantineCount = 0);
 public sealed record DomainAuditView(
-    Guid Id,
+    long Id,
     string Actor,
     string Action,
     string Resource,
@@ -236,7 +236,7 @@ public sealed record DomainManagementView(
     IReadOnlyList<ClientConnectionEndpoint> Connections,
     IReadOnlyList<OutboundAddressOption> OutboundAddressOptions);
 public sealed record DomainListItemView(
-    Guid Id,
+    long Id,
     string Name,
     string? MailHostName,
     bool IsActive,
@@ -481,7 +481,7 @@ public sealed class AdminApplicationService(
     }
 
     public async Task<FirewallRuleView> UpdateFirewallRuleAsync(
-        Guid id,
+        long id,
         bool isEnabled,
         string? note,
         string actor,
@@ -504,7 +504,7 @@ public sealed class AdminApplicationService(
     }
 
     public async Task DeleteFirewallRuleAsync(
-        Guid id,
+        long id,
         string actor,
         CancellationToken cancellationToken,
         string? requestId = null)
@@ -566,7 +566,7 @@ public sealed class AdminApplicationService(
     }
 
     public async Task<IReadOnlyList<PermissionDomainOption>> ResolvePermissionDomainsAsync(
-        IReadOnlyCollection<Guid> ids,
+        IReadOnlyCollection<long> ids,
         PermittedDomainScope permittedScope,
         CancellationToken cancellationToken)
     {
@@ -664,7 +664,7 @@ public sealed class AdminApplicationService(
         SearchDomainsAsync(new DomainSearchFilter(search, null, null), page, pageSize, cancellationToken);
 
     public async Task DeleteDomainsAsync(
-        IReadOnlyCollection<Guid> domainIds,
+        IReadOnlyCollection<long> domainIds,
         string actor,
         CancellationToken cancellationToken)
     {
@@ -711,7 +711,7 @@ public sealed class AdminApplicationService(
     }
 
     private async Task DeleteDomainsImmediatelyAsync(
-        IReadOnlyCollection<Guid> domainIds,
+        IReadOnlyCollection<long> domainIds,
         string actor,
         CancellationToken cancellationToken)
     {
@@ -727,7 +727,7 @@ public sealed class AdminApplicationService(
         var activeNames = domains.Where(x => x.IsActive).Select(x => x.Name).ToArray();
         if (activeNames.Length > 0)
             throw new InvalidOperationException($"请先停用域名再删除：{string.Join("、", activeNames)}。");
-        var messageIds = new HashSet<Guid>();
+        var messageIds = new HashSet<long>();
         foreach (var domain in domains)
         {
             var accountIds = await db.Accounts.Where(x => x.DomainId == domain.Id).Select(x => x.Id).ToListAsync(cancellationToken);
@@ -774,7 +774,7 @@ public sealed class AdminApplicationService(
             await contentStore.DeleteIfUnreferencedAsync(key, cancellationToken);
     }
 
-    public async Task<DomainManagementView> GetDomainAsync(Guid id, CancellationToken cancellationToken)
+    public async Task<DomainManagementView> GetDomainAsync(long id, CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         var domain = await db.Domains.AsNoTracking()
@@ -790,7 +790,7 @@ public sealed class AdminApplicationService(
             BuildOutboundAddressOptions(domain));
     }
 
-    public async Task<DomainHealthView> GetDomainHealthAsync(Guid id, CancellationToken cancellationToken)
+    public async Task<DomainHealthView> GetDomainHealthAsync(long id, CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         var domain = await db.Domains.AsNoTracking()
@@ -799,7 +799,7 @@ public sealed class AdminApplicationService(
             ?? throw new KeyNotFoundException("Domain not found.");
 
         var suffix = "@" + domain.Name;
-        var auditResources = GetDomainAuditResources(db, id);
+        var auditResources = await GetDomainAuditResources(db, id).ToArrayAsync(cancellationToken);
         var lastAuditAt = await db.AuditRecords.AsNoTracking()
             .Where(x => auditResources.Contains(x.Resource))
             .OrderByDescending(x => x.CreatedAt)
@@ -858,7 +858,7 @@ public sealed class AdminApplicationService(
     }
 
     public async Task<MailDomain> UpdateDomainDetailsAsync(
-        Guid id,
+        long id,
         string mailHostName,
         bool isActive,
         string actor,
@@ -874,7 +874,7 @@ public sealed class AdminApplicationService(
             cancellationToken);
 
     public async Task<MailDomain> UpdateDomainDetailsAsync(
-        Guid id,
+        long id,
         string mailHostName,
         bool isActive,
         string? smtpHostName,
@@ -892,7 +892,7 @@ public sealed class AdminApplicationService(
             cancellationToken);
 
     public async Task<MailDomain> UpdateDomainDetailsAsync(
-        Guid id,
+        long id,
         string mailHostName,
         bool isActive,
         string? smtpHostName,
@@ -932,7 +932,7 @@ public sealed class AdminApplicationService(
     }
 
     public async Task<MailDomain> UpdateDomainAsync(
-        Guid id,
+        long id,
         bool? isActive,
         string? dkimSelector,
         string? dkimPrivateKeyPath,
@@ -952,7 +952,7 @@ public sealed class AdminApplicationService(
     }
 
     public async Task<MailDomain> UpdateDomainQuotaAsync(
-        Guid id,
+        long id,
         long quotaBytes,
         string actor,
         CancellationToken cancellationToken)
@@ -1013,7 +1013,7 @@ public sealed class AdminApplicationService(
     }
 
     public async Task<IReadOnlyList<AccountView>> GetDomainAccountsAsync(
-        Guid domainId,
+        long domainId,
         CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
@@ -1038,7 +1038,7 @@ public sealed class AdminApplicationService(
     }
 
     public async Task<PagedResult<AccountView>> SearchDomainAccountsAsync(
-        Guid domainId,
+        long domainId,
         string? search,
         bool? isEnabled,
         int page,
@@ -1091,7 +1091,7 @@ public sealed class AdminApplicationService(
     }
 
     public async Task<AccountView> CreateDomainAccountAsync(
-        Guid domainId,
+        long domainId,
         string localPart,
         string password,
         long? quotaBytes,
@@ -1110,7 +1110,7 @@ public sealed class AdminApplicationService(
     }
 
     public async Task UpdateAccountAsync(
-        Guid id,
+        long id,
         bool? enabled,
         long? quotaBytes,
         string actor,
@@ -1137,7 +1137,7 @@ public sealed class AdminApplicationService(
     }
 
     public async Task DeleteAccountAsync(
-        Guid id,
+        long id,
         string actor,
         CancellationToken cancellationToken)
     {
@@ -1176,8 +1176,8 @@ public sealed class AdminApplicationService(
     }
 
     public async Task DisableDomainAccountsAsync(
-        Guid domainId,
-        IReadOnlyCollection<Guid> accountIds,
+        long domainId,
+        IReadOnlyCollection<long> accountIds,
         string actor,
         CancellationToken cancellationToken)
     {
@@ -1194,8 +1194,8 @@ public sealed class AdminApplicationService(
     }
 
     public async Task EnableDomainAccountsAsync(
-        Guid domainId,
-        IReadOnlyCollection<Guid> accountIds,
+        long domainId,
+        IReadOnlyCollection<long> accountIds,
         string actor,
         CancellationToken cancellationToken)
     {
@@ -1212,8 +1212,8 @@ public sealed class AdminApplicationService(
     }
 
     public async Task DeleteDomainAccountsAsync(
-        Guid domainId,
-        IReadOnlyCollection<Guid> accountIds,
+        long domainId,
+        IReadOnlyCollection<long> accountIds,
         string actor,
         CancellationToken cancellationToken)
     {
@@ -1255,7 +1255,7 @@ public sealed class AdminApplicationService(
     }
 
     public async Task SetAccountPasswordAsync(
-        Guid id,
+        long id,
         string password,
         string actor,
         CancellationToken cancellationToken)
@@ -1312,7 +1312,7 @@ public sealed class AdminApplicationService(
     }
 
     public async Task<IReadOnlyList<AliasView>> GetDomainAliasesAsync(
-        Guid domainId,
+        long domainId,
         CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
@@ -1339,7 +1339,7 @@ public sealed class AdminApplicationService(
     }
 
     public async Task<PagedResult<AliasView>> SearchDomainAliasesAsync(
-        Guid domainId,
+        long domainId,
         string? search,
         int page,
         int pageSize,
@@ -1380,14 +1380,14 @@ public sealed class AdminApplicationService(
 
     public async Task<AliasView> CreateAliasAsync(
         string source,
-        Guid targetAccountId,
+        long targetAccountId,
         string actor,
         CancellationToken cancellationToken)
         => await CreateAliasAsync(source, targetAccountId, MailAliasMode.SendReceive, actor, cancellationToken);
 
     public async Task<AliasView> CreateAliasAsync(
         string source,
-        Guid targetAccountId,
+        long targetAccountId,
         MailAliasMode mode,
         string actor,
         CancellationToken cancellationToken)
@@ -1405,17 +1405,17 @@ public sealed class AdminApplicationService(
     }
 
     public async Task<AliasView> CreateDomainAliasAsync(
-        Guid domainId,
+        long domainId,
         string sourceLocalPart,
-        Guid targetAccountId,
+        long targetAccountId,
         string actor,
         CancellationToken cancellationToken)
         => await CreateDomainAliasAsync(domainId, sourceLocalPart, targetAccountId, MailAliasMode.SendReceive, actor, cancellationToken);
 
     public async Task<AliasView> CreateDomainAliasAsync(
-        Guid domainId,
+        long domainId,
         string sourceLocalPart,
-        Guid targetAccountId,
+        long targetAccountId,
         MailAliasMode mode,
         string actor,
         CancellationToken cancellationToken)
@@ -1432,7 +1432,7 @@ public sealed class AdminApplicationService(
     }
 
     public async Task<AliasView> CreateDomainAliasAsync(
-        Guid domainId,
+        long domainId,
         string sourceLocalPart,
         string targetAddress,
         string actor,
@@ -1443,23 +1443,23 @@ public sealed class AdminApplicationService(
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         var targetAccountId = await db.Accounts
             .Where(x => x.DomainId == domainId && x.LocalPart == localPart && x.Domain.Name == domainName)
-            .Select(x => (Guid?)x.Id)
+            .Select(x => (long?)x.Id)
             .SingleOrDefaultAsync(cancellationToken)
             ?? throw new InvalidOperationException("Target account does not exist in this domain.");
         return await CreateDomainAliasAsync(domainId, sourceLocalPart, targetAccountId, actor, cancellationToken);
     }
 
     public async Task<AliasView> RebindAliasAsync(
-        Guid id,
-        Guid targetAccountId,
+        long id,
+        long targetAccountId,
         string actor,
         CancellationToken cancellationToken)
         => await UpdateAliasAsync(id, null, targetAccountId, MailAliasMode.SendReceive, actor, cancellationToken);
 
     public async Task<AliasView> UpdateAliasAsync(
-        Guid id,
+        long id,
         string? sourceLocalPart,
-        Guid? targetAccountId,
+        long? targetAccountId,
         MailAliasMode? mode,
         string actor,
         CancellationToken cancellationToken)
@@ -1514,7 +1514,7 @@ public sealed class AdminApplicationService(
         return ToAliasView(alias, target);
     }
 
-    public async Task DeleteAliasAsync(Guid id, string actor, CancellationToken cancellationToken)
+    public async Task DeleteAliasAsync(long id, string actor, CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         var alias = await db.Aliases.SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
@@ -1525,8 +1525,8 @@ public sealed class AdminApplicationService(
     }
 
     public async Task UpdateDomainAliasesModeAsync(
-        Guid domainId,
-        IReadOnlyCollection<Guid> aliasIds,
+        long domainId,
+        IReadOnlyCollection<long> aliasIds,
         MailAliasMode mode,
         string actor,
         CancellationToken cancellationToken)
@@ -1547,8 +1547,8 @@ public sealed class AdminApplicationService(
     }
 
     public async Task DeleteDomainAliasesAsync(
-        Guid domainId,
-        IReadOnlyCollection<Guid> aliasIds,
+        long domainId,
+        IReadOnlyCollection<long> aliasIds,
         string actor,
         CancellationToken cancellationToken)
     {
@@ -1563,13 +1563,13 @@ public sealed class AdminApplicationService(
     }
 
     public async Task<IReadOnlyList<DomainAuditView>> GetDomainAuditAsync(
-        Guid domainId,
+        long domainId,
         CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         if (!await db.Domains.AnyAsync(x => x.Id == domainId, cancellationToken))
             throw new KeyNotFoundException("Domain not found.");
-        var resources = GetDomainAuditResources(db, domainId);
+        var resources = await GetDomainAuditResources(db, domainId).ToArrayAsync(cancellationToken);
         return await db.AuditRecords.AsNoTracking()
             .Where(x => x.Resource == "settings:mailboxes" || resources.Contains(x.Resource))
             .OrderByDescending(x => x.CreatedAt)
@@ -1689,7 +1689,7 @@ public sealed class AdminApplicationService(
         CreateApiKeyAsync(name, [PermissionService.FullAccessGrant()], expiresAt, actor, cancellationToken);
 
     public async Task<CreatedApiKey> RefreshApiKeyAsync(
-        Guid id,
+        long id,
         string actor,
         CancellationToken cancellationToken)
     {
@@ -1704,7 +1704,7 @@ public sealed class AdminApplicationService(
         return new CreatedApiKey(key.Id, value, key.ExpiresAt);
     }
 
-    public async Task RevokeApiKeyAsync(Guid id, string actor, CancellationToken cancellationToken)
+    public async Task RevokeApiKeyAsync(long id, string actor, CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         var key = await db.ApiKeys.SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
@@ -1714,7 +1714,7 @@ public sealed class AdminApplicationService(
         await db.SaveChangesAsync(cancellationToken);
     }
 
-    public async Task DeleteApiKeyAsync(Guid id, string actor, CancellationToken cancellationToken)
+    public async Task DeleteApiKeyAsync(long id, string actor, CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         var key = await db.ApiKeys.SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
@@ -1740,7 +1740,7 @@ public sealed class AdminApplicationService(
     }
 
     public async Task<IReadOnlyList<DeliveryAttemptDetail>> GetDeliveryAttemptsAsync(
-        Guid deliveryJobId,
+        long deliveryJobId,
         CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
@@ -1770,7 +1770,7 @@ public sealed class AdminApplicationService(
         int page,
         int pageSize,
         CancellationToken cancellationToken,
-        Guid? routeDomainId = null)
+        long? routeDomainId = null)
     {
         page = Math.Max(1, page);
         pageSize = Math.Clamp(pageSize, 5, 100);
@@ -1896,7 +1896,7 @@ public sealed class AdminApplicationService(
     }
 
     public async Task<TlsReportDeliveryDetail> GetTlsReportDeliveryAsync(
-        Guid id,
+        long id,
         CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
@@ -1918,19 +1918,16 @@ public sealed class AdminApplicationService(
     }
 
     public async Task<TlsReportRetryResult> RetryTlsReportDeliveryAsync(
-        Guid id,
+        long id,
         string? idempotencyKey,
         string actor,
         CancellationToken cancellationToken)
     {
-        if (!Guid.TryParse(idempotencyKey, out var key))
+        if (!System.Guid.TryParse(idempotencyKey, out var key))
             throw new FormatException("TLS report retry requires a UUID Idempotency-Key header.");
         var normalizedKey = key.ToString("N");
         var resource = $"tls-report:{id}";
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
-        if (await db.AuditRecords.AsNoTracking().AnyAsync(x => x.Action == "tls-report.retry"
-            && x.Resource == resource && x.RequestId == normalizedKey, cancellationToken))
-            return new TlsReportRetryResult(false, true);
 
         var now = DateTimeOffset.UtcNow;
         if (!db.Database.IsRelational())
@@ -1990,9 +1987,9 @@ public sealed class AdminApplicationService(
                     : TlsReportDeliveryStatus.Pending;
 
     public async Task<DeliveryRawMessageView> GetDeliveryRawMessageAsync(
-        Guid id,
+        long id,
         CancellationToken cancellationToken,
-        Guid? routeDomainId = null)
+        long? routeDomainId = null)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         var job = await db.DeliveryJobs.AsNoTracking()
@@ -2009,7 +2006,7 @@ public sealed class AdminApplicationService(
             var raw = await reader.ReadToEndAsync(cancellationToken);
             return new DeliveryRawMessageView(
                 job.Id,
-                $"delivery-{job.Id:N}.eml",
+                $"delivery-{job.Id}.eml",
                 raw);
         }
         catch (FileNotFoundException exception)
@@ -2023,9 +2020,9 @@ public sealed class AdminApplicationService(
     }
 
     public async Task<DeliveryRawMessageView> GetDeliveryMessageHeadersAsync(
-        Guid id,
+        long id,
         CancellationToken cancellationToken,
-        Guid? routeDomainId = null)
+        long? routeDomainId = null)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         var job = await db.DeliveryJobs.AsNoTracking()
@@ -2041,7 +2038,7 @@ public sealed class AdminApplicationService(
             var headers = await ReadMessageHeadersAsync(content, cancellationToken);
             return new DeliveryRawMessageView(
                 job.Id,
-                $"delivery-{job.Id:N}-headers.txt",
+                $"delivery-{job.Id}-headers.txt",
                 headers);
         }
         catch (FileNotFoundException exception)
@@ -2055,9 +2052,9 @@ public sealed class AdminApplicationService(
     }
 
     public async Task<DeliveryMessageDownloadView> OpenDeliveryMessageDownloadAsync(
-        Guid id,
+        long id,
         CancellationToken cancellationToken,
-        Guid? routeDomainId = null)
+        long? routeDomainId = null)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         var job = await db.DeliveryJobs.AsNoTracking()
@@ -2070,7 +2067,7 @@ public sealed class AdminApplicationService(
         try
         {
             var content = await contentStore.OpenReadAsync(job.Message.ContentKey, cancellationToken);
-            return new DeliveryMessageDownloadView(job.Id, $"delivery-{job.Id:N}.eml", content);
+            return new DeliveryMessageDownloadView(job.Id, $"delivery-{job.Id}.eml", content);
         }
         catch (FileNotFoundException exception)
         {
@@ -2117,10 +2114,10 @@ public sealed class AdminApplicationService(
     }
 
     public async Task RetryDeliveryAsync(
-        Guid id,
+        long id,
         string actor,
         CancellationToken cancellationToken,
-        Guid? routeDomainId = null,
+        long? routeDomainId = null,
         int? expectedAttempts = null)
     {
         if (routeDomainId is not null)
@@ -2135,13 +2132,13 @@ public sealed class AdminApplicationService(
     }
 
     public async Task DeleteDeliveryAsync(
-        Guid id,
+        long id,
         string actor,
         CancellationToken cancellationToken,
-        Guid? routeDomainId = null)
+        long? routeDomainId = null)
     {
         string contentKey;
-        Guid messageId;
+        long messageId;
         await using (var db = await dbFactory.CreateDbContextAsync(cancellationToken))
         {
             await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
@@ -2190,19 +2187,19 @@ public sealed class AdminApplicationService(
     }
 
     public async Task<DeliveryBatchResult> BatchRetryDeliveriesAsync(
-        IReadOnlyList<Guid> ids, string actor, CancellationToken cancellationToken, Guid? routeDomainId = null,
-        IReadOnlyDictionary<Guid, int>? expectedAttempts = null) =>
+        IReadOnlyList<long> ids, string actor, CancellationToken cancellationToken, long? routeDomainId = null,
+        IReadOnlyDictionary<long, int>? expectedAttempts = null) =>
         await BatchDeliveriesAsync(ids, actor, "retry", routeDomainId, cancellationToken, expectedAttempts);
 
     public async Task<DeliveryBatchResult> BatchDeleteDeliveriesAsync(
-        IReadOnlyList<Guid> ids, string actor, CancellationToken cancellationToken, Guid? routeDomainId = null) =>
+        IReadOnlyList<long> ids, string actor, CancellationToken cancellationToken, long? routeDomainId = null) =>
         await BatchDeliveriesAsync(ids, actor, "delete", routeDomainId, cancellationToken, null);
 
     private async Task<DeliveryBatchResult> BatchDeliveriesAsync(
-        IReadOnlyList<Guid> ids, string actor, string operation, Guid? routeDomainId, CancellationToken cancellationToken,
-        IReadOnlyDictionary<Guid, int>? expectedAttempts)
+        IReadOnlyList<long> ids, string actor, string operation, long? routeDomainId, CancellationToken cancellationToken,
+        IReadOnlyDictionary<long, int>? expectedAttempts)
     {
-        if (ids is null || ids.Count is < 1 or > 100 || ids.Any(x => x == Guid.Empty) || ids.Distinct().Count() != ids.Count)
+        if (ids is null || ids.Count is < 1 or > 100 || ids.Any(x => x == 0) || ids.Distinct().Count() != ids.Count)
             throw new ArgumentException("Provide 1 to 100 distinct, nonempty delivery IDs.", nameof(ids));
         if (expectedAttempts is not null && (expectedAttempts.Count != ids.Count
             || ids.Any(id => !expectedAttempts.TryGetValue(id, out var attempts) || attempts < 0)))
@@ -2242,8 +2239,8 @@ public sealed class AdminApplicationService(
     }
 
     private async Task EnsureDeliveryBelongsToDomainAsync(
-        Guid deliveryId,
-        Guid domainId,
+        long deliveryId,
+        long domainId,
         CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
@@ -2299,11 +2296,11 @@ public sealed class AdminApplicationService(
         return saved;
     }
 
-    public Task<MailboxSettingsView> GetDomainMailboxSettingsAsync(Guid domainId, CancellationToken cancellationToken) =>
+    public Task<MailboxSettingsView> GetDomainMailboxSettingsAsync(long domainId, CancellationToken cancellationToken) =>
         systemSettings.GetDomainMailboxSettingsAsync(domainId, cancellationToken);
 
     public async Task<MailboxSettingsView> UpdateDomainMailboxSettingsAsync(
-        Guid domainId,
+        long domainId,
         MailboxSettingsView settings,
         string actor,
         CancellationToken cancellationToken)
@@ -2367,7 +2364,7 @@ public sealed class AdminApplicationService(
         CancellationToken cancellationToken) =>
         dnsDiagnostics.InspectAsync(domain, selector, cancellationToken);
 
-    public async Task<Guid> CreateAdminAsync(
+    public async Task<long> CreateAdminAsync(
         string userName,
         string password,
         CancellationToken cancellationToken)
@@ -2390,7 +2387,7 @@ public sealed class AdminApplicationService(
         var primaryAdminId = await db.AdminUsers.AsNoTracking()
             .OrderBy(x => x.CreatedAt)
             .ThenBy(x => x.Id)
-            .Select(x => (Guid?)x.Id)
+            .Select(x => (long?)x.Id)
             .FirstOrDefaultAsync(cancellationToken);
         var query = db.AdminUsers.AsNoTracking();
         if (normalizedSearch is not null)
@@ -2470,7 +2467,7 @@ public sealed class AdminApplicationService(
     }
 
     public async Task<AdminUserView> UpdateAdminUserAsync(
-        Guid id,
+        long id,
         string userName,
         bool isEnabled,
         string? newPassword,
@@ -2509,7 +2506,7 @@ public sealed class AdminApplicationService(
     }
 
     public async Task DeleteAdminUserAsync(
-        Guid id,
+        long id,
         string actor,
         CancellationToken cancellationToken)
     {
@@ -2536,19 +2533,19 @@ public sealed class AdminApplicationService(
 
     private static async Task<bool> IsPrimaryAdminAsync(
         MailDbContext db,
-        Guid adminId,
+        long adminId,
         CancellationToken cancellationToken)
     {
         var primaryAdminId = await db.AdminUsers.AsNoTracking()
             .OrderBy(x => x.CreatedAt)
             .ThenBy(x => x.Id)
-            .Select(x => (Guid?)x.Id)
+            .Select(x => (long?)x.Id)
             .FirstOrDefaultAsync(cancellationToken);
         return primaryAdminId == adminId;
     }
 
     public async Task ChangeAdminPasswordAsync(
-        Guid id,
+        long id,
         string? currentPassword,
         string newPassword,
         bool requireCurrentPassword,
@@ -2587,7 +2584,7 @@ public sealed class AdminApplicationService(
     private static void AddPermissionGrants(
         MailDbContext db,
         PermissionSubjectType subjectType,
-        Guid subjectId,
+        long subjectId,
         IReadOnlyList<PermissionGrantInput> grants,
         string actor)
     {
@@ -2615,7 +2612,7 @@ public sealed class AdminApplicationService(
         var domainIds = grants
             .Where(x => string.Equals(x.ResourceType, PermissionService.DomainResourceType, StringComparison.OrdinalIgnoreCase)
                         && !string.Equals(x.ResourceKey, PermissionService.AllResources, StringComparison.Ordinal))
-            .Select(x => Guid.Parse(x.ResourceKey!))
+            .Select(x => long.Parse(x.ResourceKey!))
             .Distinct()
             .ToArray();
         if (domainIds.Length == 0) return;
@@ -2728,7 +2725,7 @@ public sealed class AdminApplicationService(
         MailDbContext db,
         MailDomain domain,
         string localPart,
-        Guid targetAccountId,
+        long targetAccountId,
         MailAliasMode mode,
         string actor,
         CancellationToken cancellationToken)
@@ -2781,7 +2778,7 @@ public sealed class AdminApplicationService(
             canSend);
     }
 
-    internal static IQueryable<string> GetDomainAuditResources(MailDbContext db, Guid domainId)
+    internal static IQueryable<string> GetDomainAuditResources(MailDbContext db, long domainId)
     {
         var domainResources = db.Domains.AsNoTracking()
             .Where(x => x.Id == domainId)
@@ -2919,9 +2916,9 @@ public sealed class AdminApplicationService(
         return false;
     }
 
-    private static Guid[] NormalizeDomainIds(IReadOnlyCollection<Guid> domainIds)
+    private static long[] NormalizeDomainIds(IReadOnlyCollection<long> domainIds)
     {
-        var ids = domainIds.Where(x => x != Guid.Empty).Distinct().ToArray();
+        var ids = domainIds.Where(x => x != 0).Distinct().ToArray();
         if (ids.Length is < 1 or > 100) throw new InvalidOperationException("Select between 1 and 100 domains.");
         return ids;
     }

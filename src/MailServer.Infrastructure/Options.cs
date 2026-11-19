@@ -6,10 +6,31 @@ namespace MailServer.Infrastructure;
 public sealed class StorageOptions
 {
     public const string SectionName = "Storage";
+    public string Provider { get; set; } = "File";
+    public bool RequireExistingRoot { get; set; }
+    public string? RequiredMarkerFile { get; set; }
+    public S3StorageOptions S3 { get; set; } = new();
     public string RootPath { get; set; } = "data/messages";
     public bool PreparedInboundEnabled { get; set; }
     public string? InboundTemporaryPath { get; set; }
     public long MaximumMessageBytes { get; set; } = 52_428_800;
+}
+
+public sealed class S3StorageOptions
+{
+    public string? ServiceUrl { get; set; }
+    public string Region { get; set; } = "us-east-1";
+    public string Bucket { get; set; } = "";
+    public string Prefix { get; set; } = "mailserver/";
+    public bool ForcePathStyle { get; set; } = true;
+    public string? AccessKey { get; set; }
+    public string? SecretKey { get; set; }
+    public string? SessionToken { get; set; }
+    public string CachePath { get; set; } = "data/object-cache";
+    public long CacheBytes { get; set; } = 256L * 1024 * 1024;
+    public int MaximumConcurrentTransfers { get; set; } = 2;
+    public int MaximumOpenReaders { get; set; } = 16;
+    public int RequestTimeoutSeconds { get; set; } = 120;
 }
 
 /// <summary>
@@ -40,7 +61,8 @@ public sealed class SmtpConnectionReuseOptions
 {
     public const string SectionName = "SmtpConnectionReuse";
     public bool Enabled { get; set; }
-    public int MaximumIdleConnections { get; set; } = 4;
+    public int MaximumIdleConnections { get; set; } = 64;
+    public int MaximumIdleConnectionsPerKey { get; set; } = 8;
     public int IdleSeconds { get; set; } = 30;
     public int MaximumLifetimeSeconds { get; set; } = 300;
     public int MaximumMessages { get; set; } = 50;

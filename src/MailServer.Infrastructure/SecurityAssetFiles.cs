@@ -5,10 +5,10 @@ namespace MailServer.Infrastructure;
 
 internal static class SecurityAssetFiles
 {
-    public static string GetDomainDirectory(string securityRoot, Guid domainId)
+    public static string GetDomainDirectory(string securityRoot, long domainId)
     {
         var root = Path.GetFullPath(securityRoot);
-        var directory = Path.GetFullPath(Path.Combine(root, "domains", domainId.ToString("N")));
+        var directory = Path.GetFullPath(Path.Combine(root, "domains", domainId.ToString()));
         if (!directory.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("Security asset path escaped its configured root.");
         return directory;

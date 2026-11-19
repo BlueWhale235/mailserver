@@ -87,11 +87,11 @@ public sealed class SmtpAdmissionAndUidTests
             SQLitePCL.raw.SetProvider(new SQLitePCL.SQLite3Provider_e_sqlite3());
             options.UseSqlite("Data Source=:memory:");
         }
-        await using var db = new MailDbContext(options.Options);
+        await using var db = new MailDbContext(options.Options, TestLocalLogs.Create());
         await db.Database.OpenConnectionAsync();
         if (provider == "MySql") await db.Database.MigrateAsync();
         else await db.Database.EnsureCreatedAsync();
-        var domain = new MailDomain { Name = Guid.NewGuid().ToString("N") + ".uid.test" };
+        var domain = new MailDomain { Name = MailServer.Domain.SnowflakeIds.NewId().ToString() + ".uid.test" };
         var account = new MailAccount { Domain = domain, LocalPart = "inbox", PasswordHash = "unused" };
         var mailbox = new Mailbox { Account = account, Name = "INBOX", UidNext = 1 };
         var message = new StoredMessage { ContentKey = "shared", Size = 1, EnvelopeFrom = "sender@test.invalid" };
@@ -150,7 +150,7 @@ public sealed class SmtpAdmissionAndUidTests
         internal int Accepted;
         public Task<bool> IsLocalRecipientAsync(string address,CancellationToken token)=>Task.FromResult(true);
         public async Task<InboundAcceptance> AcceptAsync(InboundEnvelope envelope,Stream content,CancellationToken token)
-        { using var buffer=new MemoryStream();await content.CopyToAsync(buffer,token);Interlocked.Increment(ref Accepted);return new(Guid.NewGuid(),"test",1,0); }
+        { using var buffer=new MemoryStream();await content.CopyToAsync(buffer,token);Interlocked.Increment(ref Accepted);return new(MailServer.Domain.SnowflakeIds.NewId(),"test",1,0); }
     }
     private sealed class Session(TcpClient client,StreamReader reader,StreamWriter writer):IAsyncDisposable
     {

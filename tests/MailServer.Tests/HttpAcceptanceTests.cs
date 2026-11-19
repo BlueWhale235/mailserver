@@ -20,6 +20,26 @@ namespace MailServer.Tests;
 public sealed class HttpAcceptanceTests
 {
     [Fact]
+    public async Task LocalLogRetentionIsEditableAndRequiresSettingsManagePermission()
+    {
+        await using var host = await AcceptanceHost.StartAsync();
+        var settings = await host.JsonAsync(HttpMethod.Get, "/api/v1/settings/local-logs");
+        Assert.Equal(30, settings.GetProperty("retentionDays").GetInt32());
+        Assert.False(string.IsNullOrWhiteSpace(settings.GetProperty("machine").GetString()));
+        var saved = await host.JsonAsync(HttpMethod.Put, "/api/v1/settings/local-logs", new { retentionDays = 7 });
+        Assert.Equal(7, saved.GetProperty("retentionDays").GetInt32());
+        Assert.Equal(7, (await host.JsonAsync(HttpMethod.Get, "/api/v1/settings/local-logs")).GetProperty("retentionDays").GetInt32());
+        await host.JsonAsync(HttpMethod.Put, "/api/v1/settings/local-logs", new { retentionDays = 0 }, 400);
+        await host.JsonAsync(HttpMethod.Post, "/api/v1/admins", new { userName = "log-reader", password = AcceptanceHost.Password,
+            isEnabled = true, grants = new[] { new { permissionCode = "settings.read", resourceType = "", resourceKey = "" } } }, 201);
+        using var reader = await host.LoginAsync("log-reader");
+        using var read = await reader.GetAsync("/api/v1/settings/local-logs");
+        Assert.Equal(HttpStatusCode.OK, read.StatusCode);
+        using var denied = await reader.PutAsJsonAsync("/api/v1/settings/local-logs", new { retentionDays = 90 });
+        Assert.Equal(HttpStatusCode.Forbidden, denied.StatusCode);
+    }
+
+    [Fact]
     public async Task PerformanceRoutesEnforcePermissionsPaginateAndAuditConfiguration()
     {
         await using var host = await AcceptanceHost.StartAsync();
@@ -58,7 +78,7 @@ public sealed class HttpAcceptanceTests
         var cursor = first.GetProperty("nextCursor").GetString()!;
         var second = await host.JsonAsync(HttpMethod.Get, path + "/operations?module=test&cursor=" + Uri.EscapeDataString(cursor));
         Assert.Equal(5, second.GetProperty("items").GetArrayLength());
-        var ids = first.GetProperty("items").EnumerateArray().Concat(second.GetProperty("items").EnumerateArray()).Select(x => x.GetProperty("id").GetGuid()).ToArray();
+        var ids = first.GetProperty("items").EnumerateArray().Concat(second.GetProperty("items").EnumerateArray()).Select(x => x.GetProperty("id").GetSnowflakeId()).ToArray();
         Assert.Equal(55, ids.Distinct().Count());
         var detail = await host.JsonAsync(HttpMethod.Get, path + "/operations/" + ids[0]);
         Assert.Empty(detail.GetProperty("stages").EnumerateArray());
@@ -77,7 +97,7 @@ public sealed class HttpAcceptanceTests
         await using var host = await AcceptanceHost.StartAsync();
         var descriptor = await host.ContentStore.SaveAsync(new MemoryStream(System.Text.Encoding.UTF8.GetBytes(
             "Message-ID: <case@example.test>\r\nFrom: Claim <claim@example.test>\r\nSubject: Case\r\n\r\nbody")), CancellationToken.None);
-        var id = Guid.NewGuid();
+        var id = MailServer.Domain.SnowflakeIds.NewId();
         await using (var db = await host.Factory.CreateDbContextAsync())
         {
             db.Messages.Add(new StoredMessage { Id = id, ContentKey = descriptor.Key, Size = descriptor.Size,
@@ -264,7 +284,7 @@ public sealed class HttpAcceptanceTests
     {
         await using var host = await AcceptanceHost.StartAsync();
         var domain = await host.JsonAsync(HttpMethod.Post, "/api/v1/domains", new { name = "dns-save.invalid" }, 201);
-        var domainId = domain.GetProperty("id").GetGuid();
+        var domainId = domain.GetProperty("id").GetSnowflakeId();
         var path = $"/api/v1/domains/{domainId}/dns";
         var configuration = await host.JsonAsync(HttpMethod.Get, path);
         var settings = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(
@@ -291,7 +311,7 @@ public sealed class HttpAcceptanceTests
     {
         await using var host = await AcceptanceHost.StartAsync();
         var domain = await host.JsonAsync(HttpMethod.Post, "/api/v1/domains", new { name = "dns-optional.invalid" }, 201);
-        var domainId = domain.GetProperty("id").GetGuid();
+        var domainId = domain.GetProperty("id").GetSnowflakeId();
         var path = $"/api/v1/domains/{domainId}/dns";
         var configuration = await host.JsonAsync(HttpMethod.Get, path);
         var settings = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(
@@ -349,7 +369,7 @@ public sealed class HttpAcceptanceTests
             foreach (var operation in path.Value.EnumerateObject())
             {
                 if (operation.Name is not ("get" or "post" or "put" or "patch" or "delete")) continue;
-                var url = Regex.Replace(path.Name, "\\{[^}]+\\}", _ => Guid.NewGuid().ToString());
+                var url = Regex.Replace(path.Name, "\\{[^}]+\\}", _ => MailServer.Domain.SnowflakeIds.NewId().ToString());
                 using var request = new HttpRequestMessage(new HttpMethod(operation.Name), url);
                 if (operation.Name is "post" or "put" or "patch") request.Content = JsonContent.Create(new { });
                 using var response = await host.Anonymous.SendAsync(request);
@@ -373,7 +393,7 @@ public sealed class HttpAcceptanceTests
         {
             if (!path.Value.TryGetProperty("get", out _) || path.Name.StartsWith("/api/v1/session", StringComparison.Ordinal))
                 continue;
-            var url = Regex.Replace(path.Name, "\\{[^}]+\\}", _ => Guid.NewGuid().ToString());
+            var url = Regex.Replace(path.Name, "\\{[^}]+\\}", _ => MailServer.Domain.SnowflakeIds.NewId().ToString());
             using var response = await host.Admin.GetAsync(url);
             if ((int)response.StatusCode >= 500)
                 failures.Add($"GET {path.Name}: {(int)response.StatusCode}");
@@ -408,7 +428,7 @@ public sealed class HttpAcceptanceTests
                 if (operation.Name is not ("post" or "put" or "patch")
                     || !operation.Value.TryGetProperty("requestBody", out var body)
                     || !body.GetProperty("content").TryGetProperty("application/json", out _)) continue;
-                var url = Regex.Replace(path.Name, "\\{[^}]+\\}", _ => Guid.NewGuid().ToString());
+                var url = Regex.Replace(path.Name, "\\{[^}]+\\}", _ => MailServer.Domain.SnowflakeIds.NewId().ToString());
                 using var request = new HttpRequestMessage(new HttpMethod(operation.Name), url) { Content = JsonContent.Create(new { }) };
                 using var response = await host.Admin.SendAsync(request);
                 if ((int)response.StatusCode >= 500) failures.Add($"{operation.Name} {path.Name}: {(int)response.StatusCode}");
@@ -452,7 +472,7 @@ public sealed class HttpAcceptanceTests
     {
         await using var host = await AcceptanceHost.StartAsync();
         var domain = await host.JsonAsync(HttpMethod.Post, "/api/v1/domains", new { name = "acceptance.invalid" }, 201);
-        var domainId = domain.GetProperty("id").GetGuid();
+        var domainId = domain.GetProperty("id").GetSnowflakeId();
         var path = $"/api/v1/domains/{domainId}";
         await host.JsonAsync(HttpMethod.Put, path + "/details", new
         {
@@ -462,13 +482,13 @@ public sealed class HttpAcceptanceTests
         await host.JsonAsync(HttpMethod.Put, path + "/quota", new { quotaBytes = 2_000_000_000L });
         var account = await host.JsonAsync(HttpMethod.Post, path + "/accounts", new
         { localPart = "receiver", password = AcceptanceHost.Password, quotaBytes = 100_000_000L }, 201);
-        var accountId = account.GetProperty("id").GetGuid();
+        var accountId = account.GetProperty("id").GetSnowflakeId();
         await host.JsonAsync(HttpMethod.Patch, $"/api/v1/accounts/{accountId}", new { isEnabled = false, quotaBytes = 110_000_000L }, 204);
         await host.JsonAsync(HttpMethod.Post, path + "/accounts/batch-enable", new { ids = new[] { accountId } }, 204);
         await host.JsonAsync(HttpMethod.Post, $"/api/v1/accounts/{accountId}/password", new { password = "ChangedAcceptance_2026" }, 204);
         var alias = await host.JsonAsync(HttpMethod.Post, path + "/aliases", new
         { sourceLocalPart = "support", targetAccountId = accountId, mode = "SendReceive" }, 201);
-        var aliasId = alias.GetProperty("id").GetGuid();
+        var aliasId = alias.GetProperty("id").GetSnowflakeId();
         await host.JsonAsync(HttpMethod.Put, path + $"/aliases/{aliasId}", new
         { sourceLocalPart = "help", targetAccountId = accountId, mode = "ReceiveOnly" });
         var found = await host.JsonAsync(HttpMethod.Get, path + "/accounts/search?search=receiver&page=1&pageSize=20");
@@ -496,7 +516,7 @@ public sealed class HttpAcceptanceTests
         var grants = new[] { new { permissionCode = "dashboard.read" } };
         var reader = await host.JsonAsync(HttpMethod.Post, "/api/v1/admins", new
         { userName = "reader", password = AcceptanceHost.Password, isEnabled = true, grants }, 201);
-        var readerId = reader.GetProperty("id").GetGuid();
+        var readerId = reader.GetProperty("id").GetSnowflakeId();
         await host.JsonAsync(HttpMethod.Get, $"/api/v1/admins/{readerId}/grants");
         await host.JsonAsync(HttpMethod.Put, $"/api/v1/admins/{readerId}/grants", new { grants });
         using var cookieClient = new HttpClient(new HttpClientHandler { CookieContainer = new CookieContainer() })
@@ -516,7 +536,7 @@ public sealed class HttpAcceptanceTests
         { userName = "escalated", password = AcceptanceHost.Password, isEnabled = true, grants = new[] { new { permissionCode = "*" } } });
         Assert.Equal(HttpStatusCode.Forbidden, escalation.StatusCode);
         var key = await host.JsonAsync(HttpMethod.Post, "/api/v1/api-keys", new { name = "reader-key", grants });
-        var keyId = key.GetProperty("id").GetGuid();
+        var keyId = key.GetProperty("id").GetSnowflakeId();
         using var keyClient = new HttpClient { BaseAddress = host.Anonymous.BaseAddress };
         keyClient.DefaultRequestHeaders.Add("X-Api-Key", key.GetProperty("apiKey").GetString());
         using var keyAllowed = await keyClient.GetAsync("/api/v1/overview");
@@ -592,7 +612,7 @@ public sealed class HttpAcceptanceTests
         using (var invalid = await host.Admin.PostAsJsonAsync("/api/v1/recycle-bin/batch/purge", new { ids = new[] { pending.Id, pending.Id } }))
             await AcceptanceHost.AssertProblemAsync(invalid, 400);
         var result = await host.JsonAsync(HttpMethod.Post, "/api/v1/recycle-bin/batch/purge",
-            new { ids = new[] { pending.Id, processing.Id, Guid.NewGuid() } });
+            new { ids = new[] { pending.Id, processing.Id, MailServer.Domain.SnowflakeIds.NewId() } });
         Assert.Equal("deleted", result.GetProperty("results")[0].GetProperty("status").GetString());
         Assert.Equal("conflict", result.GetProperty("results")[1].GetProperty("status").GetString());
         Assert.Equal("notFound", result.GetProperty("results")[2].GetProperty("status").GetString());
@@ -647,13 +667,13 @@ public sealed class HttpAcceptanceTests
         {
             foreach (var response in simultaneous) response.Dispose();
         }
-        var version = new Dictionary<Guid, int> { [failed.Id] = 2, [leased.Id] = 1 };
+        var version = new Dictionary<long, int> { [failed.Id] = 2, [leased.Id] = 1 };
         var retry = await host.JsonAsync(HttpMethod.Post, "/api/v1/queues/batch/retry",
             new { ids = new[] { failed.Id, leased.Id }, expectedAttempts = version });
         Assert.Equal(1, retry.GetProperty("succeeded").GetInt32());
         Assert.Equal("Conflict", retry.GetProperty("items")[1].GetProperty("status").GetString());
         var repeated = await host.JsonAsync(HttpMethod.Post, "/api/v1/queues/batch/retry",
-            new { ids = new[] { failed.Id }, expectedAttempts = new Dictionary<Guid, int> { [failed.Id] = 2 } });
+            new { ids = new[] { failed.Id }, expectedAttempts = new Dictionary<long, int> { [failed.Id] = 2 } });
         Assert.Equal("Conflict", repeated.GetProperty("items")[0].GetProperty("status").GetString());
         var deletion = await host.JsonAsync(HttpMethod.Post, "/api/v1/queues/batch/delete",
             new { ids = new[] { failed.Id, leased.Id } });
@@ -684,14 +704,14 @@ public sealed class HttpAcceptanceTests
         var saved = await host.JsonAsync(HttpMethod.Get, "/api/v1/settings/smtp");
         Assert.Equal(222, saved.GetProperty("commandTimeoutSeconds").GetInt32());
         var firewall = await host.JsonAsync(HttpMethod.Post, "/api/v1/firewall/rules", new { cidr = "192.0.2.19/32", note = "acceptance" }, 201);
-        var firewallId = firewall.GetProperty("id").GetGuid();
+        var firewallId = firewall.GetProperty("id").GetSnowflakeId();
         await host.JsonAsync(HttpMethod.Post, "/api/v1/firewall/rules", new { cidr = "192.0.2.19/32", note = "duplicate" }, 409);
         await host.JsonAsync(HttpMethod.Put, $"/api/v1/firewall/rules/{firewallId}", new { isEnabled = false, note = "updated" });
         await host.JsonAsync(HttpMethod.Get, "/api/v1/firewall/rules/search?search=updated&page=1&pageSize=20");
         await host.JsonAsync(HttpMethod.Delete, $"/api/v1/firewall/rules/{firewallId}", expected: 204);
         var audit = await host.JsonAsync(HttpMethod.Get, "/api/v1/audit?page=1&pageSize=100");
         Assert.True(audit.GetProperty("totalCount").GetInt32() >= 5);
-        var auditId = audit.GetProperty("items")[0].GetProperty("id").GetGuid();
+        var auditId = audit.GetProperty("items")[0].GetProperty("id").GetSnowflakeId();
         await host.JsonAsync(HttpMethod.Get, $"/api/v1/audit/{auditId}");
         using var export = await host.Admin.PostAsJsonAsync("/api/v1/audit/export", new { ids = new[] { auditId } });
         Assert.Equal(HttpStatusCode.OK, export.StatusCode);
@@ -704,11 +724,11 @@ public sealed class HttpAcceptanceTests
     {
         await using var host = await AcceptanceHost.StartAsync();
         var domain = await host.JsonAsync(HttpMethod.Post, "/api/v1/domains", new { name = "directory.invalid" }, 201);
-        var id = domain.GetProperty("id").GetGuid();
+        var id = domain.GetProperty("id").GetSnowflakeId();
         var root = $"/api/v1/domains/{id}";
         var account = await host.JsonAsync(HttpMethod.Post, root + "/accounts", new { localPart = "owner", password = AcceptanceHost.Password, quotaBytes = 1073741824L }, 201);
-        var accountId = account.GetProperty("id").GetGuid();
-        Guid secondId;
+        var accountId = account.GetProperty("id").GetSnowflakeId();
+        long secondId;
         await using (var db = await host.Factory.CreateDbContextAsync())
         {
             var second = new MailAccount { DomainId = id, LocalPart = "second", PasswordHash = "unused" };
@@ -723,7 +743,7 @@ public sealed class HttpAcceptanceTests
         var result = await host.JsonAsync(HttpMethod.Get, root + "/account-directory/search?query=sales&page=1&pageSize=5");
         Assert.Equal(1, result.GetProperty("totalCount").GetInt32());
         Assert.Equal(2, result.GetProperty("items")[0].GetProperty("matchedAliasCount").GetInt32());
-        Assert.Equal(accountId, result.GetProperty("items")[0].GetProperty("id").GetGuid());
+        Assert.Equal(accountId, result.GetProperty("items")[0].GetProperty("id").GetSnowflakeId());
         var next = await host.JsonAsync(HttpMethod.Get, root + "/account-directory/search?page=2&pageSize=20");
         Assert.Equal(26, next.GetProperty("totalCount").GetInt32());
         Assert.Equal(6, next.GetProperty("items").GetArrayLength());
@@ -731,16 +751,16 @@ public sealed class HttpAcceptanceTests
         Assert.Equal(1, late.GetProperty("totalCount").GetInt32());
         var pending = await host.JsonAsync(HttpMethod.Get, root + "/account-directory/aliases?pending=true");
         Assert.Equal(1, pending.GetProperty("totalCount").GetInt32());
-        var orphanId = pending.GetProperty("items")[0].GetProperty("id").GetGuid();
+        var orphanId = pending.GetProperty("items")[0].GetProperty("id").GetSnowflakeId();
         await host.JsonAsync(HttpMethod.Put, root + $"/aliases/{orphanId}", new { targetAccountId = secondId, mode = "ReceiveOnly" });
         pending = await host.JsonAsync(HttpMethod.Get, root + "/account-directory/aliases?pending=true");
         Assert.Equal(0, pending.GetProperty("totalCount").GetInt32());
-        await host.JsonAsync(HttpMethod.Put, root + $"/aliases/{first.GetProperty("id").GetGuid()}", new { targetAccountId = secondId });
+        await host.JsonAsync(HttpMethod.Put, root + $"/aliases/{first.GetProperty("id").GetSnowflakeId()}", new { targetAccountId = secondId });
         var related = await host.JsonAsync(HttpMethod.Get, root + $"/account-directory/aliases?accountId={accountId}");
         Assert.Equal(1, related.GetProperty("totalCount").GetInt32());
-        await host.JsonAsync(HttpMethod.Get, root + $"/account-directory/accounts/{Guid.NewGuid()}", expected: 404);
+        await host.JsonAsync(HttpMethod.Get, root + $"/account-directory/accounts/{MailServer.Domain.SnowflakeIds.NewId()}", expected: 404);
         var other = await host.JsonAsync(HttpMethod.Post, "/api/v1/domains", new { name = "boundary.invalid" }, 201);
-        var otherId = other.GetProperty("id").GetGuid();
+        var otherId = other.GetProperty("id").GetSnowflakeId();
         await host.JsonAsync(HttpMethod.Get, $"/api/v1/domains/{otherId}/account-directory/accounts/{accountId}", expected: 404);
         await host.JsonAsync(HttpMethod.Post, $"/api/v1/domains/{otherId}/aliases", new { sourceLocalPart = "cross", targetAccountId = accountId, mode = "SendReceive" }, 409);
         foreach (var kind in new[] { "account", "alias" })
@@ -750,7 +770,7 @@ public sealed class HttpAcceptanceTests
             using var reader = await host.LoginAsync(kind + "-reader");
             var visibleDomains = await reader.GetFromJsonAsync<JsonElement>("/api/v1/account-directories");
             Assert.Equal(1, visibleDomains.GetProperty("totalCount").GetInt32());
-            Assert.Equal(id, visibleDomains.GetProperty("items")[0].GetProperty("id").GetGuid());
+            Assert.Equal(id, visibleDomains.GetProperty("items")[0].GetProperty("id").GetSnowflakeId());
             var search = await reader.GetFromJsonAsync<JsonElement>(root + "/account-directory/search?query=sales");
             Assert.Equal(kind == "account" ? 0 : 2, search.GetProperty("totalCount").GetInt32());
             var detail = await reader.GetFromJsonAsync<JsonElement>(root + $"/account-directory/accounts/{accountId}");
@@ -798,7 +818,7 @@ public sealed class HttpAcceptanceTests
 
         public static async Task<AcceptanceHost> StartAsync(bool runAll = false)
         {
-            var root = Path.Combine(Path.GetTempPath(), "mailserver-http-acceptance-" + Guid.NewGuid().ToString("N"));
+            var root = Path.Combine(Path.GetTempPath(), "mailserver-http-acceptance-" + MailServer.Domain.SnowflakeIds.NewId().ToString());
             Directory.CreateDirectory(root);
             using var listener = new TcpListener(IPAddress.Loopback, 0);
             listener.Start();
@@ -812,7 +832,7 @@ public sealed class HttpAcceptanceTests
                 ["SecurityAssets:RootPath"] = Path.Combine(root, "security"),
                 ["AdminServer:BindAddress"] = "127.0.0.1", ["AdminServer:Http:Enabled"] = "true",
                 ["AdminServer:Http:Port"] = port.ToString(), ["AdminServer:Https:Enabled"] = "false",
-                ["Jwt:SigningKey"] = "acceptance-only-signing-key-" + Guid.NewGuid().ToString("N"),
+                ["Jwt:SigningKey"] = "acceptance-only-signing-key-" + MailServer.Domain.SnowflakeIds.NewId().ToString(),
                 ["RunAll:Enabled"] = runAll.ToString(), ["MailServerLogging:File:Enabled"] = "false",
                 ["Smtp:Endpoints:0:Address"] = "127.0.0.1", ["Smtp:Endpoints:0:Port"] = "0",
                 ["Smtp:Endpoints:0:Security"] = "Plain",

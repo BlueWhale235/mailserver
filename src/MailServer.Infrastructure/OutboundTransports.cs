@@ -28,7 +28,8 @@ public sealed class DirectMxTransport(
     RelaySettingsService? relaySettings = null,
     RelayRootService? relay = null,
     SmtpConnectionPool? connectionPool = null,
-    ResourceRuntime? resources = null) : IOutboundTransport
+    ResourceRuntime? resources = null,
+    ConfigurationSnapshotCache? configurationCache = null) : IBatchOutboundTransport
 {
     internal static string? ExtractEnhancedStatusCode(string response)
     {
@@ -45,10 +46,25 @@ public sealed class DirectMxTransport(
     internal const int DeliveryPort = 25;
     internal const SecureSocketOptions DeliverySecurity = SecureSocketOptions.StartTlsWhenAvailable;
 
-    public async Task<DeliveryResult> DeliverAsync(
-        DeliveryJob job,
-        Stream content,
-        CancellationToken cancellationToken)
+    public Task<DeliveryResult> DeliverAsync(DeliveryJob job, Stream content, CancellationToken cancellationToken) =>
+        DeliverCoreAsync(job, content, [job.Recipient], null, cancellationToken);
+
+    public async Task<IReadOnlyDictionary<long, DeliveryResult>> DeliverBatchAsync(
+        IReadOnlyList<DeliveryJob> jobs, Stream content, CancellationToken cancellationToken)
+    {
+        if (jobs.Count == 0) return new Dictionary<long, DeliveryResult>();
+        var first = jobs[0];
+        static string Domain(DeliveryJob value) => AddressParser.TrySplit(value.Recipient, out _, out var domain) ? domain : string.Empty;
+        if (jobs.Any(x => x.MessageId != first.MessageId || x.Sender != first.Sender || x.RouteDomainId != first.RouteDomainId
+            || x.OriginRuleId != first.OriginRuleId || x.ForwardDepth != first.ForwardDepth || Domain(x) != Domain(first)))
+            throw new ArgumentException("Batch jobs must share content, sender, recipient domain, route and forwarding trace.", nameof(jobs));
+        var rejected = new Dictionary<string, DeliveryResult>(StringComparer.OrdinalIgnoreCase);
+        var result = await DeliverCoreAsync(first, content, jobs.Select(x => x.Recipient).Distinct(StringComparer.OrdinalIgnoreCase).ToArray(), rejected, cancellationToken);
+        return jobs.ToDictionary(x => x.Id, x => rejected.GetValueOrDefault(x.Recipient) ?? result);
+    }
+
+    private async Task<DeliveryResult> DeliverCoreAsync(DeliveryJob job, Stream content,
+        IReadOnlyList<string> recipients, Dictionary<string, DeliveryResult>? rejected, CancellationToken cancellationToken)
     {
         var stopwatch = Stopwatch.StartNew();
         if (!AddressParser.TrySplit(job.Recipient, out _, out var domain))
@@ -102,7 +118,7 @@ public sealed class DirectMxTransport(
         // The content store supplies a seekable file. Spool other streams to disk so a
         // large message never needs a second complete managed-memory copy.
         await using var spool = content.CanSeek ? null : new FileStream(
-            Path.Combine(Path.GetTempPath(), $"mailserver-outbound-{Guid.NewGuid():N}.tmp"),
+            Path.Combine(Path.GetTempPath(), $"mailserver-outbound-{System.Guid.NewGuid()}.tmp"),
             FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None, 64 * 1024,
             FileOptions.Asynchronous | FileOptions.SequentialScan | FileOptions.DeleteOnClose);
         if (spool is not null)
@@ -134,7 +150,7 @@ public sealed class DirectMxTransport(
                 ? Task.CompletedTask
                 : transportSecurity.RecordEventAsync(
                     domain, mxHost, policyType, policyString, resultType, failureReason, cancellationToken);
-        var profile = await OutboundDeliveryProfile.ResolveAsync(dbFactory, job, cancellationToken);
+        var profile = await OutboundDeliveryProfile.ResolveAsync(dbFactory, job, cancellationToken, configurationCache);
         var useRelay = relaySettings is not null && (await relaySettings.ReadAsync(cancellationToken)).SendEnabled;
         var stsPolicy = await transportSecurity.ResolveMtaStsAsync(domain, cancellationToken);
         using var heavyLease = resources?.AdaptiveOptions.Enabled == true
@@ -185,8 +201,15 @@ public sealed class DirectMxTransport(
                 });
                 using var lease = connectionPool?.Rent(poolKey, allowConnectionReuse)
                     ?? new SmtpConnectionPool.Lease(null,
-                        new SmtpConnectionPool.Entry(poolKey, new SmtpClient(), DateTimeOffset.UtcNow), false);
+                        new SmtpConnectionPool.Entry(poolKey, new RecipientSmtpClient(), DateTimeOffset.UtcNow), false);
                 var client = lease.Client;
+                var recipientClient = client as RecipientSmtpClient;
+                if (recipientClient is not null)
+                {
+                    recipientClient.CollectRecipientFailures = rejected is not null;
+                    recipientClient.Rejected.Clear();
+                }
+                rejected?.Clear();
                 client.Timeout = 60_000;
                 client.LocalDomain = profile.HeloName;
                 SslPolicyErrors? testingPolicyErrors = null;
@@ -235,11 +258,26 @@ public sealed class DirectMxTransport(
                         profile.SourceAddresses, cancellationToken, remoteAddresses)).ToString();
                 }
                 }
-                var response = await PerformanceTelemetry.MeasureAsync("smtp.send-and-peer-response", () => client.SendAsync(
-                    message,
-                    ParseEnvelopeSender(job.Sender),
-                    [MailboxAddress.Parse(job.Recipient)],
-                    cancellationToken));
+                string response;
+                try
+                {
+                    response = await PerformanceTelemetry.MeasureAsync("smtp.send-and-peer-response", () => client.SendAsync(
+                        message, ParseEnvelopeSender(job.Sender), recipients.Select(MailboxAddress.Parse).ToArray(), cancellationToken));
+                }
+                finally
+                {
+                    if (rejected is not null && recipientClient is not null)
+                        foreach (var failure in recipientClient.Rejected)
+                        {
+                            var diagnostic = new DeliveryDiagnostic("SMTP", RemoteAddress: remoteAddress,
+                                SmtpStatusCode: ((int)failure.Value.StatusCode).ToString(),
+                                EnhancedStatusCode: ExtractEnhancedStatusCode(failure.Value.Response),
+                                FailureCategory: "recipient-rejected", SessionSummary: failure.Value.Response);
+                            rejected[failure.Key] = (int)failure.Value.StatusCode >= 500
+                                ? DeliveryResult.Permanent(failure.Value.Response, host, diagnostic)
+                                : DeliveryResult.Temporary(failure.Value.Response, host, diagnostic);
+                        }
+                }
                 var tlsProtocol = client.IsSecure ? client.SslProtocol.ToString() : null;
                 var tlsCipherSuite = client.IsSecure ? client.SslCipherSuite.ToString() : null;
                 if (!allowConnectionReuse || connectionPool?.Enabled != true)
@@ -331,8 +369,12 @@ internal sealed record OutboundDeliveryProfile(
     public static async Task<OutboundDeliveryProfile> ResolveAsync(
         IDbContextFactory<MailDbContext> dbFactory,
         DeliveryJob job,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        ConfigurationSnapshotCache? cache = null)
     {
+        if (cache is not null)
+            return await cache.GetAsync($"outbound-profile:{job.RouteDomainId}:{job.Sender}", ConfigurationScopes.Routing,
+                async token => (await ResolveAsync(dbFactory, job, token), 1024L), cancellationToken);
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         var query = db.Domains.AsNoTracking();
         MailDomain? domain = job.RouteDomainId is { } routeDomainId
@@ -396,6 +438,29 @@ internal sealed record OutboundDeliveryProfile(
 
 internal static class OutboundMessage
 {
+    private sealed record SignerEntry(DkimSigner Signer);
+    private static readonly Microsoft.Extensions.Caching.Memory.MemoryCache Signers = new(
+        new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions { SizeLimit = 256 });
+    private static readonly object SignerGate = new();
+    private static SignerEntry GetSigner(MailDomain domain)
+    {
+        var file = new FileInfo(domain.DkimPrivateKeyPath!);
+        var key = (domain.Id, domain.Name, domain.DkimSelector, file.FullName, file.LastWriteTimeUtc, file.Length);
+        lock (SignerGate)
+        {
+            if (Signers.TryGetValue(key, out var value)) return (SignerEntry)value!;
+            var entry = new SignerEntry(new DkimSigner(file.FullName, domain.Name, domain.DkimSelector!)
+            {
+                SignatureAlgorithm = DkimSignatureAlgorithm.RsaSha256,
+                AgentOrUserIdentifier = $"@{domain.Name}"
+            });
+            using var cached = Signers.CreateEntry(key);
+            cached.Value = entry;
+            cached.Size = 1;
+            cached.AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(10);
+            return entry;
+        }
+    }
     public static Task<MimeMessage> LoadAndSignAsync(
         Stream content,
         string sender,
@@ -450,15 +515,11 @@ internal static class OutboundMessage
             return message;
         }
 
-        var signer = new DkimSigner(domain.DkimPrivateKeyPath, domain.Name, domain.DkimSelector)
-        {
-            SignatureAlgorithm = DkimSignatureAlgorithm.RsaSha256,
-            AgentOrUserIdentifier = $"@{domain.Name}"
-        };
+        var signer = GetSigner(domain);
         // Prepare once for the least-capable MX before signing. A fallback server
         // without 8BITMIME must not force a body re-encoding after DKIM signing.
         message.Prepare(EncodingConstraint.SevenBit);
-        signer.Sign(
+        lock (signer) signer.Signer.Sign(
             message,
             [
                 HeaderId.From,

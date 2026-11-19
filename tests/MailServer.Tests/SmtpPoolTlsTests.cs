@@ -14,6 +14,49 @@ namespace MailServer.Tests;
 
 public sealed class SmtpPoolTlsTests
 {
+    [Fact]
+    public async Task SameDestinationRetainsMultipleClientsAndEnforcesPerKeyLimit()
+    {
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        async Task ServeAsync()
+        {
+            using var peer = await listener.AcceptTcpClientAsync(deadline.Token);
+            using var reader = new StreamReader(peer.GetStream());
+            using var writer = new StreamWriter(peer.GetStream()) { AutoFlush = true, NewLine = "\r\n" };
+            await writer.WriteLineAsync("220 ready");
+            while (await reader.ReadLineAsync(deadline.Token) is not null)
+                await writer.WriteLineAsync("250 OK");
+        }
+        var servers = Enumerable.Range(0, 3).Select(_ => ServeAsync()).ToArray();
+        using var pool = new SmtpConnectionPool(Options.Create(new SmtpConnectionReuseOptions
+            { Enabled = true, MaximumIdleConnections = 8, MaximumIdleConnectionsPerKey = 2 }));
+        var leases = Enumerable.Range(0, 3).Select(_ => pool.Rent("same-mx", true)).ToArray();
+        try
+        {
+            foreach (var lease in leases)
+            {
+                await lease.Client.ConnectAsync("127.0.0.1", port, SecureSocketOptions.None, deadline.Token);
+                lease.MarkSuccessful("127.0.0.1");
+            }
+        }
+        finally { foreach (var lease in leases) lease.Dispose(); }
+        using (var first = pool.Rent("same-mx", true))
+        using (var second = pool.Rent("same-mx", true))
+        using (var third = pool.Rent("same-mx", true))
+        {
+            Assert.True(first.Reused);
+            Assert.True(second.Reused);
+            Assert.NotSame(first.Client, second.Client);
+            Assert.False(third.Reused);
+            await first.Client.NoOpAsync(deadline.Token);
+            await second.Client.NoOpAsync(deadline.Token);
+        }
+        await Task.WhenAll(servers).WaitAsync(deadline.Token);
+    }
+
     [Theory]
     [InlineData(421)]
     [InlineData(451)]
@@ -22,7 +65,10 @@ public sealed class SmtpPoolTlsTests
     {
         using var rsa = RSA.Create(2048);
         var request = new CertificateRequest("CN=localhost", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
-        using var certificate = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(1));
+        using var generated = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(1));
+        // Schannel needs an imported private-key handle for server authentication on Windows.
+        using var certificate = X509CertificateLoader.LoadPkcs12(generated.Export(X509ContentType.Pkcs12), null,
+            X509KeyStorageFlags.UserKeySet | X509KeyStorageFlags.Exportable);
         using var listener = new TcpListener(IPAddress.Loopback, 0);
         listener.Start();
         var port = ((IPEndPoint)listener.LocalEndpoint).Port;

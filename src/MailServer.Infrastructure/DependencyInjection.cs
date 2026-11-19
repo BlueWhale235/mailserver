@@ -1,11 +1,10 @@
-using DnsClient;
 using MailServer.Domain;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.AspNetCore.DataProtection;
-using MailServer.PluginSdk;
 
 namespace MailServer.Infrastructure;
 
@@ -19,7 +18,13 @@ public static class DependencyInjection
         IConfiguration configuration,
         string role = "api")
     {
+        services.TryAddSingleton(configuration);
         var database = configuration.GetSection(DatabaseOptions.SectionName).Get<DatabaseOptions>() ?? new DatabaseOptions();
+        if (database.Provider != DatabaseProvider.MySql && (configuration.GetValue("Node:Enabled", false)
+            || string.Equals(configuration["Storage:Provider"], "S3", StringComparison.OrdinalIgnoreCase)))
+            throw new InvalidOperationException("Node mode and S3 storage require a shared MySQL database.");
+        if (database.ContextPoolSize is < 1 or > 4096)
+            throw new ArgumentOutOfRangeException("Database:ContextPoolSize", "Context pool size must be between 1 and 4096.");
         var connectionString = configuration.GetConnectionString("MailDatabase")
             ?? (database.Provider == DatabaseProvider.Sqlite
                 ? "Data Source=data/mailserver.db"
@@ -34,9 +39,14 @@ public static class DependencyInjection
         services.Configure<ConfigurationCacheOptions>(configuration.GetSection(ConfigurationCacheOptions.SectionName));
         var runtime = new ResourceRuntime(configuration.GetValue("RunAll:Enabled", false) ? "all" : role, configuration);
         services.AddSingleton(runtime);
+        services.AddSingleton<NodeStatusService>();
         services.AddSingleton<AdaptiveDatabaseLatencyInterceptor>();
-        services.AddHostedService<AdaptiveResourceHostedService>();
         if (!runtime.UsesCache) services.PostConfigure<ConfigurationCacheOptions>(value => value.Enabled = false);
+        services.PostConfigure<ConfigurationCacheOptions>(value =>
+        {
+            value.SizeLimitBytes = runtime.CacheBudgets.Allocation.ConfigurationBytes;
+            value.MaximumEntryBytes = Math.Min(value.MaximumEntryBytes, value.SizeLimitBytes);
+        });
         services.AddSingleton<ResourceSettingsService>();
         services.AddSingleton<ConnectionProtectionSettingsService>();
         services.AddSingleton<ConnectionProtection>();
@@ -53,19 +63,16 @@ public static class DependencyInjection
         services.AddSingleton<SearchBackfillWakeSignal>();
         services.AddSingleton<MailboxChangeSignal>();
         services.AddSingleton<SmtpConnectionPool>();
-        if (role == "worker" || configuration.GetValue("RunAll:Enabled", false))
-            services.AddHostedService<MessageSearchBackfillService>();
+        services.AddSingleton(provider => new LocalLogDatabase(configuration, provider.GetService<Microsoft.Extensions.Logging.ILogger<LocalLogDatabase>>() ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<LocalLogDatabase>.Instance));
+        services.AddSingleton<LocalLogWriter>();
         services.AddSingleton<AuditStampInterceptor>();
         services.AddSingleton<PerformanceCollector>();
         services.AddSingleton<PerformanceSqlInterceptor>();
         services.AddSingleton<PerformanceConnectionInterceptor>();
         services.AddSingleton<PerformanceTransactionInterceptor>();
-        services.AddHostedService<PerformanceStorage>();
-        if (configuration.GetValue("EfficiencyDiagnostics:Enabled", false))
-            services.AddHostedService<EfficiencyRuntimeSampler>();
         services.AddPooledDbContextFactory<MailDbContext>((provider, options) =>
         {
-            options.AddInterceptors(provider.GetRequiredService<AuditStampInterceptor>());
+            options.AddInterceptors(LocalLogCommitInterceptor.Instance, provider.GetRequiredService<AuditStampInterceptor>());
             options.AddInterceptors(provider.GetRequiredService<AdaptiveDatabaseLatencyInterceptor>());
             options.AddInterceptors(provider.GetRequiredService<PerformanceSqlInterceptor>());
             options.AddInterceptors(provider.GetRequiredService<PerformanceConnectionInterceptor>(), provider.GetRequiredService<PerformanceTransactionInterceptor>());
@@ -91,7 +98,7 @@ public static class DependencyInjection
                 default:
                     throw new ArgumentOutOfRangeException(nameof(database.Provider), database.Provider, null);
             }
-        });
+        }, poolSize: database.ContextPoolSize);
         var securityRoot = Path.GetFullPath(
             configuration[$"{SecurityAssetsOptions.SectionName}:RootPath"] ?? "security-assets");
         var pluginKeyDirectory = new DirectoryInfo(securityRoot);
@@ -100,73 +107,11 @@ public static class DependencyInjection
         services.AddDataProtection()
             .SetApplicationName("MailServer")
             .PersistKeysToFileSystem(pluginKeyDirectory);
-        services.AddSingleton<IMessageContentStore, FileMessageContentStore>();
-        services.AddSingleton<IClock, SystemClock>();
-        services.AddSingleton<IMimeInspectionService, MimeInspectionService>();
-        services.AddSingleton<ICredentialService, CredentialService>();
-        services.AddSingleton<IAccountAuthenticator, AccountAuthenticator>();
-        services.AddSingleton<ISmtpSenderAuthorizer, SmtpSenderAuthorizer>();
-        services.AddSingleton<IInboundMessageService, InboundMessageService>();
-        services.AddSingleton<IDeliveryQueue, DeliveryQueue>();
-        services.AddSingleton<IMailboxService, MailboxService>();
-        services.AddSingleton(new LookupClient(new LookupClientOptions { Timeout = TimeSpan.FromSeconds(5), Retries = 2 }));
-        services.AddSingleton<DnsDiagnosticService>();
-        services.AddSingleton<SystemSettingsService>();
-        services.AddSingleton<RelayIdentity>();
-        services.AddSingleton<RelaySettingsService>();
-        if (role is "api" or "smtp" or "worker")
-        {
-            services.AddSingleton(provider => new RelayRootService(
-                provider.GetRequiredService<RelaySettingsService>(),
-                provider.GetRequiredService<RelayIdentity>(),
-                provider.GetRequiredService<Microsoft.Extensions.Logging.ILogger<RelayRootService>>(),
-                role == "api" && configuration.GetValue("RunAll:Enabled", false) ? "all" : role));
-            services.AddHostedService(provider => provider.GetRequiredService<RelayRootService>());
-        }
-        services.AddSingleton<MailboxFolderManagementService>();
-        services.AddSingleton<AuditLogService>();
-        services.AddSingleton<PermissionService>();
-        services.AddSingleton<DomainCertificateProvider>();
-        services.AddSingleton<DomainCertificateService>();
-        services.AddSingleton<DomainDnsService>();
-        services.AddSingleton<MailRuleService>();
-        services.AddSingleton<ConfigurationSnapshotCache>();
-        services.AddSingleton<ConfigurationVersionService>();
-        if (runtime.UsesCache) services.AddHostedService<ConfigurationCacheMonitor>();
-        services.AddSingleton<SrsService>();
-        services.AddSingleton<SentCopyService>();
-        services.AddSingleton<IpFirewallService>();
-        services.AddSingleton<TransportSecurityPolicyService>();
-        services.AddSingleton<IQuotaLedgerService, QuotaLedgerService>();
-        services.AddSingleton<IQuotaReconciliationService, QuotaReconciliationService>();
-        services.AddSingleton<CleanupQueueService>();
-        services.AddSingleton<ICleanupQueueService>(provider => provider.GetRequiredService<CleanupQueueService>());
-        services.AddSingleton<IRecycleBinService>(provider => provider.GetRequiredService<CleanupQueueService>());
-        services.AddSingleton<QuarantineService>();
-        services.AddSingleton<IQuarantineService>(provider => provider.GetRequiredService<QuarantineService>());
-        services.AddSingleton<IScheduledTaskHandler, CleanupTaskHandler>();
-        services.AddSingleton<IScheduledTaskHandler, QuotaTaskHandler>();
-        services.AddSingleton<IScheduledTaskHandler, CacheCleanupTaskHandler>();
-        services.AddSingleton<IScheduledTaskHandler, OrphanStorageTaskHandler>();
-        services.AddSingleton<IScheduledTaskHandler, StorageIntegrityTaskHandler>();
-        services.AddSingleton<IScheduledTaskHandler, MailboxFolderDeletionTaskHandler>();
-        services.AddSingleton<TaskExecutionService>();
-        services.AddSingleton<ITaskScheduler>(provider => provider.GetRequiredService<TaskExecutionService>());
-        services.AddSingleton<ITaskExecutionService>(provider => provider.GetRequiredService<TaskExecutionService>());
-        services.AddSingleton<PluginSettingsService>();
-        services.AddSingleton<IPluginSettingsProvider>(provider => provider.GetRequiredService<PluginSettingsService>());
-        services.AddSingleton<IPluginMailSender, PluginMailSender>();
-        services.AddSingleton<IPluginDeliveryQueue, PluginDeliveryQueue>();
-        services.AddSingleton<IPluginDirectory, PluginDirectory>();
-        services.AddSingleton<IPluginMessageStore, PluginMessageStore>();
-        services.AddSingleton<IPluginMailboxStore, PluginMailboxStore>();
-        services.AddSingleton<IPluginAuditWriter, PluginAuditWriter>();
-        services.AddSingleton<IPluginStateStore, PluginStateStore>();
-        services.AddSingleton<IPluginQuarantineStore, PluginQuarantineStore>();
-        services.AddSingleton<AdminApplicationService>();
-        services.AddSingleton<OperationsMailService>();
-        services.AddSingleton<AccountDirectoryService>();
-        services.AddSingleton<IOutboundTransport, DirectMxTransport>();
+        services.AddMailMessageServices();
+        services.AddMailManagementServices();
+        services.AddMailMaintenanceServices();
+        services.AddMailPluginAdapters();
+        services.AddMailServerBackgroundServices(configuration, runtime);
         return services;
     }
 
@@ -187,7 +132,7 @@ public static class DependencyInjection
 
         var applied = (await db.Database.GetAppliedMigrationsAsync(cancellationToken)).ToArray();
         var known = db.Database.GetMigrations().ToHashSet(StringComparer.Ordinal);
-        if (!applied.Any(migration => migration.EndsWith("_InitialMailServer2", StringComparison.Ordinal))
+        if (!applied.Any(migration => migration.EndsWith("_InitialSnowflakeMailServer", StringComparison.Ordinal))
             || applied.Any(migration => !known.Contains(migration)))
         {
             throw new InvalidOperationException(

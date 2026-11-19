@@ -9,7 +9,8 @@ public sealed class PerformanceStorage(
     IDbContextFactory<MailDbContext> factory,
     PerformanceCollector collector,
     ResourceRuntime resources,
-    ILogger<PerformanceStorage> logger) : BackgroundService
+    ILogger<PerformanceStorage> logger,
+    LocalLogMaintenanceLease? maintenanceLease = null) : BackgroundService
 {
     public const string SettingsKey = "performance.settings";
     private DateTimeOffset _lastConfiguration;
@@ -39,6 +40,7 @@ public sealed class PerformanceStorage(
 
     internal async Task FlushAsync(CancellationToken token)
     {
+        collector.BudgetBytes = resources.CacheBudgets.Allocation.DiagnosticsBytes;
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
         deadline.CancelAfter(TimeSpan.FromSeconds(3));
         token = deadline.Token;
@@ -53,7 +55,7 @@ public sealed class PerformanceStorage(
         try
         {
             await using var db = await factory.CreateDbContextAsync(token);
-            db.Database.SetCommandTimeout(3);
+            db.Logs.Database.SetCommandTimeout(3);
             if (DateTimeOffset.UtcNow - _lastConfiguration > TimeSpan.FromSeconds(10))
             {
                 var observedSettings = collector.Settings;
@@ -64,7 +66,6 @@ public sealed class PerformanceStorage(
                     settings.Validate();
                     collector.ApplyStoredSettings(observedSettings, settings);
                 }
-                collector.BudgetBytes = resources.Snapshot().ProfileId == "512mb" ? 2 * 1024 * 1024 : 8 * 1024 * 1024;
                 _lastConfiguration = DateTimeOffset.UtcNow;
             }
             db.PerformanceOperations.AddRange(operations);
@@ -95,14 +96,14 @@ public sealed class PerformanceStorage(
                 {
                     // API and worker processes discover the same fingerprint independently.
                     // An atomic upsert avoids losing an entire diagnostic batch to a PK race.
-                    if (db.Database.IsSqlite())
-                        await db.Database.ExecuteSqlInterpolatedAsync($"""
+                    if (db.Logs.Database.IsSqlite())
+                        await db.Logs.Database.ExecuteSqlInterpolatedAsync($"""
                             INSERT INTO performance_sql (Fingerprint, Provider, Template, LastSeenAt)
                             VALUES ({item.Fingerprint}, {item.Provider}, {item.Template}, {item.LastSeenAt.UtcTicks})
                             ON CONFLICT(Fingerprint) DO UPDATE SET LastSeenAt = MAX(LastSeenAt, excluded.LastSeenAt)
                             """, token);
                     else
-                        await db.Database.ExecuteSqlInterpolatedAsync($"""
+                        await db.Logs.Database.ExecuteSqlInterpolatedAsync($"""
                             INSERT INTO performance_sql (`Fingerprint`, `Provider`, `Template`, `LastSeenAt`)
                             VALUES ({item.Fingerprint}, {item.Provider}, {item.Template}, {item.LastSeenAt.UtcDateTime})
                             ON DUPLICATE KEY UPDATE `LastSeenAt` = GREATEST(`LastSeenAt`, {item.LastSeenAt.UtcDateTime})
@@ -112,12 +113,13 @@ public sealed class PerformanceStorage(
             var process = await db.PerformanceProcesses.FindAsync([collector.ProcessId], token);
             var status = collector.ProcessStatus();
             if (process is null) db.PerformanceProcesses.Add(status);
-            else db.Entry(process).CurrentValues.SetValues(status);
-            await db.SaveChangesAsync(token);
+            else db.Logs.Entry(process).CurrentValues.SetValues(status);
+            await db.Logs.SaveChangesAsync(token);
             persisted = true;
             _lastHeartbeat = DateTimeOffset.UtcNow;
             collector.StorageUnavailable = false;
-            if (DateTimeOffset.UtcNow - _lastCleanup > TimeSpan.FromMinutes(1))
+            if (DateTimeOffset.UtcNow - _lastCleanup > TimeSpan.FromMinutes(1)
+                && maintenanceLease?.TryAcquire() != false)
             {
                 await CleanupAsync(db, collector.Settings, token);
                 _lastCleanup = DateTimeOffset.UtcNow;
@@ -150,7 +152,7 @@ public sealed class PerformanceStorage(
             var oldest = await db.PerformanceOperations.OrderBy(x => x.StartedAt)
                 .Select(x => new { x.Id, x.DetailBytes }).Take(1000).ToArrayAsync(token);
             if (oldest.Length == 0) break;
-            var ids = new List<Guid>();
+            var ids = new List<long>();
             foreach (var item in oldest)
             {
                 ids.Add(item.Id); bytes -= item.DetailBytes;

@@ -76,6 +76,7 @@ beforeEach(() => {
   leaveGuard = undefined
   vi.mocked(api).mockReset()
   vi.mocked(api).mockImplementation(async path => {
+    if (path === '/settings/local-logs') return { machine: 'node-a', path: 'data/logs.db', retentionDays: 30, failedWrites: 0, lastError: null } as never
     if (path.startsWith('/settings/resources')) return mockApi(path) as never
     if (path === '/settings/delivery') return { ...delivery } as never
     if (path === '/settings/smtp') return { commandTimeoutSeconds: 300 } as never
@@ -100,6 +101,32 @@ afterEach(() => {
 })
 
 describe('system settings safeguards', () => {
+
+  it('saves retention only for the local log section and validates its range', async () => {
+    vi.mocked(api).mockImplementation(async (path, init) => {
+      if (path === '/settings/local-logs') return {
+        machine: 'node-a', path: 'data/logs.db', retentionDays: init?.method === 'PUT' ? JSON.parse(String(init.body)).retentionDays : 30,
+        failedWrites: 0, lastError: null,
+      } as never
+      return mockApi(path, init) as never
+    })
+    const wrapper = mountView()
+    await flushPromises()
+    await wrapper.findAll('.settings-nav button').find(button => button.text().includes('本机日志'))!.trigger('click')
+    expect(wrapper.text()).toContain('node-a')
+    expect(wrapper.text()).not.toContain('服务应用情况')
+    const field = wrapper.findAllComponents(TextField).find(component => component.props('label') === '日志保留天数')!
+    field.vm.$emit('update:modelValue', 0)
+    await nextTick()
+    expect(wrapper.findAll('button').find(button => button.text() === '保存当前设置')!.attributes('disabled')).toBeDefined()
+    field.vm.$emit('update:modelValue', 90)
+    await nextTick()
+    await wrapper.findAll('button').find(button => button.text() === '保存当前设置')!.trigger('click')
+    await flushPromises()
+    expect(api).toHaveBeenCalledWith('/settings/local-logs', { method: 'PUT', body: JSON.stringify({ retentionDays: 90 }) })
+    expect(wrapper.text()).toContain('本机日志已保存')
+    wrapper.unmount()
+  })
   it('saves relay capacity on the main server settings page', async () => {
     const previous = vi.mocked(api).getMockImplementation()!
     vi.mocked(api).mockImplementation(async (path, init) => {

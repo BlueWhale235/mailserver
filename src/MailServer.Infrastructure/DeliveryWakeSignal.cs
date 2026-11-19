@@ -1,6 +1,6 @@
 namespace MailServer.Infrastructure;
 
-/// <summary>A local hint only. Database polling remains the cross-process recovery path.</summary>
+/// <summary>Commit hint, relayed between local processes by ProcessWakeService; polling recovers lost hints.</summary>
 public sealed class DeliveryWakeSignal
 {
     private readonly object _gate = new();
@@ -11,8 +11,15 @@ public sealed class DeliveryWakeSignal
         new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     public long Version { get { lock (_gate) return _version; } }
+    internal event Action? Published;
 
     public void Pulse()
+    {
+        PulseLocal();
+        Published?.Invoke();
+    }
+
+    internal void PulseLocal()
     {
         TaskCompletionSource old;
         lock (_gate)

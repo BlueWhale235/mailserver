@@ -145,8 +145,6 @@ public sealed class ConfigurationCacheBypass : IDisposable
 
 public sealed class ConfigurationSnapshotCache : IDisposable
 {
-    internal static event Action<long>? RoutingCommitted;
-    internal static void NotifyRoutingCommitted(long version) => RoutingCommitted?.Invoke(version);
     private sealed record CacheValue(object Value, long Version, DateTimeOffset LoadedAt, long Size);
     private sealed record Failure(int Count, DateTimeOffset RetryAt, Exception Error);
     private readonly object _sync = new();
@@ -184,7 +182,6 @@ public sealed class ConfigurationSnapshotCache : IDisposable
         Options = options.Value;
         _logger = logger;
         _loadLimit = new(Math.Clamp(Options.MaximumConcurrentLoads, 1, 32));
-        RoutingCommitted += ObserveRoutingCommitted;
         _hitCounter = _meter.CreateCounter<long>("mailserver.config_cache.hits");
         _missCounter = _meter.CreateCounter<long>("mailserver.config_cache.misses");
         _evictionCounter = _meter.CreateCounter<long>("mailserver.config_cache.evictions");
@@ -195,7 +192,6 @@ public sealed class ConfigurationSnapshotCache : IDisposable
             lock (_sync) return _entries.Count == 0 ? 0 : _entries.Values.Max(x => (DateTimeOffset.UtcNow - x.LoadedAt).TotalSeconds);
         });
     }
-    private void ObserveRoutingCommitted(long version) => ObserveCommittedVersion(ConfigurationScopes.Routing, version);
     public void ObserveVersions(ConfigurationVersionsSnapshot versions)
     {
         lock (_sync)
@@ -347,7 +343,6 @@ public sealed class ConfigurationSnapshotCache : IDisposable
     }
     public void Dispose()
     {
-        RoutingCommitted -= ObserveRoutingCommitted;
         lock (_sync) { _disposed = true; _entries.Clear(); _nodes.Clear(); _lru.Clear(); _bytes = 0; }
         _lifetime.Cancel();
         // In-flight loads own their admission permits until they complete.

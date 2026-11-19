@@ -88,7 +88,7 @@ public sealed class TlsReportBackgroundService(
             .ToListAsync(cancellationToken);
         foreach (var reportId in reportIds)
         {
-            var claimOwner = Guid.NewGuid().ToString("N");
+            var claimOwner = System.Guid.NewGuid().ToString();
             var claimedAt = DateTimeOffset.UtcNow;
             var claimed = await db.TlsReportDeliveries
                 .Where(x => x.Id == reportId && x.CompletedAt == null && x.NextAttemptAt <= claimedAt
@@ -206,7 +206,7 @@ public sealed class TlsReportBackgroundService(
             OrganizationName = _options.ReportOrganizationName,
             DateRange = new { StartDatetime = start, EndDatetime = end },
             ContactInfo = _options.ReportContactInfo,
-            ReportId = Guid.NewGuid().ToString(),
+            ReportId = System.Guid.NewGuid().ToString(),
             Policies = policies
         }, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.KebabCaseLower });
     }

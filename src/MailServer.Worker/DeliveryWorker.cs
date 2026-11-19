@@ -21,7 +21,7 @@ public sealed class DeliveryWorker(
     ResourceRuntime? resources = null,
     DeliveryWakeSignal? deliveryWake = null) : BackgroundService
 {
-    private readonly string _owner = $"{Environment.MachineName}:{Environment.ProcessId}:{Guid.NewGuid():N}";
+    private readonly string _owner = $"{Environment.MachineName}:{Environment.ProcessId}:{System.Guid.NewGuid()}";
     private readonly AdjustableConcurrencyLimit _deliveryLimit = resources?.Delivery ?? new(8);
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -90,8 +90,20 @@ public sealed class DeliveryWorker(
                 logger.LogInformation(
                     "Delivery worker leased {Count} job(s).",
                     jobs.Count);
+                var batches = new Dictionary<long, DeliveryBatch>();
+                if (transport is IBatchOutboundTransport batchTransport)
+                {
+                    foreach (var group in jobs.GroupBy(x => (x.Job.MessageId, x.Job.Sender, x.Job.RouteDomainId,
+                        x.Job.OriginRuleId, x.Job.ForwardDepth, Domain: RecipientDomain(x.Job.Recipient))))
+                    {
+                        var members = group.ToArray();
+                        if (members.Length < 2) continue;
+                        var batch = new DeliveryBatch(members.Length, batchTransport, contentStore);
+                        foreach (var member in members) batches[member.Id] = batch;
+                    }
+                }
                 for (var index = 0; index < jobs.Count; index++)
-                    running.Add(ProcessLimitedAsync(jobs[index], options, permits[index], stoppingToken));
+                    running.Add(ProcessLimitedAsync(jobs[index], options, permits[index], stoppingToken, batches.GetValueOrDefault(jobs[index].Id)));
             }
         }
         finally
@@ -101,7 +113,7 @@ public sealed class DeliveryWorker(
         }
     }
 
-    private async Task ProcessLimitedAsync(DeliveryLease lease, DeliveryOptions options, IDisposable permit, CancellationToken token)
+    private async Task ProcessLimitedAsync(DeliveryLease lease, DeliveryOptions options, IDisposable permit, CancellationToken token, DeliveryBatch? batch = null)
     {
         using (permit)
         {
@@ -111,16 +123,18 @@ public sealed class DeliveryWorker(
             {
                 performance.SetQueueTimes(lease.QueueWaitMilliseconds, lease.RetryBackoffMilliseconds);
             }
-            try { await ProcessAsync(lease, options, token); }
+            try { await ProcessAsync(lease, options, token, batch); }
             catch (OperationCanceledException error) when (token.IsCancellationRequested) { performance?.Fail(error); }
             catch (Exception error) { performance?.Fail(error); logger.LogError(error, "Delivery task {JobId} failed without stopping the worker.", lease.Id); }
+            finally { batch?.Skip(lease.Id); }
         }
     }
 
     private async ValueTask ProcessAsync(
         DeliveryLease lease,
         DeliveryOptions options,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        DeliveryBatch? batch = null)
     {
         var stopwatch = System.Diagnostics.Stopwatch.StartNew();
         var job = lease.Job;
@@ -160,8 +174,12 @@ public sealed class DeliveryWorker(
                 else
                 {
                     // 传输实现只负责一次投递尝试；成功/失败、退避和退信由队列和 Worker 统一处理。
-                    await using var content = await contentStore.OpenReadAsync(job.Message.ContentKey, attemptCancellation.Token);
-                    result = await transport.DeliverAsync(job, content, attemptCancellation.Token);
+                    if (batch is not null) result = await batch.DeliverAsync(job, attemptCancellation.Token);
+                    else
+                    {
+                        await using var content = await contentStore.OpenReadAsync(job.Message.ContentKey, attemptCancellation.Token);
+                        result = await transport.DeliverAsync(job, content, attemptCancellation.Token);
+                    }
                 }
             }
             catch (OperationCanceledException) when (Volatile.Read(ref leaseLost) == 1 && !cancellationToken.IsCancellationRequested)
@@ -257,6 +275,55 @@ public sealed class DeliveryWorker(
         }
     }
 
+    private static string RecipientDomain(string recipient)
+    {
+        var at = recipient.LastIndexOf('@');
+        return at < 0 ? recipient : recipient[(at + 1)..].TrimEnd('.').ToLowerInvariant();
+    }
+
+    // Each member keeps its own plugin decision, lease renewal, completion and bounce.
+    // Only members which pass policy join the shared SMTP transaction.
+    private sealed class DeliveryBatch(int count, IBatchOutboundTransport transport, IMessageContentStore store)
+    {
+        private readonly object _gate = new();
+        private readonly HashSet<long> _arrived = [];
+        private readonly List<(DeliveryJob Job, CancellationToken Token)> _ready = [];
+        private readonly TaskCompletionSource<IReadOnlyDictionary<long, DeliveryResult>> _completed = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public void Skip(long id) => Arrive(id, null, default);
+        public async Task<DeliveryResult> DeliverAsync(DeliveryJob job, CancellationToken token)
+        {
+            Arrive(job.Id, job, token);
+            var results = await _completed.Task.WaitAsync(token);
+            return results[job.Id];
+        }
+        private void Arrive(long id, DeliveryJob? job, CancellationToken token)
+        {
+            bool start;
+            lock (_gate)
+            {
+                if (!_arrived.Add(id)) return;
+                if (job is not null) _ready.Add((job, token));
+                start = _arrived.Count == count;
+            }
+            if (start) _ = SendAsync();
+        }
+        private async Task SendAsync()
+        {
+            if (_ready.Count == 0) { _completed.TrySetResult(new Dictionary<long, DeliveryResult>()); return; }
+            using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(_ready.Select(x => x.Token).ToArray());
+            try
+            {
+                await using var content = await store.OpenReadAsync(_ready[0].Job.Message.ContentKey, lifetime.Token);
+                _completed.TrySetResult(await transport.DeliverBatchAsync(_ready.Select(x => x.Job).ToArray(), content, lifetime.Token));
+            }
+            catch (OperationCanceledException) { _completed.TrySetCanceled(lifetime.Token); }
+            catch (Exception error)
+            {
+                _completed.TrySetResult(_ready.ToDictionary(x => x.Job.Id, _ => DeliveryResult.Temporary(error.Message)));
+            }
+        }
+    }
+
     private async Task RenewLeaseAsync(
         DeliveryLease lease,
         TimeSpan duration,
@@ -297,6 +364,6 @@ public sealed class BounceService(DeliveryNotificationService notifications)
 {
     public Task CreateAsync(DeliveryJob failedJob, string reason, bool permanentFailure,
         CancellationToken cancellationToken, string? enhancedStatusCode = null) =>
-        notifications.CreateAsync(failedJob.Sender, failedJob.Recipient, reason, failedJob.Id.ToString("N"),
+        notifications.CreateAsync(failedJob.Sender, failedJob.Recipient, reason, failedJob.Id.ToString(),
             failedJob.Attempts, DeliveryNotificationService.SelectKind(permanentFailure, enhancedStatusCode), cancellationToken);
 }

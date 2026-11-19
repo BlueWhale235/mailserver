@@ -118,7 +118,7 @@ public sealed class EfficiencyOptimizationTests
     {
         using var message = new MimeMessage { Subject = "中文 Résumé", Body = new TextPart("plain")
             { Text = new string('x', 1024 * 1024) } };
-        var record = MessageSearchBackfillService.BuildRecord(Guid.NewGuid(), message, omitBody: true);
+        var record = MessageSearchBackfillService.BuildRecord(MailServer.Domain.SnowflakeIds.NewId(), message, omitBody: true);
         Assert.Equal("中文 RESUME", record.Subject);
         Assert.Empty(record.Body);
         Assert.False(record.Complete);
@@ -181,7 +181,7 @@ public sealed class EfficiencyOptimizationTests
     {
         using var message = new MimeMessage { Subject = "中文", Body = new TextPart("plain")
             { Text = string.Concat(Enumerable.Repeat("中文😀", 100_000)) } };
-        var record = MessageSearchBackfillService.BuildRecord(Guid.NewGuid(), message);
+        var record = MessageSearchBackfillService.BuildRecord(MailServer.Domain.SnowflakeIds.NewId(), message);
         Assert.False(record.Complete);
         Assert.True(Encoding.UTF8.GetByteCount(record.Subject) + Encoding.UTF8.GetByteCount(record.HeadersJson)
             + Encoding.UTF8.GetByteCount(record.Body) <= MessageSearchBackfillService.MaximumTextBytes);
@@ -263,12 +263,12 @@ public sealed class EfficiencyOptimizationTests
         try
         {
             var first = await Task.WhenAll(subscriptions.Select(x => x.WaitAsync(0, timeout.Token)));
-            Assert.Equal(3, fixture.Counter.Reads);
+            Assert.Equal(1, fixture.Counter.Reads);
             fixture.Counter.Reads = 0;
             var waiting = subscriptions.Select((x, index) => x.WaitAsync(first[index].Version, timeout.Token)).ToArray();
             changes.Pulse(mailbox.Id);
             await Task.WhenAll(waiting);
-            Assert.Equal(3, fixture.Counter.Reads);
+            Assert.Equal(1, fixture.Counter.Reads);
         }
         finally { foreach (var subscription in subscriptions) subscription.Dispose(); }
     }
@@ -340,7 +340,7 @@ public sealed class EfficiencyOptimizationTests
         public async Task<ContentDescriptor> SaveAsync(Stream content, CancellationToken token)
         {
             using var buffer = new MemoryStream(); await content.CopyToAsync(buffer, token);
-            var key = Guid.NewGuid().ToString("N"); Messages[key] = buffer.ToArray();
+            var key = MailServer.Domain.SnowflakeIds.NewId().ToString(); Messages[key] = buffer.ToArray();
             return new ContentDescriptor(key, buffer.Length);
         }
         public Task<Stream> OpenReadAsync(string key, CancellationToken token)
@@ -407,7 +407,7 @@ public sealed class EfficiencyOptimizationTests
     {
         await using var fixture = await Fixture.CreateAsync();
         var source = await fixture.SeedMailboxAsync();
-        Guid targetId;
+        long targetId;
         await using (var db = await fixture.Factory.CreateDbContextAsync())
         {
             var target = new Mailbox { AccountId = source.AccountId, Name = "Target" };
@@ -480,7 +480,7 @@ public sealed class EfficiencyOptimizationTests
     public async Task PreparedContentTransfersExactlyAndDuplicateOwnershipIsReleased()
     {
         await using var fixture = await Fixture.CreateAsync();
-        var root = Path.Combine(Path.GetTempPath(), "prepared-content-" + Guid.NewGuid().ToString("N"));
+        var root = Path.Combine(Path.GetTempPath(), "prepared-content-" + MailServer.Domain.SnowflakeIds.NewId().ToString());
         Directory.CreateDirectory(root);
         try
         {
@@ -511,8 +511,8 @@ public sealed class EfficiencyOptimizationTests
     {
         if (!OperatingSystem.IsLinux()) return;
         await using var fixture = await Fixture.CreateAsync();
-        var root = Path.Combine(Path.GetTempPath(), "prepared-cross-device-" + Guid.NewGuid().ToString("N"));
-        var source = Path.Combine("/dev/shm", "mailserver-prepared-" + Guid.NewGuid().ToString("N"));
+        var root = Path.Combine(Path.GetTempPath(), "prepared-cross-device-" + MailServer.Domain.SnowflakeIds.NewId().ToString());
+        var source = Path.Combine("/dev/shm", "mailserver-prepared-" + MailServer.Domain.SnowflakeIds.NewId().ToString());
         Directory.CreateDirectory(root);
         try
         {
@@ -648,11 +648,11 @@ public sealed class EfficiencyOptimizationTests
 
     private sealed class Fixture : IAsyncDisposable
     {
-        private readonly string _path = Path.Combine(Path.GetTempPath(), $"mailserver-efficiency-{Guid.NewGuid():N}.db");
+        private readonly string _path = Path.Combine(Path.GetTempPath(), $"mailserver-efficiency-{MailServer.Domain.SnowflakeIds.NewId()}.db");
         internal readonly Counter Counter = new();
         internal readonly CountingStore Store = new();
         internal readonly MessageSearchOptions SearchSettings = new();
-        internal PooledDbContextFactory<MailDbContext> Factory = null!;
+        internal TestMailDbContextFactory Factory = null!;
         internal MailboxService Service = null!;
         internal static async Task<Fixture> CreateAsync()
         {

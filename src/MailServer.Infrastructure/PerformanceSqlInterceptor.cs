@@ -13,6 +13,22 @@ public sealed class PerformanceSqlInterceptor(PerformanceCollector collector) : 
 {
     private readonly ConcurrentDictionary<Guid, Pending> _commands = new();
     private static readonly ConditionalWeakTable<IModel, HashSet<string>> Identifiers = new();
+    private static readonly ConditionalWeakTable<IModel, TemplateCache> Templates = new();
+    private sealed class TemplateCache
+    {
+        private readonly object _gate = new();
+        private readonly Dictionary<(string Provider, string Command), (string Fingerprint, string Template)> _values = [];
+        public (string Fingerprint, string Template) Get(string provider, string command, IReadOnlySet<string>? identifiers)
+        {
+            var key = (provider, command);
+            lock (_gate) if (_values.TryGetValue(key, out var value)) return value;
+            var result = Normalize(provider, command, identifiers);
+            // Bound both entry count and retained SQL text; never cache arbitrary huge statements.
+            if (command.Length <= 8192)
+                lock (_gate) if (_values.Count < 1024) _values.TryAdd(key, result);
+            return result;
+        }
+    }
     private static readonly HashSet<string> Keywords = new(
         "SELECT FROM WHERE JOIN LEFT RIGHT INNER OUTER CROSS ON AS AND OR NOT NULL IS IN EXISTS BETWEEN LIKE ESCAPE CASE WHEN THEN ELSE END ORDER BY GROUP HAVING LIMIT OFFSET DISTINCT ASC DESC INSERT INTO VALUES UPDATE SET DELETE RETURNING WITH RECURSIVE UNION ALL ANY COUNT SUM AVG MIN MAX COALESCE CAST COLLATE GLOB ISNULL NOTNULL TRUE FALSE BEGIN COMMIT ROLLBACK FOR SKIP LOCKED CONFLICT DO DUPLICATE KEY TABLE CREATE DROP INDEX PRAGMA DEFAULT AUTOINCREMENT PRIMARY UNIQUE IF CURRENT_TIMESTAMP".Split(' '), StringComparer.OrdinalIgnoreCase);
     private sealed record Pending(PerformanceScope Scope, string Fingerprint)
@@ -98,7 +114,9 @@ public sealed class PerformanceSqlInterceptor(PerformanceCollector collector) : 
         var identifiers = data.Context is null ? null : Identifiers.GetValue(data.Context.Model, model =>
             model.GetEntityTypes().SelectMany(entity => entity.GetProperties().Select(property => property.GetColumnName())
                 .Append(entity.GetTableName() ?? "")).ToHashSet(StringComparer.Ordinal));
-        var (fingerprint, template) = Normalize(provider, command.CommandText, identifiers);
+        var (fingerprint, template) = data.Context is null
+            ? Normalize(provider, command.CommandText, identifiers)
+            : Templates.GetValue(data.Context.Model, _ => new()).Get(provider, command.CommandText, identifiers);
         collector.SqlTemplate(fingerprint, provider, template);
         _commands[data.CommandId] = new Pending(scope, fingerprint);
     }

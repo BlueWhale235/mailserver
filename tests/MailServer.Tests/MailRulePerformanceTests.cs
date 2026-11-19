@@ -24,14 +24,14 @@ public sealed class MailRulePerformanceTests(ITestOutputHelper output)
     public async Task BoundedRuleSnapshotWorkload(int ruleCount)
     {
         SqliteNative.Initialize();
-        var path = Path.Combine(Path.GetTempPath(), $"mail-rule-bench-{Guid.NewGuid():N}.db");
+        var path = Path.Combine(Path.GetTempPath(), $"mail-rule-bench-{MailServer.Domain.SnowflakeIds.NewId()}.db");
         try
         {
             var counter = new QueryCounter();
             var options = new DbContextOptionsBuilder<MailDbContext>()
                 .UseSqlite($"Data Source={path}").AddInterceptors(counter).Options;
-            var factory = new PooledDbContextFactory<MailDbContext>(options);
-            Guid domainId;
+            var factory = new TestMailDbContextFactory(options);
+            long domainId;
             await using (var db = await factory.CreateDbContextAsync())
             {
                 await db.Database.EnsureCreatedAsync();

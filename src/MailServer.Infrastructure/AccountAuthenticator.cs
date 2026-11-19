@@ -7,7 +7,7 @@ public sealed class AccountAuthenticator(
     IDbContextFactory<MailDbContext> dbFactory,
     ICredentialService credentials) : IAccountAuthenticator
 {
-    public async Task<Guid?> AuthenticateMailboxAsync(string address, string password, CancellationToken cancellationToken)
+    public async Task<long?> AuthenticateMailboxAsync(string address, string password, CancellationToken cancellationToken)
     {
         if (!AddressParser.TrySplit(address, out var localPart, out var domain))
         {
@@ -34,13 +34,13 @@ public sealed class AccountAuthenticator(
         return account.Id;
     }
 
-    public async Task<Guid?> ResolveMailboxIdentityAsync(string address, CancellationToken cancellationToken)
+    public async Task<long?> ResolveMailboxIdentityAsync(string address, CancellationToken cancellationToken)
     {
         if (!AddressParser.TrySplit(address, out var localPart, out var domain)) return null;
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         return await db.Accounts
             .Where(x => x.LocalPart == localPart && x.Domain.Name == domain && x.IsEnabled && x.Domain.IsActive)
-            .Select(x => (Guid?)x.Id)
+            .Select(x => (long?)x.Id)
             .SingleOrDefaultAsync(cancellationToken);
     }
 }

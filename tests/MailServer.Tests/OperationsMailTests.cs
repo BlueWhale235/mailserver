@@ -14,7 +14,7 @@ public sealed class OperationsMailTests
     [Fact]
     public async Task SqliteMigrationAndSearchReuseExistingMessagesCopiesAndRawContent()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-operations-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-operations-{MailServer.Domain.SnowflakeIds.NewId()}");
         Directory.CreateDirectory(root);
         try
         {
@@ -35,7 +35,7 @@ public sealed class OperationsMailTests
             var mail = provider.GetRequiredService<OperationsMailService>();
             await using (var db = await factory.CreateDbContextAsync())
                 await db.Database.MigrateAsync();
-            var ids = new List<Guid>();
+            var ids = new List<long>();
             for (var index = 0; index < 2; index++)
             {
                 await using var raw = new MemoryStream(Encoding.UTF8.GetBytes(

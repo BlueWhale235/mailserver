@@ -3,10 +3,10 @@ using Microsoft.EntityFrameworkCore;
 
 namespace MailServer.Infrastructure;
 
-public sealed class SmtpSenderAuthorizer(IDbContextFactory<MailDbContext> dbFactory) : ISmtpSenderAuthorizer
+public sealed class SmtpSenderAuthorizer(IDbContextFactory<MailDbContext> dbFactory, ConfigurationSnapshotCache? cache = null) : ISmtpSenderAuthorizer
 {
     public async Task<bool> IsAuthorizedSenderAsync(
-        Guid accountId,
+        long accountId,
         string sender,
         CancellationToken cancellationToken)
     {
@@ -15,6 +15,16 @@ public sealed class SmtpSenderAuthorizer(IDbContextFactory<MailDbContext> dbFact
             return false;
         }
 
+        async Task<(Authorization Value, long Size)> LoadAsync(CancellationToken token) =>
+            (new Authorization(await IsAuthorizedCoreAsync(accountId, senderLocalPart, senderDomain, token)), 256);
+        return cache is null ? (await LoadAsync(cancellationToken)).Value.Allowed
+            : (await cache.GetAsync($"sender:{accountId}:{senderLocalPart}@{senderDomain}",
+                ConfigurationScopes.Routing, LoadAsync, cancellationToken, TimeSpan.FromSeconds(10))).Allowed;
+    }
+
+    private sealed record Authorization(bool Allowed);
+    private async Task<bool> IsAuthorizedCoreAsync(long accountId, string senderLocalPart, string senderDomain, CancellationToken cancellationToken)
+    {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         var account = await db.Accounts
             .AsNoTracking()

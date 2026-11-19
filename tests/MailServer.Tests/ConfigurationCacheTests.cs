@@ -78,10 +78,10 @@ public sealed class ConfigurationCacheTests
     public async Task StaleDeliveryLeaseCannotRenewOrComplete()
     {
         var dbOptions = new DbContextOptionsBuilder<MailDbContext>()
-            .UseInMemoryDatabase($"delivery-lease-{Guid.NewGuid():N}")
+            .UseInMemoryDatabase($"delivery-lease-{MailServer.Domain.SnowflakeIds.NewId()}")
             .ConfigureWarnings(warnings => warnings.Ignore(InMemoryEventId.TransactionIgnoredWarning))
             .Options;
-        var factory = new PooledDbContextFactory<MailDbContext>(dbOptions);
+        var factory = new TestMailDbContextFactory(dbOptions);
         var settings = new SystemSettingsService(
             factory,
             Options.Create(new DeliveryOptions()),

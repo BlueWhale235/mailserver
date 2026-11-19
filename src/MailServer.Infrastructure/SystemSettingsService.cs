@@ -241,13 +241,13 @@ public sealed class SystemSettingsService(
     }
 
     public async Task<MailboxSettingsView> GetDomainMailboxSettingsAsync(
-        Guid domainId,
+        long domainId,
         CancellationToken cancellationToken, bool useCache = false)
     {
         if (useCache && cache is not null)
         {
             return await cache.GetAsync(
-                $"settings:mailbox:domain:{domainId:N}",
+                $"settings:mailbox:domain:{domainId}",
                 ConfigurationScopes.Settings,
                 async token =>
                 {
@@ -259,7 +259,7 @@ public sealed class SystemSettingsService(
         return await LoadDomainMailboxSettingsAsync(domainId, cancellationToken);
     }
 
-    private async Task<MailboxSettingsView> LoadDomainMailboxSettingsAsync(Guid domainId, CancellationToken cancellationToken)
+    private async Task<MailboxSettingsView> LoadDomainMailboxSettingsAsync(long domainId, CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         if (!await db.Domains.AsNoTracking().AnyAsync(x => x.Id == domainId, cancellationToken))
@@ -277,7 +277,7 @@ public sealed class SystemSettingsService(
     }
 
     public async Task<MailboxSettingsView> SaveDomainMailboxSettingsAsync(
-        Guid domainId,
+        long domainId,
         MailboxSettingsView settings,
         CancellationToken cancellationToken)
     {
@@ -299,12 +299,18 @@ public sealed class SystemSettingsService(
         return new MailboxSettingsView(normalized);
     }
 
-    internal static string DomainMailboxFoldersKey(Guid domainId) =>
+    internal static string DomainMailboxFoldersKey(long domainId) =>
         DomainMailboxPrefix(domainId) + MailboxFoldersKey;
 
-    private static string DomainMailboxPrefix(Guid domainId) => $"{MailboxPrefix}{domainId:N}:";
+    private static string DomainMailboxPrefix(long domainId) => $"{MailboxPrefix}{domainId}:";
 
-    public async Task<CertificateSelectionSettingsView> GetCertificateSelectionSettingsAsync(
+    internal long CertificateSettingsVersion { get; private set; }
+    public Task<CertificateSelectionSettingsView> GetCertificateSelectionSettingsAsync(CancellationToken cancellationToken) =>
+        cache is null ? LoadCertificateSelectionSettingsAsync(cancellationToken)
+            : cache.GetAsync($"settings:certificate-selection:{cache.Versions.Routing}", ConfigurationScopes.Settings,
+                async token => (await LoadCertificateSelectionSettingsAsync(token), 1024L), cancellationToken);
+
+    private async Task<CertificateSelectionSettingsView> LoadCertificateSelectionSettingsAsync(
         CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
@@ -353,7 +359,12 @@ public sealed class SystemSettingsService(
             CertificateSingleFallbackKey,
             settings.AllowSingleCertificateFallback ? "true" : "false",
             cancellationToken);
+        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+        var version = await ConfigurationVersionService.BumpAsync(db, ConfigurationScopes.Settings, cancellationToken);
         await db.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+        cache?.ObserveCommittedVersion(ConfigurationScopes.Settings, version);
+        CertificateSettingsVersion++;
         return await GetCertificateSelectionSettingsAsync(cancellationToken);
     }
 

@@ -201,7 +201,7 @@ public sealed class CoreTests
     {
         var factory = CreateFactory();
         var settings = CreateSystemSettingsService(factory);
-        Guid jobId;
+        long jobId;
         await using (var db = await factory.CreateDbContextAsync())
         {
             var job = new DeliveryJob
@@ -375,7 +375,7 @@ public sealed class CoreTests
     [Fact]
     public async Task PluginHostServicesSendMailQueryDirectoryAndEditMessages()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-tests-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-tests-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var factory = CreateFactory();
@@ -457,7 +457,7 @@ public sealed class CoreTests
     public async Task PluginHostServicesControlDeliveryAuditAndState()
     {
         var factory = CreateFactory();
-        Guid jobId;
+        long jobId;
         await using (var db = await factory.CreateDbContextAsync())
         {
             var message = new StoredMessage
@@ -523,14 +523,14 @@ public sealed class CoreTests
     public async Task PluginMailboxStoreManagesFoldersMessagesAndFlags()
     {
         var factory = CreateFactory();
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-plugin-mailbox-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-plugin-mailbox-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var store = new FileMessageContentStore(
                 Options.Create(new StorageOptions { RootPath = root, MaximumMessageBytes = 4096 }),
                 factory);
             var settings = CreateSystemSettingsService(factory);
-            Guid accountId;
+            long accountId;
             await using (var db = await factory.CreateDbContextAsync())
             {
                 var domain = new MailDomain { Name = "example.test", QuotaBytes = 4096, UsedBytes = 12 };
@@ -641,7 +641,7 @@ public sealed class CoreTests
     [Fact]
     public async Task DomainDetailsPersistSmtpNameAndOutboundIpAddresses()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-tests-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-tests-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var factory = CreateFactory();
@@ -650,7 +650,7 @@ public sealed class CoreTests
                 Options.Create(new StorageOptions { RootPath = root, MaximumMessageBytes = 4096 }),
                 factory);
             var administration = CreateAdministration(factory, settings, new CredentialService(), store);
-            Guid domainId;
+            long domainId;
             await using (var db = await factory.CreateDbContextAsync())
             {
                 var domain = new MailDomain { Name = "example.com", MailHostName = "mail.example.com" };
@@ -685,9 +685,9 @@ public sealed class CoreTests
     public async Task PermissionServiceFiltersDomainScope()
     {
         var factory = CreateFactory();
-        Guid adminId;
-        Guid allowedDomainId;
-        Guid blockedDomainId;
+        long adminId;
+        long allowedDomainId;
+        long blockedDomainId;
         await using (var db = await factory.CreateDbContextAsync())
         {
             var allowed = new MailDomain { Name = "allowed.test", MailHostName = "mail.allowed.test" };
@@ -736,8 +736,8 @@ public sealed class CoreTests
     public async Task PermissionServiceManageGrantIncludesReadScope()
     {
         var factory = CreateFactory();
-        Guid adminId;
-        Guid domainId;
+        long adminId;
+        long domainId;
         await using (var db = await factory.CreateDbContextAsync())
         {
             var domain = new MailDomain { Name = "managed.test", MailHostName = "mail.managed.test" };
@@ -786,7 +786,7 @@ public sealed class CoreTests
                 new PermissionGrantInput(
                     "domain.detail",
                     PermissionService.DomainResourceType,
-                    Guid.NewGuid().ToString())
+                    MailServer.Domain.SnowflakeIds.NewId().ToString())
             ]));
 
         Assert.Contains("Unknown permission", exception.Message, StringComparison.OrdinalIgnoreCase);
@@ -795,7 +795,7 @@ public sealed class CoreTests
     [Fact]
     public async Task ApiKeyCreationRequiresGrants()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-tests-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-tests-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var factory = CreateFactory();
@@ -831,7 +831,7 @@ public sealed class CoreTests
     public async Task InitialAdministratorAlwaysHasFullAccessAndCannotBeReauthorized()
     {
         var factory = CreateFactory();
-        Guid adminId;
+        long adminId;
         await using (var db = await factory.CreateDbContextAsync())
         {
             var admin = new AdminUser { UserName = "owner", PasswordHash = "unused", IsEnabled = true };
@@ -860,7 +860,7 @@ public sealed class CoreTests
     [Fact]
     public async Task InitialAdministratorIdentityAndStatusAreProtected()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-tests-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-tests-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var factory = CreateFactory();
@@ -916,7 +916,7 @@ public sealed class CoreTests
     [Fact]
     public async Task DeliveryQueueRawMessageReturnsStoredMime()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-tests-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-tests-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var factory = CreateFactory();
@@ -928,7 +928,7 @@ public sealed class CoreTests
             await using var content = new MemoryStream(Encoding.UTF8.GetBytes(
                 "From: alice@example.com\r\nTo: bob@example.net\r\nSubject: raw\r\n\r\nhello raw"));
             var descriptor = await store.SaveAsync(content, CancellationToken.None);
-            Guid jobId;
+            long jobId;
             await using (var db = await factory.CreateDbContextAsync())
             {
                 var message = new StoredMessage
@@ -977,8 +977,9 @@ public sealed class CoreTests
                 Assert.False(await verification.Messages.AnyAsync(x => x.ContentKey == descriptor.Key));
             }
 
-            await Assert.ThrowsAsync<FileNotFoundException>(() =>
-                store.OpenReadAsync(descriptor.Key, CancellationToken.None));
+            // Concurrent writers may not yet have committed their reference to this hash.
+            await using var retained = await store.OpenReadAsync(descriptor.Key, CancellationToken.None);
+            Assert.True(retained.Length > 0);
         }
         finally
         {
@@ -989,7 +990,7 @@ public sealed class CoreTests
     [Fact]
     public async Task DomainDeliveryQueueIsFilteredAndRejectsCrossDomainOperations()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-tests-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-tests-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var factory = CreateFactory();
@@ -1004,9 +1005,9 @@ public sealed class CoreTests
                 "From: bob@second.test\r\nTo: user@example.org\r\nSubject: second\r\n\r\nsecond"));
             var firstDescriptor = await store.SaveAsync(firstContent, CancellationToken.None);
             var secondDescriptor = await store.SaveAsync(secondContent, CancellationToken.None);
-            Guid firstDomainId;
-            Guid secondDomainId;
-            Guid firstJobId;
+            long firstDomainId;
+            long secondDomainId;
+            long firstJobId;
             await using (var db = await factory.CreateDbContextAsync())
             {
                 var firstDomain = new MailDomain { Name = "first.test" };
@@ -1104,12 +1105,12 @@ public sealed class CoreTests
     [Fact]
     public async Task AuthenticatedOutboundDeliveryKeepsRouteDomain()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-tests-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-tests-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var factory = CreateFactory();
-            Guid domainId;
-            Guid accountId;
+            long domainId;
+            long accountId;
             await using (var db = await factory.CreateDbContextAsync())
             {
                 var domain = new MailDomain
@@ -1185,7 +1186,7 @@ public sealed class CoreTests
     [Fact]
     public async Task ContentStoreUsesSha256AndDeduplicates()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-tests-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-tests-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var factory = CreateFactory();
@@ -1213,7 +1214,7 @@ public sealed class CoreTests
     [Fact]
     public async Task ContentStoreFailureRemovesTemporaryPartialFile()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-tests-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-tests-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var factory = CreateFactory();
@@ -1238,7 +1239,7 @@ public sealed class CoreTests
     [Fact]
     public async Task UnauthenticatedInboundDeliveryCannotRelay()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-tests-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-tests-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var factory = CreateFactory();
@@ -1269,7 +1270,7 @@ public sealed class CoreTests
     [Fact]
     public async Task LocalInboundDeliveryCreatesInboxMessageWithUid()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-tests-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-tests-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var factory = CreateFactory();
@@ -1323,7 +1324,7 @@ public sealed class CoreTests
     [Fact]
     public async Task InboundDeliveryAcceptsBodyOnlyAndDuplicateHeadersWithoutProtocolAudit()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-edge-31-40-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-edge-31-40-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var factory = CreateFactory();
@@ -1380,7 +1381,7 @@ public sealed class CoreTests
     [Fact]
     public async Task InboundDeliveryPreservesEnvelopeAndStoresDuplicateOrMissingMessageIdsSeparately()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-edge-cases-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-edge-cases-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var factory = CreateFactory();
@@ -1523,8 +1524,8 @@ public sealed class CoreTests
     {
         var factory = CreateFactory();
         var service = CreateSystemSettingsService(factory);
-        Guid firstDomainId;
-        Guid secondDomainId;
+        long firstDomainId;
+        long secondDomainId;
         await using (var db = await factory.CreateDbContextAsync())
         {
             var first = new MailDomain { Name = "first.example" };
@@ -1641,7 +1642,7 @@ public sealed class CoreTests
     [Fact]
     public async Task AdminAccountCreationUsesConfiguredDefaultFolders()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-tests-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-tests-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var factory = CreateFactory();
@@ -1685,7 +1686,7 @@ public sealed class CoreTests
     [Fact]
     public async Task DomainScopedAccountAndAliasManagementStayInsideDomain()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-tests-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-tests-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var factory = CreateFactory();
@@ -1693,8 +1694,8 @@ public sealed class CoreTests
             await settings.SaveMailboxSettingsAsync(
                 new MailboxSettingsView(["INBOX", "Sent", "Drafts"]),
                 CancellationToken.None);
-            Guid exampleId;
-            Guid otherId;
+            long exampleId;
+            long otherId;
             await using (var db = await factory.CreateDbContextAsync())
             {
                 var example = new MailDomain { Name = "example.com" };
@@ -1763,13 +1764,13 @@ public sealed class CoreTests
     [Fact]
     public async Task DomainAccountAndAliasBatchManagementIsAtomicAndSearchable()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-tests-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-tests-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var factory = CreateFactory();
             var settings = CreateSystemSettingsService(factory);
             await settings.SaveMailboxSettingsAsync(new MailboxSettingsView(["INBOX"]), CancellationToken.None);
-            Guid domainId;
+            long domainId;
             await using (var db = await factory.CreateDbContextAsync())
             {
                 var domain = new MailDomain { Name = "example.com" };
@@ -1828,13 +1829,13 @@ public sealed class CoreTests
     [Fact]
     public async Task AccountQuotaCannotExceedDomainQuota()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-tests-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-tests-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var factory = CreateFactory();
             var settings = CreateSystemSettingsService(factory);
             await settings.SaveMailboxSettingsAsync(new MailboxSettingsView(["INBOX"]), CancellationToken.None);
-            Guid domainId;
+            long domainId;
             await using (var db = await factory.CreateDbContextAsync())
             {
                 var domain = new MailDomain { Name = "example.com", QuotaBytes = 100 * 1_048_576L };
@@ -1888,7 +1889,7 @@ public sealed class CoreTests
     [Fact]
     public async Task MailboxServiceEnsuresDefaultFoldersIdempotently()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-tests-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-tests-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var factory = CreateFactory();
@@ -1896,8 +1897,8 @@ public sealed class CoreTests
             await settings.SaveMailboxSettingsAsync(
                 new MailboxSettingsView(["INBOX", "Sent", "Drafts"]),
                 CancellationToken.None);
-            Guid accountId;
-            Guid deletedSentId;
+            long accountId;
+            long deletedSentId;
             await using (var db = await factory.CreateDbContextAsync())
             {
                 var domain = new MailDomain { Name = "example.com" };
@@ -1963,12 +1964,12 @@ public sealed class CoreTests
     [Fact]
     public async Task MailboxServiceChangesUidValidityWhenMailboxIsRebuilt()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-tests-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-tests-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var factory = CreateFactory();
             var settings = CreateSystemSettingsService(factory);
-            Guid accountId;
+            long accountId;
             await using (var db = await factory.CreateDbContextAsync())
             {
                 var domain = new MailDomain { Name = "example.com" };
@@ -2004,12 +2005,12 @@ public sealed class CoreTests
     [Fact]
     public async Task MailboxServicePlusFlagsMergeWithoutReplacingExistingKeywords()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-tests-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-tests-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var factory = CreateFactory();
             var settings = CreateSystemSettingsService(factory);
-            Guid mailboxId;
+            long mailboxId;
             await using (var db = await factory.CreateDbContextAsync())
             {
                 var domain = new MailDomain { Name = "example.com" };
@@ -2191,13 +2192,13 @@ public sealed class CoreTests
     [Fact]
     public async Task MailboxAppendRepairsRolledBackUidNextBeforeAssigningUid()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-tests-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-tests-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var factory = CreateFactory();
             var settings = CreateSystemSettingsService(factory);
-            Guid accountId;
-            Guid mailboxId;
+            long accountId;
+            long mailboxId;
             await using (var db = await factory.CreateDbContextAsync())
             {
                 var domain = new MailDomain { Name = "example.com" };
@@ -2269,7 +2270,7 @@ public sealed class CoreTests
     [Fact]
     public void MailServerLoggingWritesDailyFileAndKeepsFilePlainText()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-logs-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-logs-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var configuration = new ConfigurationBuilder()
@@ -2324,13 +2325,13 @@ public sealed class CoreTests
     public async Task RecycleBinListUsesHumanReadableNamesForDeletedResources()
     {
         var factory = CreateFactory();
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-recycle-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-recycle-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var deletedAt = new DateTimeOffset(2026, 9, 17, 8, 0, 0, TimeSpan.Zero);
             var purgeAfter = deletedAt.AddDays(30);
-            Guid accountId;
-            Guid mailboxId;
+            long accountId;
+            long mailboxId;
             await using (var db = await factory.CreateDbContextAsync())
             {
                 var domain = new MailDomain { Name = "example.test" };
@@ -2419,14 +2420,14 @@ public sealed class CoreTests
     public async Task MovingMessageToTrashSchedulesDailyPurgeAndPurgeReleasesQuota()
     {
         var factory = CreateFactory();
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-trash-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-trash-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var store = new FileMessageContentStore(
                 Options.Create(new StorageOptions { RootPath = root, MaximumMessageBytes = 4096 }),
                 factory);
-            Guid inboxId;
-            Guid accountId;
+            long inboxId;
+            long accountId;
             await using (var db = await factory.CreateDbContextAsync())
             {
                 var domain = new MailDomain { Name = "example.test", UsedBytes = 12 };
@@ -2451,7 +2452,7 @@ public sealed class CoreTests
 
             await mailboxService.CopyAsync(inboxId, "1", false, "Trash", true, CancellationToken.None);
 
-            Guid queueId;
+            long queueId;
             DateTimeOffset due;
             await using (var db = await factory.CreateDbContextAsync())
             {
@@ -2507,13 +2508,13 @@ public sealed class CoreTests
     public async Task QuarantineReleaseDeliversToOriginalInboxAndUpdatesQuota()
     {
         var factory = CreateFactory();
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-quarantine-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-quarantine-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var store = new FileMessageContentStore(
                 Options.Create(new StorageOptions { RootPath = root, MaximumMessageBytes = 4096 }),
                 factory);
-            Guid domainId;
+            long domainId;
             await using (var db = await factory.CreateDbContextAsync())
             {
                 var domain = new MailDomain { Name = "example.test", QuotaBytes = 4096 };
@@ -2575,13 +2576,13 @@ public sealed class CoreTests
     public async Task QuarantinePreviewIsBoundedSearchIsCaseInsensitiveAndFullRawCanBeDownloaded()
     {
         var factory = CreateFactory();
-        var root = Path.Combine(Path.GetTempPath(), $"mailserver-quarantine-preview-{Guid.NewGuid():N}");
+        var root = Path.Combine(Path.GetTempPath(), $"mailserver-quarantine-preview-{MailServer.Domain.SnowflakeIds.NewId()}");
         try
         {
             var store = new FileMessageContentStore(
                 Options.Create(new StorageOptions { RootPath = root, MaximumMessageBytes = 1024 * 1024 }),
                 factory);
-            Guid domainId;
+            long domainId;
             await using (var db = await factory.CreateDbContextAsync())
             {
                 var domain = new MailDomain { Name = "example.test", QuotaBytes = 1024 * 1024 };
@@ -2637,7 +2638,7 @@ public sealed class CoreTests
     public async Task AuditReadPermissionIsSeparateFromDashboardRead()
     {
         var factory = CreateFactory();
-        var adminId = Guid.NewGuid();
+        var adminId = MailServer.Domain.SnowflakeIds.NewId();
         await using (var db = await factory.CreateDbContextAsync())
         {
             db.AdminUsers.Add(new AdminUser
@@ -2676,10 +2677,10 @@ public sealed class CoreTests
     private static IDbContextFactory<MailDbContext> CreateFactory()
     {
         var options = new DbContextOptionsBuilder<MailDbContext>()
-            .UseInMemoryDatabase($"mailserver-{Guid.NewGuid():N}")
+            .UseInMemoryDatabase($"mailserver-{MailServer.Domain.SnowflakeIds.NewId()}")
             .ConfigureWarnings(warnings => warnings.Ignore(InMemoryEventId.TransactionIgnoredWarning))
             .Options;
-        return new PooledDbContextFactory<MailDbContext>(options);
+        return new TestMailDbContextFactory(options);
     }
 
     private static SystemSettingsService CreateSystemSettingsService(IDbContextFactory<MailDbContext> factory) =>
@@ -2782,7 +2783,7 @@ public sealed class CoreTests
         Assert.Contains("***", exportedJson);
         Assert.DoesNotContain("plain", exportedJson);
         await Assert.ThrowsAsync<KeyNotFoundException>(() => service.ExportAsync(
-            [plugins.Items.Single().Id, Guid.NewGuid()], CancellationToken.None));
+            [plugins.Items.Single().Id, MailServer.Domain.SnowflakeIds.NewId()], CancellationToken.None));
     }
 
     [Fact]
@@ -2794,11 +2795,11 @@ public sealed class CoreTests
         var accessor = new HttpContextAccessor { HttpContext = http };
         var interceptor = new AuditStampInterceptor(accessor);
         var options = new DbContextOptionsBuilder<MailDbContext>()
-            .UseInMemoryDatabase($"mailserver-audit-stamp-{Guid.NewGuid():N}")
+            .UseInMemoryDatabase($"mailserver-audit-stamp-{MailServer.Domain.SnowflakeIds.NewId()}")
             .AddInterceptors(interceptor)
             .Options;
 
-        await using var db = new MailDbContext(options);
+        await using var db = new MailDbContext(options, TestLocalLogs.Create());
         db.AuditRecords.Add(new AuditRecord
         {
             Actor = "admin",
@@ -2849,6 +2850,6 @@ public sealed class CoreTests
             RunDueCount++;
             return Task.CompletedTask;
         }
-        public Task<Guid> RunNowAsync(Guid taskId, CancellationToken cancellationToken) => Task.FromResult(Guid.NewGuid());
+        public Task<long> RunNowAsync(long taskId, CancellationToken cancellationToken) => Task.FromResult(MailServer.Domain.SnowflakeIds.NewId());
     }
 }

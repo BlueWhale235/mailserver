@@ -28,9 +28,7 @@ public sealed partial class MailboxService(
 {
     private static long _lastUidValidity = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
     // 同一邮箱的写操作需要串行化，避免 UIDNEXT、序号和 MODSEQ 在并发 IMAP 命令下错乱。
-    private static readonly SemaphoreSlim[] MailboxLocks = Enumerable.Range(0, 256)
-        .Select(_ => new SemaphoreSlim(1, 1)).ToArray();
-    private static SemaphoreSlim LockFor(Guid mailboxId) => MailboxLocks[mailboxId.GetHashCode() & 255];
+    private static readonly AsyncKeyedLock<long> MailboxLocks = new();
     private const string SubscriptionPrefix = "imap.subscription.";
     private const string DefaultSubscriptionSeedPrefix = "imap.default-subscription-seeded.";
     private const string SuppressedDefaultFolderPrefix = "imap.default-folder-suppressed.";
@@ -52,7 +50,7 @@ public sealed partial class MailboxService(
     {
     }
 
-    public async Task<IReadOnlyList<MailboxSummary>> ListAsync(Guid accountId, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<MailboxSummary>> ListAsync(long accountId, CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         var mailboxes = await db.Mailboxes
@@ -67,12 +65,12 @@ public sealed partial class MailboxService(
         return await OrderForAccountAsync(accountId, result, cancellationToken);
     }
 
-    public async Task EnsureDefaultFoldersAsync(Guid accountId, CancellationToken cancellationToken)
+    public async Task EnsureDefaultFoldersAsync(long accountId, CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         var domainId = await db.Accounts.AsNoTracking()
             .Where(x => x.Id == accountId)
-            .Select(x => (Guid?)x.DomainId)
+            .Select(x => (long?)x.DomainId)
             .SingleOrDefaultAsync(cancellationToken)
             ?? throw new KeyNotFoundException("Account not found.");
         var settings = await systemSettings.GetDomainMailboxSettingsAsync(domainId, cancellationToken, useCache: true);
@@ -151,14 +149,14 @@ public sealed partial class MailboxService(
         }
     }
 
-    public async Task<MailboxSummary?> SelectAsync(Guid accountId, string mailboxName, CancellationToken cancellationToken)
+    public async Task<MailboxSummary?> SelectAsync(long accountId, string mailboxName, CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         var mailbox = await FindMailboxAsync(db, accountId, MailboxNames.Normalize(mailboxName), cancellationToken);
         return mailbox is null ? null : await SummarizeAsync(db, mailbox, cancellationToken);
     }
 
-    public async Task<MailboxSummary> CreateAsync(Guid accountId, string mailboxName, CancellationToken cancellationToken)
+    public async Task<MailboxSummary> CreateAsync(long accountId, string mailboxName, CancellationToken cancellationToken)
     {
         var normalized = MailboxNames.Normalize(mailboxName);
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
@@ -176,7 +174,7 @@ public sealed partial class MailboxService(
         return await SummarizeAsync(db, mailbox, cancellationToken);
     }
 
-    public async Task DeleteAsync(Guid accountId, string mailboxName, CancellationToken cancellationToken)
+    public async Task DeleteAsync(long accountId, string mailboxName, CancellationToken cancellationToken)
     {
         var normalized = MailboxNames.Normalize(mailboxName);
         if (MailboxNames.IsSystemFolder(normalized))
@@ -219,7 +217,7 @@ public sealed partial class MailboxService(
     }
 
     public async Task RenameAsync(
-        Guid accountId,
+        long accountId,
         string existingMailboxName,
         string newMailboxName,
         CancellationToken cancellationToken)
@@ -275,7 +273,7 @@ public sealed partial class MailboxService(
         foreach (var mailbox in mailboxes) mailboxChanges?.Pulse(mailbox.Id);
     }
 
-    public async Task SubscribeAsync(Guid accountId, string mailboxName, CancellationToken cancellationToken)
+    public async Task SubscribeAsync(long accountId, string mailboxName, CancellationToken cancellationToken)
     {
         var normalized = MailboxNames.Normalize(mailboxName);
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
@@ -293,7 +291,7 @@ public sealed partial class MailboxService(
         }
     }
 
-    public async Task UnsubscribeAsync(Guid accountId, string mailboxName, CancellationToken cancellationToken)
+    public async Task UnsubscribeAsync(long accountId, string mailboxName, CancellationToken cancellationToken)
     {
         var key = SubscriptionKey(accountId, MailboxNames.Normalize(mailboxName));
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
@@ -303,7 +301,7 @@ public sealed partial class MailboxService(
         await db.SaveChangesAsync(cancellationToken);
     }
 
-    public async Task<IReadOnlyList<MailboxSummary>> ListSubscribedAsync(Guid accountId, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<MailboxSummary>> ListSubscribedAsync(long accountId, CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         var prefix = SubscriptionAccountPrefix(accountId);
@@ -326,7 +324,7 @@ public sealed partial class MailboxService(
     }
 
     public async Task<IReadOnlyList<MailboxItem>> FetchAsync(
-        Guid mailboxId,
+        long mailboxId,
         string sequenceSet,
         bool useUid,
         CancellationToken cancellationToken)
@@ -338,7 +336,7 @@ public sealed partial class MailboxService(
     }
 
     public async Task<IMailboxSelectionSnapshot> CreateFetchSnapshotAsync(
-        Guid mailboxId, string sequenceSet, bool useUid, CancellationToken cancellationToken)
+        long mailboxId, string sequenceSet, bool useUid, CancellationToken cancellationToken)
     {
         using var performance = PerformanceTelemetry.Stage("mailbox.snapshot");
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
@@ -349,7 +347,7 @@ public sealed partial class MailboxService(
     }
 
     private static async Task<IMailboxSelectionSnapshot> CreateSelectionAsync(
-        MailDbContext db, Guid mailboxId, string sequenceSet, bool useUid, CancellationToken cancellationToken)
+        MailDbContext db, long mailboxId, string sequenceSet, bool useUid, CancellationToken cancellationToken)
     {
         var baseQuery = db.MailboxMessages.AsNoTracking().Where(x => x.MailboxId == mailboxId);
         var maximumUid = await baseQuery.MaxAsync(x => (long?)x.Uid, cancellationToken) ?? 0;
@@ -390,7 +388,7 @@ public sealed partial class MailboxService(
                         .Select(x => new { x.Id, x.Uid })
                         .ToListAsync(cancellationToken);
                     if (page.Count == 0) break;
-                    var selected = new List<(Guid Id, long Sequence)>();
+                    var selected = new List<(long Id, long Sequence)>();
                     foreach (var item in page)
                     {
                         sequence++;
@@ -399,7 +397,7 @@ public sealed partial class MailboxService(
                     if (selected.Count > 0)
                     {
                         var ids = selected.Select(x => x.Id).ToArray();
-                        var details = await baseQuery.WhereGuidIn(x => x.Id, ids)
+                        var details = await baseQuery.WhereIdIn(x => x.Id, ids)
                             .Select(x => new MailboxItem(x.Id, 0, x.Uid, x.Flags, x.ModSeq,
                                 x.InternalDate, x.Message.Size, x.Message.ContentKey, x.MessageId))
                             .ToDictionaryAsync(x => x.Id, cancellationToken);
@@ -421,7 +419,7 @@ public sealed partial class MailboxService(
     }
 
     public async Task<IReadOnlyList<long>> SearchAsync(
-        Guid mailboxId,
+        long mailboxId,
         string criteria,
         bool useUid,
         CancellationToken cancellationToken)
@@ -465,12 +463,12 @@ public sealed partial class MailboxService(
 
         async Task ProcessBatchAsync()
         {
-            Dictionary<Guid, MessageSearchRecord> indexed = [];
+            Dictionary<long, MessageSearchRecord> indexed = [];
             if ((headerSearch || textSearch) && searchOptions?.Value.Enabled == true)
             {
                 await using var searchDb = await dbFactory.CreateDbContextAsync(cancellationToken);
                 var storedIds = batch.Select(x => x.MessageId).Distinct().ToArray();
-                var query = searchDb.MessageSearchRecords.AsNoTracking().WhereGuidIn(x => x.MessageId, storedIds);
+                var query = searchDb.MessageSearchRecords.AsNoTracking().WhereIdIn(x => x.MessageId, storedIds);
                 var rows = headerSearch
                     ? await query.Select(x => new MessageSearchRecord { MessageId = x.MessageId,
                         ParserVersion = x.ParserVersion, Status = x.Status, Complete = x.Complete,
@@ -565,7 +563,7 @@ public sealed partial class MailboxService(
             ? found : null;
     }
 
-    private static async Task<IReadOnlyList<long>> SearchFlagsAsync(MailDbContext db, Guid mailboxId, string flag, bool hasFlag,
+    private static async Task<IReadOnlyList<long>> SearchFlagsAsync(MailDbContext db, long mailboxId, string flag, bool hasFlag,
         bool useUid, CancellationToken cancellationToken)
     {
         var sqlite = db.Database.IsSqlite();
@@ -594,7 +592,7 @@ public sealed partial class MailboxService(
         return matches;
     }
 
-    private static async Task<IReadOnlyList<long>> SearchSqliteDatesAsync(MailDbContext db, Guid mailboxId,
+    private static async Task<IReadOnlyList<long>> SearchSqliteDatesAsync(MailDbContext db, long mailboxId,
         string dateOperator, DateTime date, bool useUid, CancellationToken cancellationToken)
     {
         // SQLite stores DateTimeOffset as UTC ticks. A two-day SQL window is deliberately wider than
@@ -654,27 +652,26 @@ public sealed partial class MailboxService(
     }
 
     public async Task StoreFlagsAsync(
-        Guid mailboxId,
+        long mailboxId,
         string sequenceSet,
         bool useUid,
         string operation,
         IReadOnlyCollection<string> flags,
         CancellationToken cancellationToken)
     {
-        var mailboxLock = LockFor(mailboxId);
-        await mailboxLock.WaitAsync(cancellationToken);
+        var mailboxLock = await MailboxLocks.AcquireAsync(mailboxId, cancellationToken);
         try
         {
-            await using var selection = await CreateFetchSnapshotAsync(mailboxId, sequenceSet, useUid, cancellationToken);
             await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
             await using var transaction = await MailboxWriteCoordinator.BeginForMailboxAsync(db, mailboxId, cancellationToken);
+            await using var selection = await CreateSelectionAsync(db, mailboxId, sequenceSet, useUid, cancellationToken);
             var mailbox = await db.Mailboxes.SingleAsync(x => x.Id == mailboxId, cancellationToken);
-            var batch = new List<Guid>(256);
+            var batch = new List<long>(256);
             async Task ApplyBatchAsync()
             {
                 var messages = await db.MailboxMessages
                     .Where(x => x.MailboxId == mailboxId)
-                    .WhereGuidIn(x => x.Id, batch)
+                    .WhereIdIn(x => x.Id, batch)
                     .OrderBy(x => x.Uid).ToListAsync(cancellationToken);
                 foreach (var message in messages)
                 {
@@ -701,13 +698,13 @@ public sealed partial class MailboxService(
         }
         finally
         {
-            mailboxLock.Release();
+            mailboxLock.Dispose();
         }
     }
 
     public async Task MarkSeenAsync(
-        Guid mailboxId,
-        IReadOnlyCollection<Guid> mailboxMessageIds,
+        long mailboxId,
+        IReadOnlyCollection<long> mailboxMessageIds,
         CancellationToken cancellationToken)
     {
         if (mailboxMessageIds.Count == 0)
@@ -718,24 +715,23 @@ public sealed partial class MailboxService(
         await StoreFlagsForIdsAsync(mailboxId, mailboxMessageIds, ["\\Seen"], cancellationToken);
     }
 
-    public async Task<IReadOnlyList<ExpungedMailboxItem>> ExpungeAsync(Guid mailboxId, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<ExpungedMailboxItem>> ExpungeAsync(long mailboxId, CancellationToken cancellationToken)
     {
-        var mailboxLock = LockFor(mailboxId);
-        await mailboxLock.WaitAsync(cancellationToken);
+        var mailboxLock = await MailboxLocks.AcquireAsync(mailboxId, cancellationToken);
         try
         {
             await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
-            await using var selection = await CreateFetchSnapshotAsync(mailboxId, "1:*", false, cancellationToken);
             await using var transaction = await MailboxWriteCoordinator.BeginForMailboxAsync(db, mailboxId, cancellationToken);
+            await using var selection = await CreateSelectionAsync(db, mailboxId, "1:*", false, cancellationToken);
             var expunged = new List<ExpungedMailboxItem>();
             var now = DateTimeOffset.UtcNow;
             var purgeAfter = now.AddDays(Math.Clamp(maintenance?.Value.SoftDeleteRetentionDays ?? 30, 1, 3650));
-            var batch = new List<Guid>(256);
+            var batch = new List<long>(256);
             async Task ApplyBatchAsync()
             {
                 var deletedMessages = await db.MailboxMessages
                     .Where(x => x.MailboxId == mailboxId)
-                    .WhereGuidIn(x => x.Id, batch)
+                    .WhereIdIn(x => x.Id, batch)
                     .Include(x => x.Message)
                     .Include(x => x.Mailbox).ThenInclude(x => x.Account).ThenInclude(x => x.Domain)
                     .ToListAsync(cancellationToken);
@@ -743,7 +739,7 @@ public sealed partial class MailboxService(
                     .Where(x => x.ResourceType == CleanupResourceType.MailboxMessage
                         && x.ResourceId.HasValue
                         && (x.Status == CleanupQueueStatus.Pending || x.Status == CleanupQueueStatus.Failed))
-                    .WhereGuidIn(x => x.ResourceId!.Value, batch)
+                    .WhereIdIn(x => x.ResourceId!.Value, batch)
                     .ToListAsync(cancellationToken);
                 var queuedByMessageId = queued.Where(x => x.ResourceId.HasValue)
                     .GroupBy(x => x.ResourceId!.Value)
@@ -776,7 +772,7 @@ public sealed partial class MailboxService(
                         releasedBytes += message.Message.Size;
                         db.QuotaLedger.Add(new QuotaLedgerEntry
                         {
-                            IdempotencyKey = $"mailbox-message:recycle:{queueId:N}",
+                            IdempotencyKey = $"mailbox-message:recycle:{queueId}",
                             AccountId = message.Mailbox.AccountId,
                             DomainId = message.Mailbox.Account.DomainId,
                             MailboxMessageId = message.Id,
@@ -808,24 +804,27 @@ public sealed partial class MailboxService(
         }
         finally
         {
-            mailboxLock.Release();
+            mailboxLock.Dispose();
         }
     }
 
     public async Task<CopyMoveResult> CopyAsync(
-        Guid mailboxId,
+        long mailboxId,
         string sequenceSet,
         bool useUid,
         string destination,
         bool move,
         CancellationToken cancellationToken)
     {
-        var mailboxLock = LockFor(mailboxId);
-        await mailboxLock.WaitAsync(cancellationToken);
+        var mailboxLock = await MailboxLocks.AcquireAsync(mailboxId, cancellationToken);
         try
         {
             await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
-            await using var transaction = await MailboxWriteCoordinator.BeginForMailboxAsync(db, mailboxId, cancellationToken);
+            var sourceAccountId = await db.Mailboxes.Where(x => x.Id == mailboxId).Select(x => x.AccountId).SingleAsync(cancellationToken);
+            var destinationName = MailboxNames.Normalize(destination);
+            var destinationId = await db.Mailboxes.Where(x => x.AccountId == sourceAccountId && x.Name == destinationName)
+                .Select(x => x.Id).SingleAsync(cancellationToken);
+            await using var transaction = await MailboxWriteCoordinator.BeginForMailboxesAsync(db, [mailboxId, destinationId], cancellationToken);
             var source = await db.Mailboxes.Include(x => x.Account).ThenInclude(x => x.Domain)
                 .SingleAsync(x => x.Id == mailboxId, cancellationToken);
             var target = await FindMailboxAsync(db, source.AccountId, MailboxNames.Normalize(destination), cancellationToken)
@@ -856,7 +855,7 @@ public sealed partial class MailboxService(
             {
                 var ids = batch.Select(x => x.Id).ToArray();
                 var messages = await db.MailboxMessages.Where(x => x.MailboxId == mailboxId)
-                    .WhereGuidIn(x => x.Id, ids).Include(x => x.Message).ToDictionaryAsync(x => x.Id, cancellationToken);
+                    .WhereIdIn(x => x.Id, ids).Include(x => x.Message).ToDictionaryAsync(x => x.Id, cancellationToken);
                 foreach (var selectedItem in batch)
                 {
                     if (!messages.TryGetValue(selectedItem.Id, out var message))
@@ -880,7 +879,7 @@ public sealed partial class MailboxService(
                 {
                     db.QuotaLedger.Add(new QuotaLedgerEntry
                     {
-                        IdempotencyKey = $"mailbox-message:add:{targetMessage.Id:N}",
+                        IdempotencyKey = $"mailbox-message:add:{targetMessage.Id}",
                         AccountId = source.AccountId,
                         DomainId = source.Account.DomainId,
                         MailboxMessageId = targetMessage.Id,
@@ -944,12 +943,12 @@ public sealed partial class MailboxService(
         }
         finally
         {
-            mailboxLock.Release();
+            mailboxLock.Dispose();
         }
     }
 
     public async Task<AppendResult> AppendAsync(
-        Guid accountId,
+        long accountId,
         string mailboxName,
         Stream content,
         IReadOnlyCollection<string> flags,
@@ -963,7 +962,7 @@ public sealed partial class MailboxService(
             internalDate,
             cancellationToken);
 
-    public async Task<Stream> OpenMessageAsync(Guid mailboxMessageId, CancellationToken cancellationToken)
+    public async Task<Stream> OpenMessageAsync(long mailboxMessageId, CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         var key = await db.MailboxMessages
@@ -973,45 +972,36 @@ public sealed partial class MailboxService(
         return await contentStore.OpenReadAsync(key, cancellationToken);
     }
 
+    // Callers must obtain the content key from an authorized mailbox selection.
+    public Task<Stream> OpenMessageContentAsync(string contentKey, CancellationToken cancellationToken) =>
+        contentStore.OpenReadAsync(contentKey, cancellationToken);
+
     private static async Task<MailboxSummary> SummarizeAsync(
         MailDbContext db,
         Mailbox mailbox,
         CancellationToken cancellationToken)
     {
-        var messages = db.MailboxMessages.Where(x => x.MailboxId == mailbox.Id);
-        var exists = await messages.LongCountAsync(cancellationToken);
-        var seenToken = " \\seen ";
-        var flagCollation = db.Database.IsSqlite() ? "BINARY" : "utf8mb4_bin";
-        var unseen = db.Database.IsRelational()
-            ? await messages.LongCountAsync(
-                x => !EF.Functions.Collate(" " + x.Flags.ToLower() + " ", flagCollation)
-                    .Contains(EF.Parameter(seenToken)), cancellationToken)
-            : await messages.LongCountAsync(
-                x => !(" " + x.Flags.ToLower() + " ").Contains(seenToken), cancellationToken);
-        return new MailboxSummary(mailbox.Id, mailbox.Name, exists, unseen, mailbox.UidValidity, mailbox.UidNext, mailbox.HighestModSeq);
+        cancellationToken.ThrowIfCancellationRequested();
+        await Task.CompletedTask;
+        return new MailboxSummary(mailbox.Id, mailbox.Name, mailbox.MessageCount, mailbox.UnseenCount,
+            mailbox.UidValidity, mailbox.UidNext, mailbox.HighestModSeq);
     }
 
-    private static async Task<Mailbox?> FindMailboxAsync(
-        MailDbContext db,
-        Guid accountId,
-        string normalizedName,
-        CancellationToken cancellationToken)
-    {
-        var mailboxes = await db.Mailboxes
-            .Where(x => x.AccountId == accountId)
-            .ToListAsync(cancellationToken);
-        return mailboxes.SingleOrDefault(x => MailboxNames.Equals(x.Name, normalizedName));
-    }
+    private static Task<Mailbox?> FindMailboxAsync(
+        MailDbContext db, long accountId, string normalizedName, CancellationToken cancellationToken) =>
+        db.Database.IsRelational()
+            ? db.Mailboxes.SingleOrDefaultAsync(x => x.AccountId == accountId && x.Name == normalizedName, cancellationToken)
+            : db.Mailboxes.SingleOrDefaultAsync(x => x.AccountId == accountId && x.Name.Equals(normalizedName, StringComparison.OrdinalIgnoreCase), cancellationToken);
 
     internal static Task EnsureUidNextAtLeastAsync(
         MailDbContext db,
         Mailbox mailbox,
         CancellationToken cancellationToken) =>
-        MailboxWriteAccounting.EnsureUidNextAsync(db, mailbox, cancellationToken);
+        Task.CompletedTask;
 
     private static async Task<bool> HasChildMailboxAsync(
         MailDbContext db,
-        Guid accountId,
+        long accountId,
         string mailboxName,
         CancellationToken cancellationToken)
     {
@@ -1023,25 +1013,25 @@ public sealed partial class MailboxService(
             .Any(x => x.StartsWith(prefix, StringComparison.OrdinalIgnoreCase));
     }
 
-    private static string SubscriptionAccountPrefix(Guid accountId) => $"{SubscriptionPrefix}{accountId:N}.";
+    private static string SubscriptionAccountPrefix(long accountId) => $"{SubscriptionPrefix}{accountId}.";
 
-    private static string DefaultSubscriptionSeedAccountPrefix(Guid accountId) =>
-        $"{DefaultSubscriptionSeedPrefix}{accountId:N}.";
+    private static string DefaultSubscriptionSeedAccountPrefix(long accountId) =>
+        $"{DefaultSubscriptionSeedPrefix}{accountId}.";
 
-    internal static string SubscriptionKey(Guid accountId, string mailboxName) =>
+    internal static string SubscriptionKey(long accountId, string mailboxName) =>
         SubscriptionAccountPrefix(accountId) + Convert.ToHexStringLower(Encoding.UTF8.GetBytes(MailboxNames.Normalize(mailboxName)));
 
-    internal static string DefaultSubscriptionSeedKey(Guid accountId, string mailboxName) =>
+    internal static string DefaultSubscriptionSeedKey(long accountId, string mailboxName) =>
         DefaultSubscriptionSeedAccountPrefix(accountId) + Convert.ToHexStringLower(Encoding.UTF8.GetBytes(MailboxNames.Normalize(mailboxName)));
 
-    internal static string SuppressedDefaultFolderAccountPrefix(Guid accountId) =>
-        $"{SuppressedDefaultFolderPrefix}{accountId:N}.";
+    internal static string SuppressedDefaultFolderAccountPrefix(long accountId) =>
+        $"{SuppressedDefaultFolderPrefix}{accountId}.";
 
-    internal static string SuppressedDefaultFolderKey(Guid accountId, string mailboxName) =>
+    internal static string SuppressedDefaultFolderKey(long accountId, string mailboxName) =>
         SuppressedDefaultFolderAccountPrefix(accountId) + Convert.ToHexStringLower(Encoding.UTF8.GetBytes(MailboxNames.Normalize(mailboxName)));
 
     private async Task<IReadOnlyList<MailboxSummary>> OrderForAccountAsync(
-        Guid accountId,
+        long accountId,
         IEnumerable<MailboxSummary> mailboxes,
         CancellationToken cancellationToken)
     {
@@ -1059,7 +1049,7 @@ public sealed partial class MailboxService(
 
     private static async Task RenameSubscriptionsAsync(
         MailDbContext db,
-        Guid accountId,
+        long accountId,
         string oldName,
         string newName,
         bool renameChildren,
@@ -1137,13 +1127,12 @@ public sealed partial class MailboxService(
     private static bool HasFlag(string flags, string flag) => ParseFlags(flags).Contains(flag);
 
     private async Task StoreFlagsForIdsAsync(
-        Guid mailboxId,
-        IReadOnlyCollection<Guid> mailboxMessageIds,
+        long mailboxId,
+        IReadOnlyCollection<long> mailboxMessageIds,
         IReadOnlyCollection<string> flags,
         CancellationToken cancellationToken)
     {
-        var mailboxLock = LockFor(mailboxId);
-        await mailboxLock.WaitAsync(cancellationToken);
+        var mailboxLock = await MailboxLocks.AcquireAsync(mailboxId, cancellationToken);
         try
         {
             await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
@@ -1171,7 +1160,7 @@ public sealed partial class MailboxService(
         }
         finally
         {
-            mailboxLock.Release();
+            mailboxLock.Dispose();
         }
     }
 

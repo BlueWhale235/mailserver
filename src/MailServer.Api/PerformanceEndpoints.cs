@@ -13,7 +13,7 @@ public static class PerformanceEndpoints
         var group = api.MapGroup("/operations/performance");
         group.MapGet("/operations", async (IDbContextFactory<MailDbContext> factory,
             DateTimeOffset? from, DateTimeOffset? to, string? module, string? operation, string? status,
-            string? traceId, Guid? messageId, Guid? deliveryJobId, double? minimumMilliseconds,
+            string? traceId, long? messageId, long? deliveryJobId, double? minimumMilliseconds,
             bool? slowOnly, string? cursor, CancellationToken token) =>
         {
             using var suppression = PerformanceTelemetry.Suppress();
@@ -52,7 +52,7 @@ public static class PerformanceEndpoints
             return Results.Ok(new { items, nextCursor });
         }).RequirePermission(PermissionCodes.PerformanceRead);
 
-        group.MapGet("/operations/{id:guid}", async (Guid id, IDbContextFactory<MailDbContext> factory, CancellationToken token) =>
+        group.MapGet("/operations/{id:long}", async (long id, IDbContextFactory<MailDbContext> factory, CancellationToken token) =>
         {
             using var suppression = PerformanceTelemetry.Suppress();
             await using var db = await factory.CreateDbContextAsync(token);
@@ -157,6 +157,6 @@ public static class PerformanceEndpoints
             Resource = "performance", RequestId = http.TraceIdentifier, Detail = JsonSerializer.Serialize(settings) });
         await db.SaveChangesAsync(token);
     }
-    private sealed record Cursor(DateTimeOffset At, Guid Id);
+    private sealed record Cursor(DateTimeOffset At, long Id);
     public sealed record DiagnosticRequest(bool Enabled);
 }

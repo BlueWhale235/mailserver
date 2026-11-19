@@ -17,7 +17,7 @@ public sealed class DatabaseSaveOptimizationTests
         await connection.OpenAsync();
         using var collector = new PerformanceCollector { Settings = new() { SampleRate = 1 } };
         var options = new DbContextOptionsBuilder<MailDbContext>().UseSqlite(connection).Options;
-        await using var db = new MailDbContext(options);
+        await using var db = new MailDbContext(options, TestLocalLogs.Create());
         await db.Database.EnsureCreatedAsync();
         var domain = new MailDomain { Name = "example.test" };
         var account = new MailAccount { Domain = domain, LocalPart = "alice", PasswordHash = "unused" };
@@ -67,7 +67,7 @@ public sealed class DatabaseSaveOptimizationTests
         await using var connection = new SqliteConnection("Data Source=:memory:");
         await connection.OpenAsync();
         var options = new DbContextOptionsBuilder<MailDbContext>().UseSqlite(connection).Options;
-        await using var db = new MailDbContext(options);
+        await using var db = new MailDbContext(options, TestLocalLogs.Create());
         await db.Database.EnsureCreatedAsync();
         db.Messages.Add(new StoredMessage { ContentKey = null!, EnvelopeFrom = "sender@outside.test" });
         await Assert.ThrowsAsync<DbUpdateException>(() => db.SaveChangesAsync());

@@ -37,7 +37,7 @@ public sealed class SentCopyService(
         StoredMessage message,
         MimeMessage mimeMessage,
         string targetMailboxName,
-        Guid? ruleId)
+        long? ruleId)
     {
         var now = clock.UtcNow;
         var job = new SentCopyJob
@@ -55,7 +55,7 @@ public sealed class SentCopyService(
     }
 
     public async Task<AppendResult> AppendAsync(
-        Guid accountId,
+        long accountId,
         string mailboxName,
         Stream content,
         IReadOnlyCollection<string> flags,
@@ -147,7 +147,7 @@ public sealed class SentCopyService(
             MailboxWriteAccounting.ApplyQuotaDelta(mailbox.Account, quotaDelta);
             db.QuotaLedger.Add(new QuotaLedgerEntry
             {
-                IdempotencyKey = $"mailbox-message:add:{item.Id:N}",
+                IdempotencyKey = $"mailbox-message:add:{item.Id}",
                 AccountId = mailbox.AccountId,
                 DomainId = mailbox.Account.DomainId,
                 MailboxMessageId = item.Id,
@@ -215,7 +215,7 @@ public sealed class SentCopyService(
         return processed;
     }
 
-    private async Task<bool> ProcessOneAsync(Guid jobId, CancellationToken cancellationToken)
+    private async Task<bool> ProcessOneAsync(long jobId, CancellationToken cancellationToken)
     {
         var now = clock.UtcNow;
         await using var claimDb = await dbFactory.CreateDbContextAsync(cancellationToken);
@@ -228,7 +228,7 @@ public sealed class SentCopyService(
 
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         var writeAccountId = await db.SentCopyJobs.AsNoTracking().Where(x => x.Id == jobId)
-            .Select(x => (Guid?)x.AccountId).SingleOrDefaultAsync(cancellationToken);
+            .Select(x => (long?)x.AccountId).SingleOrDefaultAsync(cancellationToken);
         if (writeAccountId is null) return false;
         await using var transaction = await MailboxWriteCoordinator.BeginForAccountAsync(db, writeAccountId.Value, cancellationToken);
         var job = await db.SentCopyJobs.Include(x => x.Message).Include(x => x.Account).ThenInclude(x => x.Domain)
@@ -286,7 +286,7 @@ public sealed class SentCopyService(
             MailboxWriteAccounting.ApplyQuotaDelta(job.Account, job.Message.Size);
             db.QuotaLedger.Add(new QuotaLedgerEntry
             {
-                IdempotencyKey = $"mailbox-message:add:{copy.Id:N}",
+                IdempotencyKey = $"mailbox-message:add:{copy.Id}",
                 AccountId = job.AccountId,
                 DomainId = job.Account.DomainId,
                 MailboxMessageId = copy.Id,
@@ -314,7 +314,7 @@ public sealed class SentCopyService(
 
     private static MailboxMessage CreateMailboxMessage(
         Mailbox mailbox,
-        Guid messageId,
+        long messageId,
         string flags,
         DateTimeOffset internalDate) => new()
     {

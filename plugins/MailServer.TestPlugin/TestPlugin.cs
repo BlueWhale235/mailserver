@@ -126,7 +126,7 @@ public sealed class TestMiddleware : IMessageAcceptanceMiddleware
             $"To: {NotificationRecipient}\r\n" +
             $"Subject: {EncodeSubject($"检测到来自 {originalSender} 的邮件")}\r\n" +
             $"Date: {now:R}\r\n" +
-            $"Message-ID: <{Guid.NewGuid():N}@test-plugin.local>\r\n" +
+            $"Message-ID: <{MailServer.Domain.SnowflakeIds.NewId()}@test-plugin.local>\r\n" +
             "MIME-Version: 1.0\r\n" +
             "Content-Type: text/plain; charset=utf-8\r\n" +
             "Content-Transfer-Encoding: 8bit\r\n" +

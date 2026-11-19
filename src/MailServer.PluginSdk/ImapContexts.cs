@@ -11,7 +11,7 @@ public sealed record ImapSessionContext(string RemoteAddress, string? Authentica
 public sealed record ImapCommandContext(
     string Command,
     string Arguments,
-    Guid? AccountId,
+    long? AccountId,
     string? UserName,
     string? MailboxName,
     bool ReadOnly,

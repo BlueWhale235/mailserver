@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Globalization;
 using System.Net;
 using System.Net.Security;
@@ -795,7 +796,7 @@ public sealed partial class ImapServerService(
     private async Task CompleteAuthenticationAsync(
         IServiceProvider serviceProvider,
         ImapSessionState state,
-        Guid accountId,
+        long accountId,
         string address,
         string remote,
         bool isTls,
@@ -1324,14 +1325,43 @@ public sealed partial class ImapServerService(
             if (request.Rfc822Size) parts.Add(ImapFetchResponsePart.Atom($"RFC822.SIZE {item.Size}"));
             if (request.InternalDate) parts.Add(ImapFetchResponsePart.Atom($"INTERNALDATE \"{item.InternalDate:dd-MMM-yyyy HH:mm:ss zzz}\""));
 
-            byte[]? raw = null;
-            MimeMessage? message = null;
-            Stream? body = null;
-            if (request.RequiresMessage)
+            MessageFetchMetadata? metadata = null;
+            using var metadataScope = scopeFactory.CreateScope();
+            var metadataCache = metadataScope.ServiceProvider.GetService<MessageFetchMetadataCache>();
+            if (metadataCache is not null && (request.Envelope || request.Body || request.BodyStructure))
             {
                 try
                 {
-                    body = await WithMailboxServiceAsync(service => service.OpenMessageAsync(item.Id, cancellationToken));
+                    metadata = await metadataCache.GetAsync(item.MessageId, item.ContentKey, async token =>
+                    {
+                        await using var input = await WithMailboxServiceAsync(service => service is MailboxService actual
+                            ? actual.OpenMessageContentAsync(item.ContentKey, token) : service.OpenMessageAsync(item.Id, token));
+                        using var parsed = await MimeMessage.LoadAsync(input, token);
+                        input.Position = 0;
+                        var split = await FindHeaderBodySplitAsync(input, token);
+                        return new MessageFetchMetadata
+                        {
+                            Envelope = BuildEnvelope(parsed), Body = BuildBodyStructure(parsed, null, extended: false),
+                            BodyStructure = BuildBodyStructure(parsed, null, extended: true),
+                            HeaderEnd = split.HeaderEnd, BodyStart = split.BodyStart
+                        };
+                    }, cancellationToken);
+                }
+                catch (Exception error) when (error is IOException or FormatException or InvalidOperationException)
+                {
+                    logger.LogDebug(error, "Unable to cache IMAP MIME metadata for {MessageId}.", item.MessageId);
+                }
+            }
+            byte[]? raw = null;
+            MimeMessage? message = null;
+            Stream? body = null;
+            if (request.RequiresMessage && (metadata is null || request.Rfc822 || request.BodySections.Count > 0))
+            {
+                try
+                {
+                    body = await WithMailboxServiceAsync(service => service is MailboxService mailboxService
+                        ? mailboxService.OpenMessageContentAsync(item.ContentKey, cancellationToken)
+                        : service.OpenMessageAsync(item.Id, cancellationToken));
                     if (requiresMime)
                     {
                         try
@@ -1356,19 +1386,17 @@ public sealed partial class ImapServerService(
                 }
             }
 
-            if (request.Envelope && message is not null)
-            {
-                parts.Add(ImapFetchResponsePart.Atom($"ENVELOPE {BuildEnvelope(message)}"));
-            }
+            if (request.Envelope && (metadata is not null || message is not null))
+                parts.Add(ImapFetchResponsePart.Atom($"ENVELOPE {metadata?.Envelope ?? BuildEnvelope(message!)}"));
 
             if (request.Body)
             {
-                parts.Add(ImapFetchResponsePart.Atom($"BODY {BuildBodyStructure(message, raw, extended: false)}"));
+                parts.Add(ImapFetchResponsePart.Atom($"BODY {metadata?.Body ?? BuildBodyStructure(message, raw, extended: false)}"));
             }
 
             if (request.BodyStructure)
             {
-                parts.Add(ImapFetchResponsePart.Atom($"BODYSTRUCTURE {BuildBodyStructure(message, raw, extended: true)}"));
+                parts.Add(ImapFetchResponsePart.Atom($"BODYSTRUCTURE {metadata?.BodyStructure ?? BuildBodyStructure(message, raw, extended: true)}"));
             }
 
             if (request.Rfc822 && body is not null)
@@ -1383,7 +1411,8 @@ public sealed partial class ImapServerService(
                 (long HeaderEnd, long BodyStart) split = default;
                 if (request.BodySections.Any(x => x.Section.Equals("HEADER", StringComparison.OrdinalIgnoreCase)
                     || x.Section.Equals("TEXT", StringComparison.OrdinalIgnoreCase)))
-                    split = await FindHeaderBodySplitAsync(body, cancellationToken);
+                    split = metadata is null ? await FindHeaderBodySplitAsync(body, cancellationToken)
+                        : (metadata.HeaderEnd, metadata.BodyStart);
                 foreach (var section in request.BodySections)
                 {
                     if (section.Section.StartsWith("HEADER.FIELDS", StringComparison.OrdinalIgnoreCase))
@@ -1426,13 +1455,14 @@ public sealed partial class ImapServerService(
             }
             finally
             {
+                message?.Dispose();
                 if (body is not null) await body.DisposeAsync();
             }
         }
 
         if (request.MarkSeen)
         {
-            var unseenIds = new List<Guid>(256);
+            var unseenIds = new List<long>(256);
             await foreach (var item in items.ReadAsync(cancellationToken))
             {
                 if (ParseFlags(item.Flags).Contains("\\Seen")) continue;
@@ -1458,6 +1488,7 @@ public sealed partial class ImapServerService(
         CancellationToken cancellationToken)
     {
         using var performance = PerformanceTelemetry.Stage("imap.response", "wait");
+        using var response = connection.BufferResponse();
         await connection.WriteAsync($"* {sequence} FETCH (", cancellationToken);
         for (var index = 0; index < parts.Count; index++)
         {
@@ -1482,7 +1513,9 @@ public sealed partial class ImapServerService(
                 {
                     part.Source.Position = part.Offset;
                     var remaining = part.StreamBytes;
-                    var buffer = new byte[64 * 1024];
+                    var buffer = ArrayPool<byte>.Shared.Rent(64 * 1024);
+                    try
+                    {
                     while (remaining > 0)
                     {
                         var read = await part.Source.ReadAsync(buffer.AsMemory(0, (int)Math.Min(buffer.Length, remaining)), cancellationToken);
@@ -1490,6 +1523,8 @@ public sealed partial class ImapServerService(
                         await connection.WriteBytesAsync(buffer.AsMemory(0, read), cancellationToken);
                         remaining -= read;
                     }
+                    }
+                    finally { ArrayPool<byte>.Shared.Return(buffer); }
                     if (part.Length > part.StreamBytes)
                     {
                         var suffix = new byte[] { 13, 10 };
@@ -1506,6 +1541,7 @@ public sealed partial class ImapServerService(
         }
 
         await connection.WriteLineAsync(")", cancellationToken);
+        await connection.FlushResponseAsync(cancellationToken);
     }
 
     private static string BuildEnvelope(MimeMessage message)
@@ -2469,9 +2505,9 @@ internal sealed class ImapAppendArgumentReader(string input)
 
 internal sealed class ImapSessionState
 {
-    public Guid? AccountId { get; set; }
+    public long? AccountId { get; set; }
     public string? UserName { get; set; }
-    public Guid? MailboxId { get; set; }
+    public long? MailboxId { get; set; }
     public string? MailboxName { get; set; }
     public bool ReadOnly { get; set; }
     public bool TlsUpgradeRequested { get; set; }
@@ -2570,6 +2606,27 @@ internal sealed class ImapConnection(Stream stream, TimeSpan timeout, long maxim
 {
     private Stream _stream = stream;
     private readonly BufferedProtocolReader _reader = new(stream);
+    private readonly MemoryStream _output = new(16 * 1024);
+    private bool _bufferResponse;
+    public IDisposable BufferResponse()
+    {
+        if (_bufferResponse) throw new InvalidOperationException("A response is already buffered.");
+        _bufferResponse = true;
+        return new ResponseScope(this);
+    }
+    private sealed class ResponseScope(ImapConnection owner) : IDisposable
+    {
+        public void Dispose() { owner._bufferResponse = false; if (owner._output.CanWrite) owner._output.SetLength(0); }
+    }
+    public async Task FlushResponseAsync(CancellationToken token)
+    {
+        if (_output.Length > 0)
+        {
+            await _stream.WriteAsync(_output.GetBuffer().AsMemory(0, (int)_output.Length), token);
+            _output.SetLength(0);
+        }
+        await _stream.FlushAsync(token);
+    }
 
     public Stream Detach()
     {
@@ -2593,7 +2650,18 @@ internal sealed class ImapConnection(Stream stream, TimeSpan timeout, long maxim
         using var performance = PerformanceTelemetry.Stage("imap.literal-upload", "wait");
         if (length < 0 || length > maximumLiteralBytes)
             throw new InvalidDataException($"Literal exceeds the {maximumLiteralBytes} byte limit.");
-        var path = Path.Combine(Path.GetTempPath(), $"mailserver-imap-{Guid.NewGuid():N}.tmp");
+        if (length <= 64 * 1024)
+        {
+            var memory = new PooledMemoryStream((int)length);
+            try
+            {
+                await _reader.CopyExactlyAsync(memory, length, timeout, cancellationToken);
+                memory.Position = 0;
+                return memory;
+            }
+            catch { await memory.DisposeAsync(); throw; }
+        }
+        var path = Path.Combine(Path.GetTempPath(), $"mailserver-imap-{System.Guid.NewGuid()}.tmp");
         try
         {
             await using (var output = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None, 64 * 1024, FileOptions.Asynchronous))
@@ -2624,12 +2692,22 @@ internal sealed class ImapConnection(Stream stream, TimeSpan timeout, long maxim
     public async Task WriteAsync(string value, CancellationToken cancellationToken)
     {
         var bytes = Encoding.UTF8.GetBytes(value);
-        await _stream.WriteAsync(bytes, cancellationToken);
-        await _stream.FlushAsync(cancellationToken);
+        await WriteBytesAsync(bytes, cancellationToken);
     }
 
     public async Task WriteBytesAsync(ReadOnlyMemory<byte> bytes, CancellationToken cancellationToken)
     {
+        if (_bufferResponse)
+        {
+            if (_output.Length + bytes.Length > 16 * 1024)
+            {
+                await _stream.WriteAsync(_output.GetBuffer().AsMemory(0, (int)_output.Length), cancellationToken);
+                _output.SetLength(0);
+            }
+            if (bytes.Length <= 16 * 1024) await _output.WriteAsync(bytes, cancellationToken);
+            else await _stream.WriteAsync(bytes, cancellationToken);
+            return;
+        }
         await _stream.WriteAsync(bytes, cancellationToken);
         await _stream.FlushAsync(cancellationToken);
     }
@@ -2643,6 +2721,7 @@ internal sealed class ImapConnection(Stream stream, TimeSpan timeout, long maxim
     public ValueTask DisposeAsync()
     {
         _reader.Dispose();
+        _output.Dispose();
         return _stream.DisposeAsync();
     }
 }

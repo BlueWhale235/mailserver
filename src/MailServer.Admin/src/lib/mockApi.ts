@@ -503,6 +503,7 @@ const previewSettings: Record<string, Record<string, unknown>> = {
     imap: { perMinute: 60, burst: 20, maximumConcurrent: 20 },
     maximumTrackedSources: 4096, tlsHandshakeSeconds: 10, preAuthenticationSeconds: 120,
   },
+  '/settings/local-logs': { machine: '本机预览', path: 'data/logs.db', retentionDays: 30, failedWrites: 0, lastError: null },
   '/settings/delivery': { batchSize: 20, leaseSeconds: 120, maximumAttempts: 5, pollIntervalSeconds: 5 },
   '/settings/smtp': { commandTimeoutSeconds: 300 },
   '/settings/relay': { host: '', port: 18443, pairingHost: '', pairingPort: 18444,
@@ -1495,6 +1496,10 @@ export async function mockApi<T>(path: string, init: RequestInit = {}): Promise<
           cacheBytes: profile.cacheBytes, entryBytes: profile.entryBytes, deliveryConcurrency: profile.deliveryConcurrency,
           smtpConnections: profile.smtpConnections, imapConnections: profile.imapConnections,
           versionPollSeconds: 3, absoluteRefreshSeconds: 60, maximumConcurrentLoads: 2, ruleFallbackBatchSize: 64 } }
+      } else if (url.pathname === '/settings/local-logs') {
+        const days = Number(input.retentionDays)
+        if (!Number.isInteger(days) || days < 1 || days > 3650) throw new Error('日志保留天数必须为 1～3650 天。')
+        previewSettings[url.pathname] = { ...previewSettings[url.pathname], retentionDays: days }
       } else if (url.pathname === '/settings/delivery') {
         const batchSize = Number(input.batchSize)
         const leaseSeconds = Number(input.leaseSeconds)

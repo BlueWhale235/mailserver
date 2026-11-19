@@ -138,7 +138,8 @@ public sealed record ResourceUsage(string? ProfileId, long CacheBudgetBytes, int
     int SmtpLimit, int ImapLimit, int ActiveDeliveries, int ActiveSmtp, int ActiveImap, bool ApplyFailed,
     string? ConfigurationId = null, string? ProtectionConfigurationId = null, int ProtectedSources = 0,
     IReadOnlyDictionary<string, string>? ServiceStates = null,
-    int SmtpMessageLimit = 0, int ActiveSmtpMessages = 0);
+    int SmtpMessageLimit = 0, int ActiveSmtpMessages = 0,
+    CacheBudgetAllocation? CacheAllocation = null);
 public sealed record ResourceProcessView(string ProcessId, string InstanceName, string[] Roles,
     DateTimeOffset LastSeenAt, long EstimatedCacheBytes, ResourceUsage? Usage, string State, string? Message);
 public sealed record ResourceStatusView(long TotalCacheBudgetBytes, IReadOnlyList<ResourceProcessView> Processes,
@@ -146,10 +147,11 @@ public sealed record ResourceStatusView(long TotalCacheBudgetBytes, IReadOnlyLis
 
 public sealed class ResourceRuntime(string role, IConfiguration configuration)
 {
+    public NodeOptions Node { get; } = NodeOptions.Read(configuration);
+    public ResourceCacheBudget CacheBudgets { get; } = new(role, configuration);
     private readonly object _sync = new();
     private string? _profileId;
     private string? _configurationId;
-    private long _cacheBudget;
     private bool _applyFailed;
     private readonly Dictionary<string, string> _serviceStates = new(StringComparer.OrdinalIgnoreCase);
     public AdaptiveResourceOptions AdaptiveOptions { get; } = AdaptiveResourceOptions.Read(configuration);
@@ -170,10 +172,11 @@ public sealed class ResourceRuntime(string role, IConfiguration configuration)
     public AdjustableConcurrencyLimit LargeMime { get; } = new(1);
     public ResourceUsage Snapshot()
     {
-        lock (_sync) return new(_profileId, _cacheBudget, Delivery.Limit, Smtp.Limit, Imap.Limit,
+        lock (_sync) return new(_profileId, CacheBudgets.Allocation.TotalBytes, Delivery.Limit, Smtp.Limit, Imap.Limit,
             Delivery.Active, Smtp.Active, Imap.Active, _applyFailed, _configurationId,
             ServiceStates: new Dictionary<string, string>(_serviceStates),
-            SmtpMessageLimit: SmtpMessages.Limit, ActiveSmtpMessages: SmtpMessages.Active);
+            SmtpMessageLimit: SmtpMessages.Limit, ActiveSmtpMessages: SmtpMessages.Active,
+            CacheAllocation: CacheBudgets.Allocation);
     }
     public void SetServiceState(string role, string state)
     {
@@ -187,13 +190,27 @@ public sealed class ResourceRuntime(string role, IConfiguration configuration)
     {
         lock (_sync)
         {
+            var requestedConfigurationId = settings.ConfigurationId;
+            if (Node.Enabled)
+            {
+                var profile = Node.ResourceProfile ?? settings.ProfileId ?? "1gb";
+                var selected = Node.ResourceProfile is not null ? ResourceProfiles.Get(profile).Values
+                    : settings.Values ?? ResourceProfiles.Get(profile).Values;
+                var localBytes = Node.CacheBytes ?? selected.CacheBytes;
+                selected = selected with { CacheBytes = localBytes, EntryBytes = Math.Min(selected.EntryBytes, localBytes),
+                    DeliveryConcurrency = Node.DeliveryConcurrency ?? selected.DeliveryConcurrency,
+                    SmtpConnections = Node.SmtpConnections ?? selected.SmtpConnections,
+                    ImapConnections = Node.ImapConnections ?? selected.ImapConnections };
+                settings = new(profile, ResourceProfiles.All, selected);
+            }
             if (settings.Values is { } values)
             {
                 values.Validate();
                 if (AdaptiveOptions.Enabled)
                 {
                     HeavyBudget.Configure(true);
-                    cache.Reconfigure(32L * 1024 * 1024, Math.Min(values.EntryBytes, 32L * 1024 * 1024),
+                    var adaptiveBudget = CacheBudgets.Resize(Node.Enabled ? values.CacheBytes : 32L * 1024 * 1024, cache.Options.Enabled);
+                    cache.Reconfigure(adaptiveBudget.ConfigurationBytes, Math.Min(values.EntryBytes, adaptiveBudget.ConfigurationBytes),
                         values.VersionPollSeconds, values.AbsoluteRefreshSeconds, values.MaximumConcurrentLoads, values.RuleFallbackBatchSize);
                     Smtp.Resize(128);
                     if (!_experimentInitialized)
@@ -201,13 +218,14 @@ public sealed class ResourceRuntime(string role, IConfiguration configuration)
                         ResizeExperiment(AdaptiveOptions.InitialInbound, AdaptiveOptions.InitialOutbound, AdaptiveOptions.InitialHeavy);
                         _experimentInitialized = true;
                     }
-                    _cacheBudget = UsesCache && cache.Options.Enabled ? cache.Options.SizeLimitBytes : 0;
-                    _profileId = settings.ProfileId; _configurationId = settings.ConfigurationId; _applyFailed = false;
+                    _profileId = settings.ProfileId; _configurationId = requestedConfigurationId; _applyFailed = false;
                     return;
                 }
                 var budget = Role switch { "all" => values.CacheBytes, "smtp" => values.CacheBytes / 2,
                     "imap" or "worker" => values.CacheBytes / 4, _ => 0 };
-                cache.Reconfigure(budget, Math.Min(values.EntryBytes, budget), values.VersionPollSeconds,
+                if (Node.Enabled) budget = values.CacheBytes;
+                var allocation = CacheBudgets.Resize(budget, cache.Options.Enabled);
+                cache.Reconfigure(allocation.ConfigurationBytes, Math.Min(values.EntryBytes, allocation.ConfigurationBytes), values.VersionPollSeconds,
                     values.AbsoluteRefreshSeconds, values.MaximumConcurrentLoads, values.RuleFallbackBatchSize);
                 var availableMemory = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
                 var connectionMemoryBound = (int)Math.Clamp(availableMemory / (512L * 1024), 8, int.MaxValue);
@@ -222,16 +240,17 @@ public sealed class ResourceRuntime(string role, IConfiguration configuration)
                 LargeMime.Resize(Math.Clamp(configuration.GetValue("Resources:MaximumHeavyOperations",
                     settings.ProfileId is "512mb" or "1gb" ? 1 : 2), 1, 8));
             }
-            _cacheBudget = UsesCache && cache.Options.Enabled ? cache.Options.SizeLimitBytes : 0;
             _profileId = settings.ProfileId;
-            _configurationId = settings.ConfigurationId;
+            _configurationId = requestedConfigurationId;
             _applyFailed = false;
         }
     }
 }
 
 public sealed class ResourceSettingsService(IDbContextFactory<MailDbContext> factory,
-    ConfigurationSnapshotCache cache, ResourceRuntime? runtime = null)
+    ConfigurationSnapshotCache cache, ResourceRuntime? runtime = null,
+    MessageFetchMetadataCache? fetchCache = null, PerformanceCollector? diagnostics = null,
+    NodeStatusService? nodes = null)
 {
     public const string Key = "resources:profile";
     public async Task<ResourceSettingsView> ReadAsync(CancellationToken token)
@@ -284,6 +303,26 @@ public sealed class ResourceSettingsService(IDbContextFactory<MailDbContext> fac
     public async Task<ResourceStatusView> StatusAsync(CancellationToken token)
     {
         var desired = await ReadAsync(token);
+        if (nodes?.Enabled == true)
+        {
+            var statuses = await nodes.ListAsync(token);
+            var processes = statuses.Select(x =>
+            {
+                var usage = x.Runtime?.Usage;
+                var state = x.State;
+                if (state == "online")
+                {
+                    var serviceRoles = x.Roles.Where(r => r is "smtp" or "imap" or "worker").ToArray();
+                    state = serviceRoles.Any(r => usage?.ServiceStates?.GetValueOrDefault(r) is "stopped" or "error") ? "failed"
+                        : usage?.ConfigurationId != desired.ConfigurationId || serviceRoles.Any(r => usage?.ServiceStates?.ContainsKey(r) != true)
+                            ? "applying" : "applied";
+                }
+                return new ResourceProcessView(x.InstanceId, x.NodeId, x.Roles, x.LastSeenAt,
+                    x.EstimatedCacheBytes, usage, state, null);
+            }).ToArray();
+            return new(processes.Where(x => x.State != "offline").Sum(x => x.Usage?.CacheBudgetBytes ?? 0), processes,
+                desired.ProfileId, desired.Values, processes.Where(x => x.State != "offline").Sum(x => x.EstimatedCacheBytes));
+        }
         if (runtime is null) return new(0, [], desired.ProfileId, desired.Values, 0);
         var usage = runtime.Snapshot();
         var roles = runtime.Role == "all" ? new[] { "api", "smtp", "imap", "worker" } : new[] { runtime.Role };
@@ -294,10 +333,11 @@ public sealed class ResourceSettingsService(IDbContextFactory<MailDbContext> fac
         if (state == "applied" && serviceStarting) state = "applying";
         var serviceIssue = roles.Any(role => usage.ServiceStates?.GetValueOrDefault(role) is "stopped" or "error");
         if (state == "applied" && serviceIssue) state = "failed";
+        var estimatedBytes = cache.EstimatedBytes + (fetchCache?.EstimatedBytes ?? 0) + (diagnostics?.EstimatedBufferBytes ?? 0);
         var process = new ResourceProcessView(
             $"{Environment.MachineName}:{Environment.ProcessId}", Environment.MachineName, roles,
-            DateTimeOffset.UtcNow, cache.EstimatedBytes, usage, state,
+            DateTimeOffset.UtcNow, estimatedBytes, usage, state,
             state == "failed" ? "服务未正常监听或工作，或暂时无法应用设置，请查看服务日志。" : null);
-        return new(usage.CacheBudgetBytes, [process], desired.ProfileId, desired.Values, cache.EstimatedBytes);
+        return new(usage.CacheBudgetBytes, [process], desired.ProfileId, desired.Values, estimatedBytes);
     }
 }

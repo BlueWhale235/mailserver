@@ -7,7 +7,9 @@
     <ProjectReference Include="../MailServer.PluginSdk/MailServer.PluginSdk.csproj" />
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <PackageReference Include="DnsClient" />
+    <PackageReference Include="AWSSDK.S3" />
     <PackageReference Include="MailKit" />
+    <PackageReference Include="System.Security.Cryptography.Pkcs" />
     <PackageReference Include="MessagePack" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Design">
       <PrivateAssets>all</PrivateAssets>

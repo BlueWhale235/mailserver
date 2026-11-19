@@ -844,7 +844,7 @@ public sealed class SmtpServerService(
                                             remote,
                                             state.AuthenticatedUser),
                                         serverCancellationToken);
-                                await connection.ReplyAsync($"250 2.0.0 Queued as {accepted.MessageId:N}", serverCancellationToken);
+                                await connection.ReplyAsync($"250 2.0.0 Queued as {accepted.MessageId}", serverCancellationToken);
                             }
 
                             state.ResetTransaction();
@@ -1447,10 +1447,7 @@ public sealed class SmtpServerService(
         }
 
         lines.Add("250 HELP");
-        foreach (var line in lines)
-        {
-            await connection.ReplyAsync(line, cancellationToken);
-        }
+        await connection.ReplyAsync(string.Join("\r\n", lines), cancellationToken);
     }
 
     private async Task<Stream> UpgradeTlsBoundedAsync(Stream stream, CancellationToken cancellationToken)
@@ -1597,7 +1594,7 @@ internal sealed class SmtpSessionState
     public bool CredentialRejected { get; set; }
     public string? HeloName { get; set; }
     public bool Extended { get; set; }
-    public Guid? AuthenticatedAccountId { get; set; }
+    public long? AuthenticatedAccountId { get; set; }
     public string? AuthenticatedUser { get; set; }
     public string? Sender { get; set; }
     public string BodyType { get; set; } = "7BIT";
@@ -1722,7 +1719,7 @@ internal sealed class SmtpConnection(Stream stream, TimeSpan timeout, long maxim
         using var performance = PerformanceTelemetry.Stage("smtp.upload", "wait");
         var directory = preparedDirectory ?? Path.GetTempPath();
         Directory.CreateDirectory(directory);
-        var path = Path.Combine(directory, $"mailserver-{Guid.NewGuid():N}.eml");
+        var path = Path.Combine(directory, $"mailserver-{System.Guid.NewGuid()}.eml");
         using var hash = System.Security.Cryptography.IncrementalHash.CreateHash(System.Security.Cryptography.HashAlgorithmName.SHA256);
         long size = 0;
         var writeBuffer = System.Buffers.ArrayPool<byte>.Shared.Rent(64 * 1024);

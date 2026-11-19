@@ -243,7 +243,7 @@ public sealed class RelayIdentity(IConfiguration configuration)
                 new System.Security.Cryptography.Oid("1.3.6.1.5.5.7.3.1"),
                 new System.Security.Cryptography.Oid("1.3.6.1.5.5.7.3.2")], true));
             using var cert = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddYears(5));
-            var temp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            var temp = path + "." + System.Guid.NewGuid().ToString() + ".tmp";
             File.WriteAllText(temp, cert.ExportCertificatePem() + Environment.NewLine +
                 key.ExportPkcs8PrivateKeyPem() + Environment.NewLine);
             SecurityAssetFiles.RestrictFile(temp);

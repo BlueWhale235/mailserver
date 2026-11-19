@@ -82,7 +82,7 @@ public sealed class QuarantineService(
     }
 
     public async Task<PagedQuarantineResult> SearchAsync(
-        Guid domainId,
+        long domainId,
         string? search,
         QuarantineStatus? status,
         int page,
@@ -116,7 +116,7 @@ public sealed class QuarantineService(
         return new PagedQuarantineResult(rows.Select(ToListItem).ToArray(), page, pageSize, total);
     }
 
-    public async Task<QuarantineDetailView> GetRawAsync(Guid domainId, Guid id, CancellationToken cancellationToken)
+    public async Task<QuarantineDetailView> GetRawAsync(long domainId, long id, CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         var record = await db.QuarantineRecords.AsNoTracking()
@@ -139,12 +139,12 @@ public sealed class QuarantineService(
         var previewLength = Math.Min(read, RawPreviewCharacterLimit);
         return new QuarantineDetailView(
             ToListItem(record),
-            $"quarantine-{record.Id:N}.eml",
+            $"quarantine-{record.Id}.eml",
             new string(buffer, 0, previewLength),
             truncated);
     }
 
-    public async Task<QuarantineRawDownload> OpenRawAsync(Guid domainId, Guid id, CancellationToken cancellationToken)
+    public async Task<QuarantineRawDownload> OpenRawAsync(long domainId, long id, CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         var record = await db.QuarantineRecords.AsNoTracking()
@@ -153,10 +153,10 @@ public sealed class QuarantineService(
             ?? throw new KeyNotFoundException("Quarantine record not found.");
 
         var content = await contentStore.OpenReadAsync(record.Message.ContentKey, cancellationToken);
-        return new QuarantineRawDownload($"quarantine-{record.Id:N}.eml", content);
+        return new QuarantineRawDownload($"quarantine-{record.Id}.eml", content);
     }
 
-    public async Task ReleaseAsync(Guid domainId, Guid id, string actor, string? note, CancellationToken cancellationToken)
+    public async Task ReleaseAsync(long domainId, long id, string actor, string? note, CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         await using var transaction = await MailboxWriteCoordinator.BeginAsync(db, [domainId], cancellationToken);
@@ -197,7 +197,7 @@ public sealed class QuarantineService(
             MailboxWriteAccounting.ApplyQuotaDelta(account, record.Message.Size);
             db.QuotaLedger.Add(new QuotaLedgerEntry
             {
-                IdempotencyKey = $"quarantine-release:add:{record.Id:N}:{item.Id:N}",
+                IdempotencyKey = $"quarantine-release:add:{record.Id}:{item.Id}",
                 AccountId = account.Id,
                 DomainId = account.DomainId,
                 MailboxMessageId = item.Id,
@@ -215,7 +215,7 @@ public sealed class QuarantineService(
         await transaction.CommitAsync(cancellationToken);
     }
 
-    public async Task DeleteAsync(Guid domainId, Guid id, string actor, string? note, CancellationToken cancellationToken)
+    public async Task DeleteAsync(long domainId, long id, string actor, string? note, CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         var record = await db.QuarantineRecords.SingleOrDefaultAsync(
@@ -288,7 +288,7 @@ public sealed class QuarantineService(
 
     private static async Task<MailAccount> ResolveActiveAccountAsync(
         MailDbContext db,
-        Guid domainId,
+        long domainId,
         string recipient,
         CancellationToken cancellationToken)
     {
@@ -350,7 +350,7 @@ public sealed class QuarantineService(
 
     private static string? NullIfWhiteSpace(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 
-    private sealed record ResolvedRecipient(string Recipient, Guid DomainId);
+    private sealed record ResolvedRecipient(string Recipient, long DomainId);
 }
 
 public sealed class PluginQuarantineStore(QuarantineService quarantine) : IPluginQuarantineStore
@@ -388,15 +388,15 @@ public sealed class PluginQuarantineStore(QuarantineService quarantine) : IPlugi
         CancellationToken cancellationToken) =>
         quarantine.ListPendingForPluginAsync(pluginId, domainName, cancellationToken);
 
-    public Task ReleaseAsync(string pluginId, Guid quarantineId, string? note, CancellationToken cancellationToken) =>
+    public Task ReleaseAsync(string pluginId, long quarantineId, string? note, CancellationToken cancellationToken) =>
         ReleaseOrDeleteAsync(pluginId, quarantineId, note, release: true, cancellationToken);
 
-    public Task DeleteAsync(string pluginId, Guid quarantineId, string? note, CancellationToken cancellationToken) =>
+    public Task DeleteAsync(string pluginId, long quarantineId, string? note, CancellationToken cancellationToken) =>
         ReleaseOrDeleteAsync(pluginId, quarantineId, note, release: false, cancellationToken);
 
     private async Task ReleaseOrDeleteAsync(
         string pluginId,
-        Guid quarantineId,
+        long quarantineId,
         string? note,
         bool release,
         CancellationToken cancellationToken)

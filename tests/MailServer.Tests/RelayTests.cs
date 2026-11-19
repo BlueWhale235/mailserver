@@ -52,7 +52,7 @@ public sealed class RelayTests
     [Fact]
     public async Task InboundLimitReturns421AndIdleTimeoutReleasesSlotWithoutCuttingActiveMail()
     {
-        var directory = Path.Combine(Path.GetTempPath(), "mailserver-relay-capacity-" + Guid.NewGuid().ToString("N"));
+        var directory = Path.Combine(Path.GetTempPath(), "mailserver-relay-capacity-" + MailServer.Domain.SnowflakeIds.NewId().ToString());
         Directory.CreateDirectory(directory);
         try
         {
@@ -67,7 +67,7 @@ public sealed class RelayTests
                 ["RelayNode:MaxInboundConnections"] = "5" // Local values cannot override the root.
             }).Build();
             var services = new ServiceCollection();
-            services.AddDbContextFactory<MailDbContext>(options => options.UseInMemoryDatabase(Guid.NewGuid().ToString("N")));
+            services.AddDbContextFactory<MailDbContext>(options => options.UseInMemoryDatabase(MailServer.Domain.SnowflakeIds.NewId().ToString()));
             await using var provider = services.BuildServiceProvider();
             var rootIdentity = new RelayIdentity(rootConfig);
             var settings = new RelaySettingsService(provider.GetRequiredService<IDbContextFactory<MailDbContext>>(), rootIdentity);
@@ -258,7 +258,7 @@ public sealed class RelayTests
     [Fact]
     public async Task PairingPinsBothIdentitiesAndConsumesOneTimePassword()
     {
-        var directory = Path.Combine(Path.GetTempPath(), "mailserver-relay-test-" + Guid.NewGuid().ToString("N"));
+        var directory = Path.Combine(Path.GetTempPath(), "mailserver-relay-test-" + MailServer.Domain.SnowflakeIds.NewId().ToString());
         Directory.CreateDirectory(directory);
         using var listener = new TcpListener(IPAddress.Loopback, 0);
         listener.Start();
@@ -269,7 +269,7 @@ public sealed class RelayTests
         var nodeConfig = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
             { ["SecurityAssets:RootPath"] = Path.Combine(directory, "node") }).Build();
         var services = new ServiceCollection();
-        services.AddDbContextFactory<MailDbContext>(options => options.UseInMemoryDatabase(Guid.NewGuid().ToString("N")));
+        services.AddDbContextFactory<MailDbContext>(options => options.UseInMemoryDatabase(MailServer.Domain.SnowflakeIds.NewId().ToString()));
         await using var provider = services.BuildServiceProvider();
         var rootIdentity = new RelayIdentity(rootConfig);
         var settings = new RelaySettingsService(provider.GetRequiredService<IDbContextFactory<MailDbContext>>(), rootIdentity);

@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Caching.Memory;
 using System.Net;
 using System.Net.Security;
 using System.Security.Cryptography;
@@ -52,8 +53,12 @@ public sealed class TransportSecurityPolicyService(
     LookupClient dns,
     IDbContextFactory<MailDbContext> dbFactory,
     IOptions<TransportSecurityOptions> options,
-    ILogger<TransportSecurityPolicyService> logger)
+    ILogger<TransportSecurityPolicyService> logger,
+    TlsEventWriter? eventWriter = null) : IDisposable
 {
+    private sealed record CachedPolicy(MtaStsPolicy? Policy);
+    private readonly MemoryCache _policies = new(new MemoryCacheOptions { SizeLimit = 4096 });
+    private readonly AsyncKeyedLock<string> _policyLoads = new();
     private readonly TransportSecurityOptions _options = options.Value;
     private readonly HashSet<IPAddress> _trustedResolvers = ParseResolvers(options.Value.TrustedDnssecResolvers);
     private readonly HttpClient _http = new(new HttpClientHandler { AllowAutoRedirect = false })
@@ -99,6 +104,22 @@ public sealed class TransportSecurityPolicyService(
     }
 
     public async Task<MtaStsPolicy?> ResolveMtaStsAsync(string domain, CancellationToken cancellationToken)
+    {
+        domain = domain.TrimEnd('.').ToLowerInvariant();
+        if (_policies.TryGetValue(domain, out CachedPolicy? cached)) return cached!.Policy;
+        using var lease = await _policyLoads.AcquireAsync(domain, cancellationToken);
+        if (_policies.TryGetValue(domain, out cached)) return cached!.Policy;
+        var policy = await ResolveMtaStsCoreAsync(domain, cancellationToken);
+        var lifetime = policy is null ? TimeSpan.FromSeconds(60) : policy.ExpiresAt - DateTimeOffset.UtcNow;
+        if (lifetime > TimeSpan.Zero)
+            _policies.Set(domain, new CachedPolicy(policy), new MemoryCacheEntryOptions { Size = 1,
+                AbsoluteExpirationRelativeToNow = lifetime < TimeSpan.FromMinutes(10) ? lifetime : TimeSpan.FromMinutes(10) });
+        return policy;
+    }
+
+    public void Dispose() { _policies.Dispose(); _http.Dispose(); }
+
+    private async Task<MtaStsPolicy?> ResolveMtaStsCoreAsync(string domain, CancellationToken cancellationToken)
     {
         var now = DateTimeOffset.UtcNow;
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
@@ -175,8 +196,7 @@ public sealed class TransportSecurityPolicyService(
         string? failureReason,
         CancellationToken cancellationToken)
     {
-        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
-        db.TlsDeliveryEvents.Add(new TlsDeliveryEvent
+        var entry = new TlsDeliveryEvent
         {
             PolicyDomain = domain,
             MxHost = mxHost,
@@ -184,8 +204,20 @@ public sealed class TransportSecurityPolicyService(
             PolicyString = policyString,
             ResultType = resultType,
             FailureReason = failureReason ?? string.Empty
-        });
-        await db.SaveChangesAsync(cancellationToken);
+        };
+        try
+        {
+            if (eventWriter?.IsRunning == true) { await eventWriter.EnqueueAsync(entry, cancellationToken); return; }
+            await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+            db.TlsDeliveryEvents.Add(entry);
+            await db.SaveChangesAsync(cancellationToken);
+        }
+        catch (Exception error)
+        {
+            // Reporting occurs after SMTP DATA may already have been accepted. A failed
+            // telemetry write must never turn that success into a duplicate delivery retry.
+            logger.LogWarning(error, "Unable to record TLS delivery event for {Domain}.", domain);
+        }
     }
 
     public async Task<IReadOnlyList<string>> ResolveTlsReportUrisAsync(

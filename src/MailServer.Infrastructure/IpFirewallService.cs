@@ -13,7 +13,66 @@ public sealed class IpFirewallService(
     ConfigurationVersionService? versions = null)
 {
     private sealed record ParsedNetwork(byte[] Address, int FullBytes, byte PartialMask);
-    private sealed record FirewallSnapshot(IReadOnlyList<(string Cidr, ParsedNetwork Network)> Rules, bool Oversized);
+    private sealed record FirewallSnapshot(NetworkIndex Index, bool Oversized);
+    // Path-compressed radix trees use at most two nodes per network, regardless of prefix length.
+    private sealed class NetworkIndex
+    {
+        private sealed class Node(byte[] address, int bits, string? rule)
+        {
+            internal readonly byte[] Address = address;
+            internal readonly int Bits = bits;
+            internal string? Rule = rule;
+            internal Node? Zero, One;
+        }
+        private readonly Dictionary<IPAddress, string> _hosts = [];
+        private Node? _ipv4, _ipv6;
+        private static int Bit(byte[] bytes, int bit) => (bytes[bit / 8] >> (7 - bit % 8)) & 1;
+        internal void Add(string cidr, ParsedNetwork network)
+        {
+            var bits = network.FullBytes * 8 + System.Numerics.BitOperations.PopCount(network.PartialMask);
+            if (bits == network.Address.Length * 8) { _hosts[new IPAddress(network.Address)] = cidr; return; }
+            if (network.Address.Length == 4) _ipv4 = Insert(_ipv4, network.Address, bits, cidr);
+            else _ipv6 = Insert(_ipv6, network.Address, bits, cidr);
+        }
+        private static Node Insert(Node? node, byte[] address, int bits, string rule)
+        {
+            if (node is null) return new(address, bits, rule);
+            var common = 0;
+            while (common < Math.Min(node.Bits, bits) && Bit(node.Address, common) == Bit(address, common)) common++;
+            if (common < node.Bits)
+            {
+                var parent = new Node(address, common, common == bits ? rule : null);
+                if (Bit(node.Address, common) == 0) parent.Zero = node; else parent.One = node;
+                if (common < bits)
+                {
+                    if (Bit(address, common) == 0) parent.Zero = new(address, bits, rule);
+                    else parent.One = new(address, bits, rule);
+                }
+                return parent;
+            }
+            if (bits == node.Bits) node.Rule = rule;
+            else if (Bit(address, node.Bits) == 0) node.Zero = Insert(node.Zero, address, bits, rule);
+            else node.One = Insert(node.One, address, bits, rule);
+            return node;
+        }
+        internal string? Match(IPAddress address, byte[] bytes)
+        {
+            if (_hosts.TryGetValue(address, out var exact)) return exact;
+            var node = bytes.Length == 4 ? _ipv4 : _ipv6;
+            var compared = 0;
+            while (node is not null)
+            {
+                while (compared < node.Bits)
+                {
+                    if (Bit(bytes, compared) != Bit(node.Address, compared)) return null;
+                    compared++;
+                }
+                if (node.Rule is not null) return node.Rule;
+                node = Bit(bytes, node.Bits) == 0 ? node.Zero : node.One;
+            }
+            return null;
+        }
+    }
 
     public async Task<bool> IsBlockedAsync(string remoteAddress, CancellationToken cancellationToken)
     {
@@ -56,13 +115,14 @@ public sealed class IpFirewallService(
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         var count = await db.FirewallRules.AsNoTracking().CountAsync(x => x.IsEnabled, cancellationToken);
-        var estimate = 256L + count * 160L;
+        var estimate = 256L + count * 384L;
         if (cache is not null && estimate > cache.Options.MaximumEntryBytes)
-            return (new FirewallSnapshot([], true), 256);
+            return (new FirewallSnapshot(new NetworkIndex(), true), 256);
         var cidrs = await db.FirewallRules.AsNoTracking().Where(x => x.IsEnabled)
             .OrderBy(x => x.Id).Select(x => x.Cidr).ToListAsync(cancellationToken);
-        var rules = cidrs.Select(x => (x, ParseNetwork(x))).ToArray();
-        return (new FirewallSnapshot(rules, false), estimate);
+        var index = new NetworkIndex();
+        foreach (var cidr in cidrs) index.Add(cidr, ParseNetwork(cidr));
+        return (new FirewallSnapshot(index, false), estimate);
     }
 
     private async Task<bool> IsBlockedBatchedAsync(IPAddress address, byte[] addressBytes, CancellationToken cancellationToken)
@@ -98,13 +158,10 @@ public sealed class IpFirewallService(
 
     private bool MatchesSnapshot(FirewallSnapshot snapshot, IPAddress address, byte[] addressBytes)
     {
-        foreach (var rule in snapshot.Rules)
-        {
-            if (!Matches(rule.Network, addressBytes)) continue;
-            logger.LogWarning("Connection from {RemoteAddress} was blocked by firewall rule {Rule}.", address, rule.Cidr);
-            return true;
-        }
-        return false;
+        var rule = snapshot.Index.Match(address, addressBytes);
+        if (rule is null) return false;
+        logger.LogWarning("Connection from {RemoteAddress} was blocked by firewall rule {Rule}.", address, rule);
+        return true;
     }
 
     private static ParsedNetwork ParseNetwork(string cidr)

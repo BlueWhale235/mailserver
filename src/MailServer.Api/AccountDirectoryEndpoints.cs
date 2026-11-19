@@ -17,10 +17,10 @@ public static class AccountDirectoryEndpoints
             var scope = new PermittedDomainScope(accounts.AllDomains || aliases.AllDomains, accounts.DomainIds.Concat(aliases.DomainIds).ToHashSet());
             return Results.Ok(await administration.SearchPermissionDomainsAsync(query, page ?? 1, 20, scope, ct));
         });
-        var group = api.MapGroup("/domains/{id:guid}/account-directory");
+        var group = api.MapGroup("/domains/{id:long}/account-directory");
         group.AddEndpointFilter(async (context, next) =>
         {
-            var id = Guid.Parse(context.HttpContext.Request.RouteValues["id"]!.ToString()!);
+            var id = long.Parse(context.HttpContext.Request.RouteValues["id"]!.ToString()!);
             var snapshot = await context.HttpContext.RequestServices.GetRequiredService<PermissionService>()
                 .GetSnapshotAsync(context.HttpContext.User, context.HttpContext.RequestAborted);
             context.HttpContext.Items["directory-permissions"] = snapshot;
@@ -29,7 +29,7 @@ public static class AccountDirectoryEndpoints
             try { return await next(context); }
             catch (KeyNotFoundException ex) { return Problem(context.HttpContext, 404, ex.Message); }
         });
-        group.MapGet("", async (Guid id, HttpContext http, AccountDirectoryService directory, CancellationToken ct) =>
+        group.MapGet("", async (long id, HttpContext http, AccountDirectoryService directory, CancellationToken ct) =>
         {
             var p = Permissions(http);
             return Results.Ok(new {
@@ -41,7 +41,7 @@ public static class AccountDirectoryEndpoints
                 canManageAliases = p.Has(PermissionCodes.DomainAliasManage, id)
             });
         });
-        group.MapGet("/search", async (Guid id, string? query, bool? isEnabled, int? page, int? pageSize,
+        group.MapGet("/search", async (long id, string? query, bool? isEnabled, int? page, int? pageSize,
             HttpContext http, AccountDirectoryService directory, CancellationToken ct) =>
         {
             if (!ValidPage(page, pageSize)) return Invalid(http, "page", "页码必须大于零，每页数量必须在 5 到 100 之间。");
@@ -49,7 +49,7 @@ public static class AccountDirectoryEndpoints
             return Results.Ok(await directory.SearchAsync(id, query, isEnabled, page ?? 1, pageSize ?? 20,
                 p.Has(PermissionCodes.DomainAccountRead, id), p.Has(PermissionCodes.DomainAliasRead, id), null, ct));
         });
-        group.MapGet("/accounts/{accountId:guid}", async (Guid id, Guid accountId,
+        group.MapGet("/accounts/{accountId:long}", async (long id, long accountId,
             HttpContext http, AccountDirectoryService directory, CancellationToken ct) =>
         {
             var p = Permissions(http);
@@ -57,14 +57,14 @@ public static class AccountDirectoryEndpoints
                 p.Has(PermissionCodes.DomainAccountRead, id), p.Has(PermissionCodes.DomainAliasRead, id), accountId, ct);
             return result.Items.Count == 0 ? Problem(http, 404, "邮箱账号不存在。") : Results.Ok(result.Items[0]);
         });
-        group.MapGet("/aliases", async (Guid id, Guid? accountId, bool? pending, string? query, int? page, int? pageSize,
+        group.MapGet("/aliases", async (long id, long? accountId, bool? pending, string? query, int? page, int? pageSize,
             HttpContext http, AccountDirectoryService directory, CancellationToken ct) =>
         {
             if (!Permissions(http).Has(PermissionCodes.DomainAliasRead, id)) return Results.Forbid();
             if (!ValidPage(page, pageSize)) return Invalid(http, "page", "页码必须大于零，每页数量必须在 5 到 100 之间。");
             return Results.Ok(await directory.AliasesAsync(id, accountId, pending == true, query, page ?? 1, pageSize ?? 20, ct));
         });
-        group.MapGet("/targets", async (Guid id, string? query, int? page, HttpContext http,
+        group.MapGet("/targets", async (long id, string? query, int? page, HttpContext http,
             AccountDirectoryService directory, IDbContextFactory<MailDbContext> factory, CancellationToken ct) =>
         {
             if (!Permissions(http).Has(PermissionCodes.DomainAliasRead, id)) return Results.Forbid();

@@ -91,9 +91,9 @@ public sealed class PluginSettingsCacheTests
     }
     private sealed class Fixture : IAsyncDisposable
     {
-        private readonly string _path=Path.Combine(Path.GetTempPath(),$"plugin-cache-{Guid.NewGuid():N}.db");
+        private readonly string _path=Path.Combine(Path.GetTempPath(),$"plugin-cache-{MailServer.Domain.SnowflakeIds.NewId()}.db");
         public readonly Counter Counter=new(); public readonly IDataProtectionProvider Protection=new EphemeralDataProtectionProvider(); public IDbContextFactory<MailDbContext> Factory { get; }
-        public Fixture(){SQLitePCL.raw.SetProvider(new SQLitePCL.SQLite3Provider_e_sqlite3());Factory=new PooledDbContextFactory<MailDbContext>(new DbContextOptionsBuilder<MailDbContext>().UseSqlite($"Data Source={_path};Pooling=False").AddInterceptors(Counter).Options);}
+        public Fixture(){SQLitePCL.raw.SetProvider(new SQLitePCL.SQLite3Provider_e_sqlite3());Factory=new TestMailDbContextFactory(new DbContextOptionsBuilder<MailDbContext>().UseSqlite($"Data Source={_path};Pooling=False").AddInterceptors(Counter).Options);}
         public async Task Initialize(){await using var db=await Factory.CreateDbContextAsync();await db.Database.EnsureCreatedAsync();}
         public ValueTask DisposeAsync(){File.Delete(_path);return ValueTask.CompletedTask;}
     }

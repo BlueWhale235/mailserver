@@ -14,10 +14,10 @@ public sealed class OverviewTrafficQueryTests
     [Fact]
     public async Task TrafficUsesAtMostFourQueriesAndPreservesFailureBuckets()
     {
-        var path = Path.Combine(Path.GetTempPath(), $"mailserver-traffic-query-{Guid.NewGuid():N}.db");
+        var path = Path.Combine(Path.GetTempPath(), $"mailserver-traffic-query-{MailServer.Domain.SnowflakeIds.NewId()}.db");
         var counter = new QueryCounter();
         SQLitePCL.raw.SetProvider(new SQLitePCL.SQLite3Provider_e_sqlite3());
-        var factory = new PooledDbContextFactory<MailDbContext>(new DbContextOptionsBuilder<MailDbContext>()
+        var factory = new TestMailDbContextFactory(new DbContextOptionsBuilder<MailDbContext>()
             .UseSqlite($"Data Source={path};Pooling=False").AddInterceptors(counter).Options);
         var service = new AdminApplicationService(factory, null!, null!, null!, null!, null!, null!, null!, null!);
         try
